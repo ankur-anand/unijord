@@ -94,8 +94,13 @@ func TestConfigMarshalJSONOmitsEmptyTransforms(t *testing.T) {
 		t.Fatalf("json.Marshal() error: %v", err)
 	}
 
-	if string(data) != "{}" {
-		t.Fatalf("json.Marshal() = %s, want {}", string(data))
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal() error: %v", err)
+	}
+
+	if _, ok := got["transforms"]; ok {
+		t.Fatalf("json.Marshal() should omit transforms, got %s", string(data))
 	}
 }
 

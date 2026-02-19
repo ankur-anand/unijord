@@ -56,13 +56,24 @@ type TransactionInfo struct {
 	DataCollectionOrder int `json:"data_collection_order"`
 }
 
+type SourceMetadata struct {
+	Version       string `json:"version"`
+	ConnectorName string `json:"connector_name"`
+	TableName     string `json:"table_name"`
+	RelSchema     string `json:"rel_schema"`
+	DBName        string `json:"db_name"`
+	LSN           uint64 `json:"lsn"`
+	TxID          uint64 `json:"tx_id"`
+	CommitTimeUS  int64  `json:"commit_time_us"`
+	IsSnapshot    string `json:"is_snapshot"`
+}
+
 type EnvelopePayload struct {
 	Before      map[string]any                `json:"before"`
 	After       map[string]any                `json:"after"`
-	Source      map[string]any                `json:"source"`
+	Source      SourceMetadata                `json:"source"`
 	Op          Operation                     `json:"op"`
-	TsMS        int64                         `json:"ts_m_sec"`
-	TsUSec      int64                         `json:"ts_u_sec,omitempty"`
+	TsUSec      int64                         `json:"ts_u_sec"`
 	ColumnTypes map[string]ColumnTypeMetadata `json:"column_types,omitempty"`
 	Transaction *TransactionInfo              `json:"transaction,omitempty"`
 }
