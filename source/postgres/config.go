@@ -13,6 +13,8 @@ type Config struct {
 	// in s3/azure prefix
 	Name       string           `json:"name" toml:"name" yaml:"name"`
 	Connection ConnectionConfig `json:"connection" toml:"connection" yaml:"connection"`
+	Toast      ToastConfig      `json:"toast" toml:"toast" yaml:"toast"`
+	Tables     FilterConfig     `json:"tables" toml:"tables" yaml:"tables"`
 
 	Transforms []ColumnTransform `json:"transforms,omitempty" yaml:"transforms,omitempty" toml:"transforms,omitempty"`
 }
