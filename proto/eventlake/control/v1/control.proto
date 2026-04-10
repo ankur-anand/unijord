@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package eventlake.control.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/ankur-anand/unijord/gen/go/eventlake/control/v1;controlv1";
+
+service ControlPlaneService {
+  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse) {
+    option (google.api.http) = {
+      post: "/api/namespaces"
+      body: "*"
+    };
+  }
+
+  rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse) {
+    option (google.api.http) = {
+      get: "/api/namespaces/{name}"
+    };
+  }
+
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse) {
+    option (google.api.http) = {
+      get: "/api/namespaces"
+    };
+  }
+
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse) {
+    option (google.api.http) = {
+      delete: "/api/namespaces/{name}"
+    };
+  }
+
+  rpc Overview(OverviewRequest) returns (OverviewResponse) {
+    option (google.api.http) = {
+      get: "/api/overview"
+    };
+  }
+
+  rpc Health(HealthRequest) returns (HealthResponse) {
+    option (google.api.http) = {
+      get: "/api/health"
+    };
+  }
+}
+
+message Namespace {
+  string name = 1;
+  string prefix = 2;
+  int32 partitions = 3;
+  string retention_policy = 4;
+  uint32 memtable_size_mb = 5;
+  uint32 flush_interval_ms = 6;
+}
+
+message CreateNamespaceRequest {
+  string name = 1;
+  int32 partitions = 2;
+  string retention_policy = 3;
+  uint32 memtable_size_mb = 4;
+  uint32 flush_interval_ms = 5;
+}
+
+message CreateNamespaceResponse {
+  Namespace namespace = 1;
+}
+
+message GetNamespaceRequest {
+  string name = 1;
+}
+
+message GetNamespaceResponse {
+  Namespace namespace = 1;
+}
+
+message ListNamespacesRequest {}
+
+message ListNamespacesResponse {
+  repeated Namespace namespaces = 1;
+}
+
+message DeleteNamespaceRequest {
+  string name = 1;
+}
+
+message DeleteNamespaceResponse {
+  string name = 1;
+}
+
+message OverviewRequest {}
+
+message OverviewResponse {
+  uint32 active_namespaces = 1;
+  uint32 active_partitions = 2;
+  uint64 total_stored_bytes = 3;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string status = 2;
+  string mode = 3;
+}

@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package eventlake.writer.v1;
+
+option go_package = "github.com/ankur-anand/unijord/gen/go/eventlake/writer/v1;writerv1";
+
+// WriterService is an internal-only RPC surface implemented by writer pods.
+// By the time a request reaches this service, namespace and partition routing
+// have already been resolved by the caller.
+service WriterService {
+  rpc Append(AppendRequest) returns (AppendResponse);
+  rpc AppendBatch(AppendBatchRequest) returns (AppendBatchResponse);
+}
+
+message AppendRequest {
+  bytes value = 1;
+}
+
+message AppendResponse {
+  string event_id = 1;
+}
+
+message AppendBatchItem {
+  bytes value = 1;
+}
+
+message AppendBatchRequest {
+  repeated AppendBatchItem events = 1;
+}
+
+message AppendBatchResult {
+  string event_id = 1;
+}
+
+message AppendBatchResponse {
+  repeated AppendBatchResult results = 1;
+}
