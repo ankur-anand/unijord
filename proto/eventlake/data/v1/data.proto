@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package eventlake.data.v1;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/ankur-anand/unijord/gen/go/eventlake/data/v1;datav1";
+
+service EventService {
+  rpc Produce(ProduceRequest) returns (ProduceResponse) {
+    option (google.api.http) = {
+      post: "/api/namespaces/{namespace}/produce"
+      body: "*"
+    };
+  }
+
+  rpc ProduceBatch(ProduceBatchRequest) returns (ProduceBatchResponse) {
+    option (google.api.http) = {
+      post: "/api/namespaces/{namespace}/produce/batch"
+      body: "*"
+    };
+  }
+
+  rpc Consume(ConsumeRequest) returns (ConsumeResponse) {
+    option (google.api.http) = {
+      get: "/api/namespaces/{namespace}/consume"
+    };
+  }
+
+  rpc Tail(TailRequest) returns (stream TailResponse) {
+    option (google.api.http) = {
+      get: "/api/namespaces/{namespace}/tail"
+    };
+  }
+
+  rpc Flush(FlushRequest) returns (FlushResponse) {
+    option (google.api.http) = {
+      post: "/api/namespaces/{namespace}/flush"
+      body: "*"
+    };
+  }
+}
+
+message Event {
+  // 24-char hex encoding of the 12-byte time-ordered Event Lake key.
+  string event_id = 1;
+  string namespace = 2;
+  int32 partition = 3;
+  uint64 timestamp_ms = 4;
+  bytes value = 5;
+}
+
+message ProduceRequest {
+  string namespace = 1;
+  bytes value = 2;
+  string route_key = 3;
+  optional int32 partition = 4;
+}
+
+message ProduceResponse {
+  string event_id = 1;
+  int32 partition = 2;
+}
+
+message ProduceBatchItem {
+  bytes value = 1;
+  string route_key = 2;
+  optional int32 partition = 3;
+}
+
+message ProduceBatchRequest {
+  string namespace = 1;
+  repeated ProduceBatchItem events = 2;
+}
+
+message ProduceBatchResult {
+  string event_id = 1;
+  int32 partition = 2;
+}
+
+message ProduceBatchResponse {
+  repeated ProduceBatchResult results = 1;
+}
+
+message ConsumeRequest {
+  string namespace = 1;
+  string start_after = 2;
+  int32 limit = 3;
+  optional int32 partition = 4;
+}
+
+message ConsumeResponse {
+  repeated Event events = 1;
+  string next_cursor = 2;
+}
+
+message TailRequest {
+  string namespace = 1;
+  string start_after = 2;
+  optional int32 partition = 3;
+}
+
+message TailResponse {
+  Event event = 1;
+}
+
+message FlushRequest {
+  string namespace = 1;
+  optional int32 partition = 2;
+}
+
+message FlushResponse {
+  uint32 flushed_partitions = 1;
+}

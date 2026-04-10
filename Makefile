@@ -1,5 +1,5 @@
 BUF ?= buf
-PROTO_PATH ?= proto/eventlake/v1
+PROTO_PATH ?= proto/eventlake
 
 .PHONY: proto proto-build proto-gen proto-lint
 
