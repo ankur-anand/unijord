@@ -19,8 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	WriterService_Append_FullMethodName      = "/eventlake.writer.v1.WriterService/Append"
-	WriterService_AppendBatch_FullMethodName = "/eventlake.writer.v1.WriterService/AppendBatch"
+	WriterService_Append_FullMethodName       = "/eventlake.writer.v1.WriterService/Append"
+	WriterService_AppendStream_FullMethodName = "/eventlake.writer.v1.WriterService/AppendStream"
 )
 
 // WriterServiceClient is the client API for WriterService service.
@@ -32,7 +32,7 @@ const (
 // have already been resolved by the caller.
 type WriterServiceClient interface {
 	Append(ctx context.Context, in *AppendRequest, opts ...grpc.CallOption) (*AppendResponse, error)
-	AppendBatch(ctx context.Context, in *AppendBatchRequest, opts ...grpc.CallOption) (*AppendBatchResponse, error)
+	AppendStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AppendStreamRequest, AppendStreamResponse], error)
 }
 
 type writerServiceClient struct {
@@ -53,15 +53,18 @@ func (c *writerServiceClient) Append(ctx context.Context, in *AppendRequest, opt
 	return out, nil
 }
 
-func (c *writerServiceClient) AppendBatch(ctx context.Context, in *AppendBatchRequest, opts ...grpc.CallOption) (*AppendBatchResponse, error) {
+func (c *writerServiceClient) AppendStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AppendStreamRequest, AppendStreamResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AppendBatchResponse)
-	err := c.cc.Invoke(ctx, WriterService_AppendBatch_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &WriterService_ServiceDesc.Streams[0], WriterService_AppendStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[AppendStreamRequest, AppendStreamResponse]{ClientStream: stream}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type WriterService_AppendStreamClient = grpc.BidiStreamingClient[AppendStreamRequest, AppendStreamResponse]
 
 // WriterServiceServer is the server API for WriterService service.
 // All implementations should embed UnimplementedWriterServiceServer
@@ -72,7 +75,7 @@ func (c *writerServiceClient) AppendBatch(ctx context.Context, in *AppendBatchRe
 // have already been resolved by the caller.
 type WriterServiceServer interface {
 	Append(context.Context, *AppendRequest) (*AppendResponse, error)
-	AppendBatch(context.Context, *AppendBatchRequest) (*AppendBatchResponse, error)
+	AppendStream(grpc.BidiStreamingServer[AppendStreamRequest, AppendStreamResponse]) error
 }
 
 // UnimplementedWriterServiceServer should be embedded to have
@@ -85,8 +88,8 @@ type UnimplementedWriterServiceServer struct{}
 func (UnimplementedWriterServiceServer) Append(context.Context, *AppendRequest) (*AppendResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Append not implemented")
 }
-func (UnimplementedWriterServiceServer) AppendBatch(context.Context, *AppendBatchRequest) (*AppendBatchResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method AppendBatch not implemented")
+func (UnimplementedWriterServiceServer) AppendStream(grpc.BidiStreamingServer[AppendStreamRequest, AppendStreamResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method AppendStream not implemented")
 }
 func (UnimplementedWriterServiceServer) testEmbeddedByValue() {}
 
@@ -126,23 +129,12 @@ func _WriterService_Append_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
-func _WriterService_AppendBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AppendBatchRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(WriterServiceServer).AppendBatch(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: WriterService_AppendBatch_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(WriterServiceServer).AppendBatch(ctx, req.(*AppendBatchRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+func _WriterService_AppendStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(WriterServiceServer).AppendStream(&grpc.GenericServerStream[AppendStreamRequest, AppendStreamResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type WriterService_AppendStreamServer = grpc.BidiStreamingServer[AppendStreamRequest, AppendStreamResponse]
 
 // WriterService_ServiceDesc is the grpc.ServiceDesc for WriterService service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -155,11 +147,14 @@ var WriterService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Append",
 			Handler:    _WriterService_Append_Handler,
 		},
+	},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "AppendBatch",
-			Handler:    _WriterService_AppendBatch_Handler,
+			StreamName:    "AppendStream",
+			Handler:       _WriterService_AppendStream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "eventlake/writer/v1/writer.proto",
 }

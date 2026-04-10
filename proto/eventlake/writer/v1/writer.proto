@@ -9,7 +9,7 @@ option go_package = "github.com/ankur-anand/unijord/gen/go/eventlake/writer/v1;w
 // have already been resolved by the caller.
 service WriterService {
   rpc Append(AppendRequest) returns (AppendResponse);
-  rpc AppendBatch(AppendBatchRequest) returns (AppendBatchResponse);
+  rpc AppendStream(stream AppendStreamRequest) returns (stream AppendStreamResponse);
 }
 
 message AppendRequest {
@@ -17,21 +17,13 @@ message AppendRequest {
 }
 
 message AppendResponse {
-  string event_id = 1;
+  uint64 lsn = 1;
 }
 
-message AppendBatchItem {
+message AppendStreamRequest {
   bytes value = 1;
 }
 
-message AppendBatchRequest {
-  repeated AppendBatchItem events = 1;
-}
-
-message AppendBatchResult {
-  string event_id = 1;
-}
-
-message AppendBatchResponse {
-  repeated AppendBatchResult results = 1;
+message AppendStreamResponse {
+  uint64 lsn = 1;
 }
