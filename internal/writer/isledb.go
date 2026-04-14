@@ -16,11 +16,11 @@ import (
 	"github.com/ankur-anand/isledb/manifest"
 	"github.com/ankur-anand/unijord/internal/config"
 	"github.com/ankur-anand/walfs"
+	_ "gocloud.dev/blob/s3blob"
 )
 
 const defaultWriterMaxImmutableMemtables = 4
 
-// IsleAppender is the production writer backend backed by a local WAL and IsleDB.
 type IsleAppender struct {
 	mu sync.Mutex
 
