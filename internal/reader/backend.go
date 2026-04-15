@@ -4,9 +4,10 @@ import "context"
 
 // Event is the internal representation returned by the reader backend.
 type Event struct {
-	Partition int32
-	LSN       uint64
-	Value     []byte
+	Partition   int32
+	LSN         uint64
+	TimestampMS uint64
+	Value       []byte
 }
 
 // PartitionHeadResult is the current visible head for one partition.
@@ -29,6 +30,7 @@ type Backend interface {
 	ListPartitionHeads(ctx context.Context) ([]PartitionHeadResult, error)
 	GetPartitionHead(ctx context.Context, partition int32) (PartitionHeadResult, error)
 	ConsumePartition(ctx context.Context, partition int32, startAfterLSN uint64, limit uint32) (ConsumeResult, error)
+	ConsumePartitionFromTimestamp(ctx context.Context, partition int32, timestampMS uint64, limit uint32) (ConsumeResult, error)
 	TailPartition(ctx context.Context, partition int32, startAfterLSN *uint64, handler func(Event) error) error
 	Close() error
 }

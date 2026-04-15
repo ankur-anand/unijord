@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ReaderService_ListPartitionHeads_FullMethodName = "/eventlake.reader.v1.ReaderService/ListPartitionHeads"
-	ReaderService_GetPartitionHead_FullMethodName   = "/eventlake.reader.v1.ReaderService/GetPartitionHead"
-	ReaderService_ConsumePartition_FullMethodName   = "/eventlake.reader.v1.ReaderService/ConsumePartition"
-	ReaderService_TailPartition_FullMethodName      = "/eventlake.reader.v1.ReaderService/TailPartition"
+	ReaderService_ListPartitionHeads_FullMethodName            = "/eventlake.reader.v1.ReaderService/ListPartitionHeads"
+	ReaderService_GetPartitionHead_FullMethodName              = "/eventlake.reader.v1.ReaderService/GetPartitionHead"
+	ReaderService_ConsumePartition_FullMethodName              = "/eventlake.reader.v1.ReaderService/ConsumePartition"
+	ReaderService_ConsumePartitionFromTimestamp_FullMethodName = "/eventlake.reader.v1.ReaderService/ConsumePartitionFromTimestamp"
+	ReaderService_TailPartition_FullMethodName                 = "/eventlake.reader.v1.ReaderService/TailPartition"
 )
 
 // ReaderServiceClient is the client API for ReaderService service.
@@ -32,6 +33,7 @@ type ReaderServiceClient interface {
 	ListPartitionHeads(ctx context.Context, in *ListPartitionHeadsRequest, opts ...grpc.CallOption) (*ListPartitionHeadsResponse, error)
 	GetPartitionHead(ctx context.Context, in *GetPartitionHeadRequest, opts ...grpc.CallOption) (*GetPartitionHeadResponse, error)
 	ConsumePartition(ctx context.Context, in *ConsumePartitionRequest, opts ...grpc.CallOption) (*ConsumePartitionResponse, error)
+	ConsumePartitionFromTimestamp(ctx context.Context, in *ConsumePartitionFromTimestampRequest, opts ...grpc.CallOption) (*ConsumePartitionResponse, error)
 	TailPartition(ctx context.Context, in *TailPartitionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TailPartitionResponse], error)
 }
 
@@ -73,6 +75,16 @@ func (c *readerServiceClient) ConsumePartition(ctx context.Context, in *ConsumeP
 	return out, nil
 }
 
+func (c *readerServiceClient) ConsumePartitionFromTimestamp(ctx context.Context, in *ConsumePartitionFromTimestampRequest, opts ...grpc.CallOption) (*ConsumePartitionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsumePartitionResponse)
+	err := c.cc.Invoke(ctx, ReaderService_ConsumePartitionFromTimestamp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *readerServiceClient) TailPartition(ctx context.Context, in *TailPartitionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TailPartitionResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &ReaderService_ServiceDesc.Streams[0], ReaderService_TailPartition_FullMethodName, cOpts...)
@@ -99,6 +111,7 @@ type ReaderServiceServer interface {
 	ListPartitionHeads(context.Context, *ListPartitionHeadsRequest) (*ListPartitionHeadsResponse, error)
 	GetPartitionHead(context.Context, *GetPartitionHeadRequest) (*GetPartitionHeadResponse, error)
 	ConsumePartition(context.Context, *ConsumePartitionRequest) (*ConsumePartitionResponse, error)
+	ConsumePartitionFromTimestamp(context.Context, *ConsumePartitionFromTimestampRequest) (*ConsumePartitionResponse, error)
 	TailPartition(*TailPartitionRequest, grpc.ServerStreamingServer[TailPartitionResponse]) error
 }
 
@@ -117,6 +130,9 @@ func (UnimplementedReaderServiceServer) GetPartitionHead(context.Context, *GetPa
 }
 func (UnimplementedReaderServiceServer) ConsumePartition(context.Context, *ConsumePartitionRequest) (*ConsumePartitionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ConsumePartition not implemented")
+}
+func (UnimplementedReaderServiceServer) ConsumePartitionFromTimestamp(context.Context, *ConsumePartitionFromTimestampRequest) (*ConsumePartitionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ConsumePartitionFromTimestamp not implemented")
 }
 func (UnimplementedReaderServiceServer) TailPartition(*TailPartitionRequest, grpc.ServerStreamingServer[TailPartitionResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method TailPartition not implemented")
@@ -195,6 +211,24 @@ func _ReaderService_ConsumePartition_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ReaderService_ConsumePartitionFromTimestamp_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsumePartitionFromTimestampRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReaderServiceServer).ConsumePartitionFromTimestamp(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReaderService_ConsumePartitionFromTimestamp_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReaderServiceServer).ConsumePartitionFromTimestamp(ctx, req.(*ConsumePartitionFromTimestampRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ReaderService_TailPartition_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(TailPartitionRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -224,6 +258,10 @@ var ReaderService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConsumePartition",
 			Handler:    _ReaderService_ConsumePartition_Handler,
+		},
+		{
+			MethodName: "ConsumePartitionFromTimestamp",
+			Handler:    _ReaderService_ConsumePartitionFromTimestamp_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

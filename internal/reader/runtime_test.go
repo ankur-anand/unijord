@@ -86,7 +86,7 @@ func TestGatewayMuxConsumePartition(t *testing.T) {
 	service, err := NewService(&backendStub{
 		consumeResult: ConsumeResult{
 			Events: []Event{
-				{Partition: 0, LSN: 11, Value: []byte("hello")},
+				{Partition: 0, LSN: 11, TimestampMS: 1011, Value: []byte("hello")},
 			},
 			NextStartAfterLSN:  11,
 			HeadLSN:            15,
@@ -115,6 +115,44 @@ func TestGatewayMuxConsumePartition(t *testing.T) {
 	}
 	if !strings.Contains(body, `"oldestAvailableLsn":"4"`) {
 		t.Fatalf("body = %q, want oldestAvailableLsn field", body)
+	}
+	if !strings.Contains(body, `"timestampMs":"1011"`) {
+		t.Fatalf("body = %q, want timestampMs field", body)
+	}
+}
+
+func TestGatewayMuxConsumePartitionFromTimestamp(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(&backendStub{
+		consumeFromTimestampResult: ConsumeResult{
+			Events: []Event{
+				{Partition: 0, LSN: 12, TimestampMS: 1012, Value: []byte("world")},
+			},
+			NextStartAfterLSN:  12,
+			HeadLSN:            15,
+			OldestAvailableLSN: 4,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	mux := newGatewayTestMux(t, service)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/partitions/0/consume-from-timestamp?timestamp_ms=1000&limit=1", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, `"nextStartAfterLsn":"12"`) {
+		t.Fatalf("body = %q, want nextStartAfterLsn field", body)
+	}
+	if !strings.Contains(body, `"timestampMs":"1012"`) {
+		t.Fatalf("body = %q, want timestampMs field", body)
 	}
 }
 

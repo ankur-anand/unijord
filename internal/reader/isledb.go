@@ -13,6 +13,7 @@ import (
 	"github.com/ankur-anand/isledb"
 	"github.com/ankur-anand/isledb/blobstore"
 	"github.com/ankur-anand/unijord/internal/config"
+	"github.com/ankur-anand/unijord/internal/recordbin"
 	_ "gocloud.dev/blob/s3blob"
 )
 
@@ -97,13 +98,13 @@ func openPartitionController(ctx context.Context, cfg config.ReaderConfig, parti
 	defer initialView.Close()
 
 	controller := &partitionController{
-		partition:     partition,
-		store:         store,
-		coord:         coord,
-		pollInterval:  cfg.EffectiveManifestPollInterval(),
-		headLSN:       viewHeadLSN(initialView),
-		notify:        make(chan struct{}),
-		stopCh:        make(chan struct{}),
+		partition:    partition,
+		store:        store,
+		coord:        coord,
+		pollInterval: cfg.EffectiveManifestPollInterval(),
+		headLSN:      viewHeadLSN(initialView),
+		notify:       make(chan struct{}),
+		stopCh:       make(chan struct{}),
 	}
 	controller.wg.Add(1)
 	go controller.refreshLoop()
@@ -117,6 +118,14 @@ func (b *IsleBackend) ConsumePartition(ctx context.Context, partition int32, sta
 		return ConsumeResult{}, err
 	}
 	return controller.consume(ctx, startAfterLSN, limit)
+}
+
+func (b *IsleBackend) ConsumePartitionFromTimestamp(ctx context.Context, partition int32, timestampMS uint64, limit uint32) (ConsumeResult, error) {
+	controller, err := b.partition(partition)
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	return controller.consumeFromTimestamp(ctx, timestampMS, limit)
 }
 
 func (b *IsleBackend) ListPartitionHeads(ctx context.Context) ([]PartitionHeadResult, error) {
@@ -223,6 +232,47 @@ func (c *partitionController) consume(ctx context.Context, startAfterLSN uint64,
 	}
 	defer view.Close()
 
+	return c.consumeFromView(ctx, view, startAfterLSN, limit)
+}
+
+func (c *partitionController) consumeFromTimestamp(ctx context.Context, timestampMS uint64, limit uint32) (ConsumeResult, error) {
+	if limit == 0 {
+		limit = defaultConsumeLimit
+	}
+
+	view := c.coord.Current()
+	if view == nil {
+		return ConsumeResult{}, context.Canceled
+	}
+	defer view.Close()
+
+	headLSN := viewHeadLSN(view)
+	oldestAvailableLSN := viewOldestAvailableLSN(view)
+	result := ConsumeResult{
+		NextStartAfterLSN:  headLSN,
+		HeadLSN:            headLSN,
+		OldestAvailableLSN: oldestAvailableLSN,
+	}
+	if headLSN == 0 || oldestAvailableLSN == 0 || oldestAvailableLSN > headLSN {
+		return result, nil
+	}
+
+	startLSN, found, err := c.findFirstLSNAtOrAfterTimestamp(ctx, view, oldestAvailableLSN, headLSN, timestampMS)
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	if !found {
+		return result, nil
+	}
+
+	// Once we have the first matching LSN, the normal catch-up path should
+	// start immediately before it, regardless of whether it is also the oldest
+	// currently visible record.
+	startAfterLSN := startLSN - 1
+	return c.consumeFromView(ctx, view, startAfterLSN, limit)
+}
+
+func (c *partitionController) consumeFromView(ctx context.Context, view isledb.View, startAfterLSN uint64, limit uint32) (ConsumeResult, error) {
 	headLSN := viewHeadLSN(view)
 	result := ConsumeResult{
 		NextStartAfterLSN:  startAfterLSN,
@@ -246,11 +296,16 @@ func (c *partitionController) consume(ctx context.Context, startAfterLSN uint64,
 		if err != nil {
 			return fmt.Errorf("decode partition %d lsn key: %w", c.partition, err)
 		}
+		stored, err := recordbin.DecodeStoredValue(kv.Value)
+		if err != nil {
+			return fmt.Errorf("decode partition %d stored value: %w", c.partition, err)
+		}
 
 		result.Events = append(result.Events, Event{
-			Partition: c.partition,
-			LSN:       lsn,
-			Value:     cloneBytes(kv.Value),
+			Partition:   c.partition,
+			LSN:         lsn,
+			TimestampMS: stored.TimestampMS,
+			Value:       cloneBytes(stored.Value),
 		})
 		result.NextStartAfterLSN = lsn
 		return nil
@@ -260,6 +315,49 @@ func (c *partitionController) consume(ctx context.Context, startAfterLSN uint64,
 	}
 
 	return result, nil
+}
+
+func (c *partitionController) findFirstLSNAtOrAfterTimestamp(ctx context.Context, view isledb.View, low uint64, high uint64, timestampMS uint64) (uint64, bool, error) {
+	var candidate uint64
+	foundCandidate := false
+
+	for low <= high {
+		mid := low + (high-low)/2
+		stored, err := c.getStoredValue(ctx, view, mid)
+		if err != nil {
+			return 0, false, err
+		}
+
+		if stored.TimestampMS >= timestampMS {
+			candidate = mid
+			foundCandidate = true
+			if mid == 0 {
+				break
+			}
+			high = mid - 1
+			continue
+		}
+
+		low = mid + 1
+	}
+
+	return candidate, foundCandidate, nil
+}
+
+func (c *partitionController) getStoredValue(ctx context.Context, view isledb.View, lsn uint64) (recordbin.StoredValue, error) {
+	value, found, err := view.Get(ctx, encodeLSNKey(lsn))
+	if err != nil {
+		return recordbin.StoredValue{}, fmt.Errorf("get partition %d lsn=%d: %w", c.partition, lsn, err)
+	}
+	if !found {
+		return recordbin.StoredValue{}, fmt.Errorf("partition %d missing retained lsn=%d", c.partition, lsn)
+	}
+
+	stored, err := recordbin.DecodeStoredValue(value)
+	if err != nil {
+		return recordbin.StoredValue{}, fmt.Errorf("decode partition %d lsn=%d: %w", c.partition, lsn, err)
+	}
+	return stored, nil
 }
 
 func (c *partitionController) waitForAdvance(ctx context.Context, afterLSN uint64) error {

@@ -25,6 +25,12 @@ service ReaderService {
     };
   }
 
+  rpc ConsumePartitionFromTimestamp(ConsumePartitionFromTimestampRequest) returns (ConsumePartitionResponse) {
+    option (google.api.http) = {
+      get: "/api/partitions/{partition}/consume-from-timestamp"
+    };
+  }
+
   rpc TailPartition(TailPartitionRequest) returns (stream TailPartitionResponse) {
     option (google.api.http) = {
       get: "/api/partitions/{partition}/tail"
@@ -35,7 +41,8 @@ service ReaderService {
 message PartitionEvent {
   int32 partition = 1;
   uint64 lsn = 2;
-  bytes value = 3;
+  uint64 timestamp_ms = 3;
+  bytes value = 4;
 }
 
 message PartitionHead {
@@ -63,6 +70,12 @@ message GetPartitionHeadResponse {
 message ConsumePartitionRequest {
   int32 partition = 1;
   uint64 start_after_lsn = 2;
+  uint32 limit = 3;
+}
+
+message ConsumePartitionFromTimestampRequest {
+  int32 partition = 1;
+  uint64 timestamp_ms = 2;
   uint32 limit = 3;
 }
 
