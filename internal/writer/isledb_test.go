@@ -9,6 +9,7 @@ import (
 	"github.com/ankur-anand/isledb"
 	"github.com/ankur-anand/isledb/blobstore"
 	"github.com/ankur-anand/unijord/internal/config"
+	"github.com/ankur-anand/unijord/internal/recordbin"
 	"github.com/ankur-anand/walfs"
 )
 
@@ -43,6 +44,9 @@ func TestIsleAppenderPersistsEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	if first.TimestampMS == 0 {
+		t.Fatal("first TimestampMS = 0, want non-zero")
+	}
 	second, err := appender.Append(ctx, []byte("world"))
 	if err != nil {
 		t.Fatalf("Append(second) error = %v", err)
@@ -75,8 +79,15 @@ func TestIsleAppenderPersistsEvents(t *testing.T) {
 	if !found {
 		t.Fatal("reader.Get(first) found = false, want true")
 	}
-	if string(got) != "hello" {
-		t.Fatalf("reader.Get(first) = %q, want %q", got, "hello")
+	stored, err := recordbin.DecodeStoredValue(got)
+	if err != nil {
+		t.Fatalf("DecodeStoredValue(first) error = %v", err)
+	}
+	if string(stored.Value) != "hello" {
+		t.Fatalf("reader.Get(first) = %q, want %q", stored.Value, "hello")
+	}
+	if stored.TimestampMS == 0 {
+		t.Fatal("first timestamp_ms = 0, want non-zero")
 	}
 
 	got, found, err = reader.Get(ctx, encodeLSNKey(third.LSN))
@@ -86,8 +97,12 @@ func TestIsleAppenderPersistsEvents(t *testing.T) {
 	if !found {
 		t.Fatal("reader.Get(third) found = false, want true")
 	}
-	if string(got) != "again" {
-		t.Fatalf("reader.Get(third) = %q, want %q", got, "again")
+	stored, err = recordbin.DecodeStoredValue(got)
+	if err != nil {
+		t.Fatalf("DecodeStoredValue(third) error = %v", err)
+	}
+	if string(stored.Value) != "again" {
+		t.Fatalf("reader.Get(third) = %q, want %q", stored.Value, "again")
 	}
 
 	got, found, err = reader.Get(ctx, encodeLSNKey(second.LSN))
@@ -97,8 +112,12 @@ func TestIsleAppenderPersistsEvents(t *testing.T) {
 	if !found {
 		t.Fatal("reader.Get(second) found = false, want true")
 	}
-	if string(got) != "world" {
-		t.Fatalf("reader.Get(second) = %q, want %q", got, "world")
+	stored, err = recordbin.DecodeStoredValue(got)
+	if err != nil {
+		t.Fatalf("DecodeStoredValue(second) error = %v", err)
+	}
+	if string(stored.Value) != "world" {
+		t.Fatalf("reader.Get(second) = %q, want %q", stored.Value, "world")
 	}
 }
 
@@ -128,11 +147,11 @@ func TestIsleAppenderReplaysWALOnStartup(t *testing.T) {
 	}
 
 	records := []Record{
-		{LSN: 1, Value: []byte("hello")},
-		{LSN: 2, Value: []byte("world")},
+		{LSN: 1, TimestampMS: 1001, Value: []byte("hello")},
+		{LSN: 2, TimestampMS: 1002, Value: []byte("world")},
 	}
 	for i, record := range records {
-		if _, err := wal.Write(encodeWALRecord(record.LSN, record.Value), uint64(i+1)); err != nil {
+		if _, err := wal.Write(encodeWALRecord(record.LSN, record.TimestampMS, record.Value), uint64(i+1)); err != nil {
 			t.Fatalf("wal.Write(%d) error = %v", i, err)
 		}
 	}
@@ -174,8 +193,15 @@ func TestIsleAppenderReplaysWALOnStartup(t *testing.T) {
 		if !found {
 			t.Fatalf("reader.Get(lsn=%d) found = false, want true", record.LSN)
 		}
-		if string(got) != string(record.Value) {
-			t.Fatalf("reader.Get(lsn=%d) = %q, want %q", record.LSN, got, record.Value)
+		stored, err := recordbin.DecodeStoredValue(got)
+		if err != nil {
+			t.Fatalf("DecodeStoredValue(lsn=%d) error = %v", record.LSN, err)
+		}
+		if string(stored.Value) != string(record.Value) {
+			t.Fatalf("reader.Get(lsn=%d) = %q, want %q", record.LSN, stored.Value, record.Value)
+		}
+		if stored.TimestampMS != record.TimestampMS {
+			t.Fatalf("reader.Get(lsn=%d) timestamp_ms = %d, want %d", record.LSN, stored.TimestampMS, record.TimestampMS)
 		}
 	}
 

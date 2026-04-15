@@ -15,6 +15,7 @@ import (
 	"github.com/ankur-anand/isledb/blobstore"
 	"github.com/ankur-anand/isledb/manifest"
 	"github.com/ankur-anand/unijord/internal/config"
+	"github.com/ankur-anand/unijord/internal/recordbin"
 	"github.com/ankur-anand/walfs"
 	_ "gocloud.dev/blob/s3blob"
 )
@@ -184,7 +185,7 @@ func (a *IsleAppender) replayWAL(ctx context.Context, committedLSN uint64) (uint
 		if record.LSN <= committedLSN {
 			continue
 		}
-		if err := a.writer.Put(encodeLSNKey(record.LSN), record.Value); err != nil {
+		if err := a.writer.Put(encodeLSNKey(record.LSN), recordbin.EncodeStoredValue(record.TimestampMS, record.Value)); err != nil {
 			return 0, fmt.Errorf("replay wal record lsn=%d into isledb: %w", record.LSN, err)
 		}
 		if record.LSN > maxReplayedLSN {
@@ -230,15 +231,16 @@ func (a *IsleAppender) Append(_ context.Context, value []byte) (Record, error) {
 
 func (a *IsleAppender) appendLocked(value []byte) (Record, error) {
 	record := Record{
-		LSN:   a.nextLSN,
-		Value: cloneBytes(value),
+		LSN:         a.nextLSN,
+		TimestampMS: uint64(time.Now().UnixMilli()),
+		Value:       cloneBytes(value),
 	}
 
-	if _, err := a.wal.Write(encodeWALRecord(record.LSN, record.Value), record.LSN); err != nil {
+	if _, err := a.wal.Write(encodeWALRecord(record.LSN, record.TimestampMS, record.Value), record.LSN); err != nil {
 		return Record{}, fmt.Errorf("write wal record: %w", err)
 	}
 
-	if err := a.writer.Put(encodeLSNKey(record.LSN), record.Value); err != nil {
+	if err := a.writer.Put(encodeLSNKey(record.LSN), recordbin.EncodeStoredValue(record.TimestampMS, record.Value)); err != nil {
 		if rollbackErr := a.wal.Truncate(record.LSN - 1); rollbackErr != nil {
 			return Record{}, errors.Join(err, fmt.Errorf("rollback wal record lsn=%d: %w", record.LSN, rollbackErr))
 		}

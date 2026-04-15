@@ -4,8 +4,9 @@ import "context"
 
 // Record is the internal append result returned by the writer backend.
 type Record struct {
-	LSN   uint64
-	Value []byte
+	LSN         uint64
+	TimestampMS uint64
+	Value       []byte
 }
 
 // Appender is the storage-facing contract behind the writer gRPC service.

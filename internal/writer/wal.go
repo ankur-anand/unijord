@@ -2,7 +2,8 @@ package writer
 
 import (
 	"encoding/binary"
-	"io"
+
+	"github.com/ankur-anand/unijord/internal/recordbin"
 )
 
 const (
@@ -10,21 +11,20 @@ const (
 	lsnKeySize = 8
 )
 
-func encodeWALRecord(lsn uint64, value []byte) []byte {
-	buf := make([]byte, lsnKeySize+len(value))
-	binary.BigEndian.PutUint64(buf[:lsnKeySize], lsn)
-	copy(buf[lsnKeySize:], value)
-	return buf
+func encodeWALRecord(lsn uint64, timestampMS uint64, value []byte) []byte {
+	return recordbin.EncodeWALRecord(lsn, timestampMS, value)
 }
 
 func decodeWALRecord(data []byte) (Record, error) {
-	if len(data) < lsnKeySize {
-		return Record{}, io.ErrUnexpectedEOF
+	record, err := recordbin.DecodeWALRecord(data)
+	if err != nil {
+		return Record{}, err
 	}
 
 	return Record{
-		LSN:   binary.BigEndian.Uint64(data[:lsnKeySize]),
-		Value: cloneBytes(data[lsnKeySize:]),
+		LSN:         record.LSN,
+		TimestampMS: record.TimestampMS,
+		Value:       cloneBytes(record.Value),
 	}, nil
 }
 
