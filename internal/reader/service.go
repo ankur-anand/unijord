@@ -22,6 +22,25 @@ func NewService(backend Backend) (*Service, error) {
 	return &Service{backend: backend}, nil
 }
 
+func (s *Service) GetPartitionHead(ctx context.Context, req *readerv1.GetPartitionHeadRequest) (*readerv1.GetPartitionHeadResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if req.GetPartition() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "partition must be non-negative")
+	}
+
+	result, err := s.backend.GetPartitionHead(ctx, req.GetPartition())
+	if err != nil {
+		return nil, status.Errorf(mapReadError(err), "get partition head failed: %v", err)
+	}
+
+	return &readerv1.GetPartitionHeadResponse{
+		Partition:        result.Partition,
+		HighWatermarkLsn: result.HighWatermarkLSN,
+	}, nil
+}
+
 func (s *Service) ConsumePartition(ctx context.Context, req *readerv1.ConsumePartitionRequest) (*readerv1.ConsumePartitionResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")

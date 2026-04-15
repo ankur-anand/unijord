@@ -7,6 +7,12 @@ import "google/api/annotations.proto";
 option go_package = "github.com/ankur-anand/unijord/gen/go/eventlake/reader/v1;readerv1";
 
 service ReaderService {
+  rpc GetPartitionHead(GetPartitionHeadRequest) returns (GetPartitionHeadResponse) {
+    option (google.api.http) = {
+      get: "/api/partitions/{partition}/head"
+    };
+  }
+
   rpc ConsumePartition(ConsumePartitionRequest) returns (ConsumePartitionResponse) {
     option (google.api.http) = {
       get: "/api/partitions/{partition}/consume"
@@ -24,6 +30,15 @@ message PartitionEvent {
   int32 partition = 1;
   uint64 lsn = 2;
   bytes value = 3;
+}
+
+message GetPartitionHeadRequest {
+  int32 partition = 1;
+}
+
+message GetPartitionHeadResponse {
+  int32 partition = 1;
+  uint64 high_watermark_lsn = 2;
 }
 
 message ConsumePartitionRequest {
