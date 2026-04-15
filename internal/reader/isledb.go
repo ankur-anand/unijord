@@ -118,6 +118,24 @@ func (b *IsleBackend) ConsumePartition(ctx context.Context, partition int32, sta
 	return controller.consume(ctx, startAfterLSN, limit)
 }
 
+func (b *IsleBackend) GetPartitionHead(_ context.Context, partition int32) (PartitionHeadResult, error) {
+	controller, err := b.partition(partition)
+	if err != nil {
+		return PartitionHeadResult{}, err
+	}
+
+	view := controller.coord.Current()
+	if view == nil {
+		return PartitionHeadResult{}, context.Canceled
+	}
+	defer view.Close()
+
+	return PartitionHeadResult{
+		Partition:        partition,
+		HighWatermarkLSN: viewHighWatermark(view),
+	}, nil
+}
+
 func (b *IsleBackend) TailPartition(ctx context.Context, partition int32, startAfterLSN uint64, fromNow bool, handler func(Event) error) error {
 	controller, err := b.partition(partition)
 	if err != nil {

@@ -62,6 +62,49 @@ func TestIsleBackendConsumePartition(t *testing.T) {
 	}
 }
 
+func TestIsleBackendGetPartitionHead(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	bucketURL := "file://" + rootDir
+	namespace := "order-events"
+
+	writePartitionEvents(t, ctx, bucketURL, namespace, 0, [][]byte{
+		[]byte("a"),
+		[]byte("b"),
+		[]byte("c"),
+	})
+
+	cfg := config.ReaderConfig{
+		BucketURL:            bucketURL,
+		Namespace:            namespace,
+		Partitions:           1,
+		CacheDir:             filepath.Join(rootDir, "cache"),
+		ManifestPollInterval: 20 * time.Millisecond,
+	}
+	backend, err := OpenIsleBackend(ctx, cfg)
+	if err != nil {
+		t.Fatalf("OpenIsleBackend() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := backend.Close(); err != nil {
+			t.Fatalf("backend.Close() error = %v", err)
+		}
+	})
+
+	result, err := backend.GetPartitionHead(ctx, 0)
+	if err != nil {
+		t.Fatalf("GetPartitionHead() error = %v", err)
+	}
+	if result.Partition != 0 {
+		t.Fatalf("partition = %d, want 0", result.Partition)
+	}
+	if result.HighWatermarkLSN != 3 {
+		t.Fatalf("high_watermark_lsn = %d, want 3", result.HighWatermarkLSN)
+	}
+}
+
 func TestIsleBackendTailPartition(t *testing.T) {
 	t.Parallel()
 

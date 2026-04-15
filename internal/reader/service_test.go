@@ -19,6 +19,38 @@ func TestNewServiceRequiresBackend(t *testing.T) {
 	}
 }
 
+func TestGetPartitionHead(t *testing.T) {
+	t.Parallel()
+
+	backend := &backendStub{
+		headResult: PartitionHeadResult{
+			Partition:        2,
+			HighWatermarkLSN: 15,
+		},
+	}
+	service, err := NewService(backend)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	resp, err := service.GetPartitionHead(context.Background(), &readerv1.GetPartitionHeadRequest{
+		Partition: 2,
+	})
+	if err != nil {
+		t.Fatalf("GetPartitionHead() error = %v", err)
+	}
+
+	if resp.GetPartition() != 2 {
+		t.Fatalf("partition = %d, want 2", resp.GetPartition())
+	}
+	if resp.GetHighWatermarkLsn() != 15 {
+		t.Fatalf("high_watermark_lsn = %d, want 15", resp.GetHighWatermarkLsn())
+	}
+	if backend.headPartition != 2 {
+		t.Fatalf("backend head partition = %d, want 2", backend.headPartition)
+	}
+}
+
 func TestConsumePartition(t *testing.T) {
 	t.Parallel()
 
@@ -165,7 +197,28 @@ func TestConsumePartitionMapsPartitionNotFound(t *testing.T) {
 	}
 }
 
+func TestGetPartitionHeadMapsPartitionNotFound(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(&backendStub{headErr: ErrPartitionNotFound})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	_, err = service.GetPartitionHead(context.Background(), &readerv1.GetPartitionHeadRequest{Partition: 99})
+	if err == nil {
+		t.Fatal("GetPartitionHead() error = nil, want not found")
+	}
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("GetPartitionHead() code = %s, want %s", got, codes.NotFound)
+	}
+}
+
 type backendStub struct {
+	headPartition int32
+	headResult    PartitionHeadResult
+	headErr       error
+
 	consumePartition  int32
 	consumeStartAfter uint64
 	consumeLimit      uint32
@@ -177,6 +230,14 @@ type backendStub struct {
 	tailFromNow    bool
 	tailEvents     []Event
 	tailErr        error
+}
+
+func (b *backendStub) GetPartitionHead(_ context.Context, partition int32) (PartitionHeadResult, error) {
+	b.headPartition = partition
+	if b.headErr != nil {
+		return PartitionHeadResult{}, b.headErr
+	}
+	return b.headResult, nil
 }
 
 func (b *backendStub) ConsumePartition(_ context.Context, partition int32, startAfterLSN uint64, limit uint32) (ConsumeResult, error) {
