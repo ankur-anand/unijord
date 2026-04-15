@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -116,6 +117,25 @@ func (b *IsleBackend) ConsumePartition(ctx context.Context, partition int32, sta
 		return ConsumeResult{}, err
 	}
 	return controller.consume(ctx, startAfterLSN, limit)
+}
+
+func (b *IsleBackend) ListPartitionHeads(ctx context.Context) ([]PartitionHeadResult, error) {
+	partitions := make([]int32, 0, len(b.partitions))
+	for partition := range b.partitions {
+		partitions = append(partitions, partition)
+	}
+	slices.Sort(partitions)
+
+	results := make([]PartitionHeadResult, 0, len(partitions))
+	for _, partition := range partitions {
+		result, err := b.GetPartitionHead(ctx, partition)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+
+	return results, nil
 }
 
 func (b *IsleBackend) GetPartitionHead(_ context.Context, partition int32) (PartitionHeadResult, error) {

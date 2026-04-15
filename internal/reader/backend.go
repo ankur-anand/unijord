@@ -24,6 +24,7 @@ type ConsumeResult struct {
 
 // Backend is the storage-facing contract behind the reader service.
 type Backend interface {
+	ListPartitionHeads(ctx context.Context) ([]PartitionHeadResult, error)
 	GetPartitionHead(ctx context.Context, partition int32) (PartitionHeadResult, error)
 	ConsumePartition(ctx context.Context, partition int32, startAfterLSN uint64, limit uint32) (ConsumeResult, error)
 	TailPartition(ctx context.Context, partition int32, startAfterLSN uint64, fromNow bool, handler func(Event) error) error

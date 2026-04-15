@@ -22,6 +22,26 @@ func NewService(backend Backend) (*Service, error) {
 	return &Service{backend: backend}, nil
 }
 
+func (s *Service) ListPartitionHeads(ctx context.Context, req *readerv1.ListPartitionHeadsRequest) (*readerv1.ListPartitionHeadsResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+
+	results, err := s.backend.ListPartitionHeads(ctx)
+	if err != nil {
+		return nil, status.Errorf(mapReadError(err), "list partition heads failed: %v", err)
+	}
+
+	resp := &readerv1.ListPartitionHeadsResponse{}
+	for _, result := range results {
+		resp.Heads = append(resp.Heads, &readerv1.PartitionHead{
+			Partition:        result.Partition,
+			HighWatermarkLsn: result.HighWatermarkLSN,
+		})
+	}
+	return resp, nil
+}
+
 func (s *Service) GetPartitionHead(ctx context.Context, req *readerv1.GetPartitionHeadRequest) (*readerv1.GetPartitionHeadResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")

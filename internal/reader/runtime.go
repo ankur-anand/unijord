@@ -2,14 +2,12 @@ package reader
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,14 +15,21 @@ import (
 	"github.com/ankur-anand/unijord/internal/config"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	grpcHealth "google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 )
+
+var gatewayMarshaler = &runtime.JSONPb{
+	MarshalOptions: protojson.MarshalOptions{
+		EmitUnpopulated: true,
+	},
+	UnmarshalOptions: protojson.UnmarshalOptions{
+		DiscardUnknown: true,
+	},
+}
 
 // Run starts the reader process with the provided config and blocks until the
 // context is canceled or a serving error occurs.
@@ -76,7 +81,9 @@ func Run(ctx context.Context, logger *slog.Logger, cfg config.ReaderConfig, back
 		}
 	}()
 
-	gatewayMux := runtime.NewServeMux()
+	gatewayMux := runtime.NewServeMux(
+		runtime.WithMarshalerOption(runtime.MIMEWildcard, gatewayMarshaler),
+	)
 	if err := readerv1.RegisterReaderServiceHandlerFromEndpoint(ctx, gatewayMux, grpcDialTarget(cfg.GRPCListen), []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}); err != nil {
@@ -86,7 +93,7 @@ func Run(ctx context.Context, logger *slog.Logger, cfg config.ReaderConfig, back
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPListen,
-		Handler:           newHTTPHandler(service, gatewayMux),
+		Handler:           gatewayMux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	metricsServer := &http.Server{
@@ -181,88 +188,5 @@ func ParseLogLevel(raw string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
-	}
-}
-
-func newHTTPHandler(service *Service, gateway http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		partition, ok := parsePartitionHeadPath(r.Method, r.URL.Path)
-		if !ok {
-			gateway.ServeHTTP(w, r)
-			return
-		}
-
-		resp, err := service.GetPartitionHead(r.Context(), &readerv1.GetPartitionHeadRequest{
-			Partition: partition,
-		})
-		if err != nil {
-			writeHTTPError(w, err)
-			return
-		}
-
-		payload, err := protojson.MarshalOptions{}.Marshal(resp)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("marshal head response: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(payload)
-	})
-}
-
-func parsePartitionHeadPath(method, path string) (int32, bool) {
-	if method != http.MethodGet {
-		return 0, false
-	}
-
-	const prefix = "/api/partitions/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/head") {
-		return 0, false
-	}
-
-	partitionPath := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/head")
-	partitionPath = strings.TrimSuffix(partitionPath, "/")
-	if partitionPath == "" || strings.Contains(partitionPath, "/") {
-		return 0, false
-	}
-
-	value, err := strconv.ParseInt(partitionPath, 10, 32)
-	if err != nil {
-		return 0, false
-	}
-
-	return int32(value), true
-}
-
-func writeHTTPError(w http.ResponseWriter, err error) {
-	st := status.Convert(err)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(httpStatusFromCode(st.Code()))
-
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"code":    int32(st.Code()),
-		"message": st.Message(),
-	})
-}
-
-func httpStatusFromCode(code codes.Code) int {
-	switch code {
-	case codes.InvalidArgument:
-		return http.StatusBadRequest
-	case codes.NotFound:
-		return http.StatusNotFound
-	case codes.Unauthenticated:
-		return http.StatusUnauthorized
-	case codes.PermissionDenied:
-		return http.StatusForbidden
-	case codes.DeadlineExceeded:
-		return http.StatusGatewayTimeout
-	case codes.Unavailable:
-		return http.StatusServiceUnavailable
-	default:
-		return http.StatusInternalServerError
 	}
 }
