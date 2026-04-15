@@ -104,8 +104,8 @@ func TestConsumePartition(t *testing.T) {
 	backend := &backendStub{
 		consumeResult: ConsumeResult{
 			Events: []Event{
-				{Partition: 2, LSN: 11, Value: []byte("hello")},
-				{Partition: 2, LSN: 12, Value: []byte("world")},
+				{Partition: 2, LSN: 11, TimestampMS: 1011, Value: []byte("hello")},
+				{Partition: 2, LSN: 12, TimestampMS: 1012, Value: []byte("world")},
 			},
 			NextStartAfterLSN:  12,
 			HeadLSN:            15,
@@ -132,6 +132,9 @@ func TestConsumePartition(t *testing.T) {
 	if resp.GetEvents()[0].GetLsn() != 11 {
 		t.Fatalf("events[0].lsn = %d, want 11", resp.GetEvents()[0].GetLsn())
 	}
+	if resp.GetEvents()[0].GetTimestampMs() != 1011 {
+		t.Fatalf("events[0].timestamp_ms = %d, want 1011", resp.GetEvents()[0].GetTimestampMs())
+	}
 	if resp.GetNextStartAfterLsn() != 12 {
 		t.Fatalf("next_start_after_lsn = %d, want 12", resp.GetNextStartAfterLsn())
 	}
@@ -143,6 +146,52 @@ func TestConsumePartition(t *testing.T) {
 	}
 	if backend.consumePartition != 2 || backend.consumeStartAfter != 10 || backend.consumeLimit != 2 {
 		t.Fatalf("backend consume args = (%d,%d,%d), want (2,10,2)", backend.consumePartition, backend.consumeStartAfter, backend.consumeLimit)
+	}
+}
+
+func TestConsumePartitionFromTimestamp(t *testing.T) {
+	t.Parallel()
+
+	backend := &backendStub{
+		consumeFromTimestampResult: ConsumeResult{
+			Events: []Event{
+				{Partition: 2, LSN: 12, TimestampMS: 2012, Value: []byte("world")},
+			},
+			NextStartAfterLSN:  12,
+			HeadLSN:            15,
+			OldestAvailableLSN: 7,
+		},
+	}
+	service, err := NewService(backend)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	resp, err := service.ConsumePartitionFromTimestamp(context.Background(), &readerv1.ConsumePartitionFromTimestampRequest{
+		Partition:   2,
+		TimestampMs: 2000,
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("ConsumePartitionFromTimestamp() error = %v", err)
+	}
+
+	if len(resp.GetEvents()) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(resp.GetEvents()))
+	}
+	if resp.GetEvents()[0].GetLsn() != 12 {
+		t.Fatalf("events[0].lsn = %d, want 12", resp.GetEvents()[0].GetLsn())
+	}
+	if resp.GetEvents()[0].GetTimestampMs() != 2012 {
+		t.Fatalf("events[0].timestamp_ms = %d, want 2012", resp.GetEvents()[0].GetTimestampMs())
+	}
+	if backend.consumeFromTimestampPartition != 2 || backend.consumeFromTimestamp != 2000 || backend.consumeFromTimestampLimit != 1 {
+		t.Fatalf(
+			"backend consume-from-timestamp args = (%d,%d,%d), want (2,2000,1)",
+			backend.consumeFromTimestampPartition,
+			backend.consumeFromTimestamp,
+			backend.consumeFromTimestampLimit,
+		)
 	}
 }
 
@@ -273,11 +322,17 @@ type backendStub struct {
 	consumeResult     ConsumeResult
 	consumeErr        error
 
-	tailPartition  int32
-	tailStartAfter uint64
+	consumeFromTimestampPartition int32
+	consumeFromTimestamp          uint64
+	consumeFromTimestampLimit     uint32
+	consumeFromTimestampResult    ConsumeResult
+	consumeFromTimestampErr       error
+
+	tailPartition     int32
+	tailStartAfter    uint64
 	tailHasStartAfter bool
-	tailEvents     []Event
-	tailErr        error
+	tailEvents        []Event
+	tailErr           error
 }
 
 func (b *backendStub) ListPartitionHeads(_ context.Context) ([]PartitionHeadResult, error) {
@@ -304,6 +359,16 @@ func (b *backendStub) ConsumePartition(_ context.Context, partition int32, start
 		return ConsumeResult{}, b.consumeErr
 	}
 	return b.consumeResult, nil
+}
+
+func (b *backendStub) ConsumePartitionFromTimestamp(_ context.Context, partition int32, timestampMS uint64, limit uint32) (ConsumeResult, error) {
+	b.consumeFromTimestampPartition = partition
+	b.consumeFromTimestamp = timestampMS
+	b.consumeFromTimestampLimit = limit
+	if b.consumeFromTimestampErr != nil {
+		return ConsumeResult{}, b.consumeFromTimestampErr
+	}
+	return b.consumeFromTimestampResult, nil
 }
 
 func (b *backendStub) TailPartition(_ context.Context, partition int32, startAfterLSN *uint64, handler func(Event) error) error {

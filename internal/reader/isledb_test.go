@@ -54,6 +54,9 @@ func TestIsleBackendConsumePartition(t *testing.T) {
 	if result.Events[0].LSN != 2 || string(result.Events[0].Value) != "b" {
 		t.Fatalf("events[0] = (%d,%q), want (2,%q)", result.Events[0].LSN, result.Events[0].Value, "b")
 	}
+	if result.Events[0].TimestampMS == 0 {
+		t.Fatal("events[0].timestamp_ms = 0, want non-zero")
+	}
 	if result.NextStartAfterLSN != 3 {
 		t.Fatalf("next_start_after_lsn = %d, want 3", result.NextStartAfterLSN)
 	}
@@ -62,6 +65,139 @@ func TestIsleBackendConsumePartition(t *testing.T) {
 	}
 	if result.OldestAvailableLSN != 1 {
 		t.Fatalf("oldest_available_lsn = %d, want 1", result.OldestAvailableLSN)
+	}
+}
+
+func TestIsleBackendConsumePartitionFromTimestamp(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	bucketURL := "file://" + rootDir
+	namespace := "order-events"
+
+	records := writePartitionRecords(t, ctx, bucketURL, namespace, 0, [][]byte{
+		[]byte("a"),
+		[]byte("b"),
+		[]byte("c"),
+	}, 3*time.Millisecond)
+
+	cfg := config.ReaderConfig{
+		BucketURL:            bucketURL,
+		Namespace:            namespace,
+		Partitions:           1,
+		CacheDir:             filepath.Join(rootDir, "cache"),
+		ManifestPollInterval: 20 * time.Millisecond,
+	}
+	backend, err := OpenIsleBackend(ctx, cfg)
+	if err != nil {
+		t.Fatalf("OpenIsleBackend() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := backend.Close(); err != nil {
+			t.Fatalf("backend.Close() error = %v", err)
+		}
+	})
+
+	result, err := backend.ConsumePartitionFromTimestamp(ctx, 0, records[1].TimestampMS, 10)
+	if err != nil {
+		t.Fatalf("ConsumePartitionFromTimestamp() error = %v", err)
+	}
+
+	if len(result.Events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(result.Events))
+	}
+	if result.Events[0].LSN != records[1].LSN || string(result.Events[0].Value) != "b" {
+		t.Fatalf("events[0] = (%d,%q), want (%d,%q)", result.Events[0].LSN, result.Events[0].Value, records[1].LSN, "b")
+	}
+	if result.Events[1].LSN != records[2].LSN || string(result.Events[1].Value) != "c" {
+		t.Fatalf("events[1] = (%d,%q), want (%d,%q)", result.Events[1].LSN, result.Events[1].Value, records[2].LSN, "c")
+	}
+}
+
+func TestIsleBackendConsumePartitionFromTimestampAtOldestVisibleBoundary(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	bucketURL := "file://" + rootDir
+	namespace := "order-events"
+
+	records := writePartitionRecords(t, ctx, bucketURL, namespace, 0, [][]byte{
+		[]byte("a"),
+		[]byte("b"),
+		[]byte("c"),
+	}, 3*time.Millisecond)
+
+	cfg := config.ReaderConfig{
+		BucketURL:            bucketURL,
+		Namespace:            namespace,
+		Partitions:           1,
+		CacheDir:             filepath.Join(rootDir, "cache"),
+		ManifestPollInterval: 20 * time.Millisecond,
+	}
+	backend, err := OpenIsleBackend(ctx, cfg)
+	if err != nil {
+		t.Fatalf("OpenIsleBackend() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := backend.Close(); err != nil {
+			t.Fatalf("backend.Close() error = %v", err)
+		}
+	})
+
+	result, err := backend.ConsumePartitionFromTimestamp(ctx, 0, records[0].TimestampMS, 10)
+	if err != nil {
+		t.Fatalf("ConsumePartitionFromTimestamp() error = %v", err)
+	}
+
+	if len(result.Events) != 3 {
+		t.Fatalf("len(events) = %d, want 3", len(result.Events))
+	}
+	if result.Events[0].LSN != records[0].LSN || string(result.Events[0].Value) != "a" {
+		t.Fatalf("events[0] = (%d,%q), want (%d,%q)", result.Events[0].LSN, result.Events[0].Value, records[0].LSN, "a")
+	}
+}
+
+func TestIsleBackendConsumePartitionFromTimestampAfterHeadReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	bucketURL := "file://" + rootDir
+	namespace := "order-events"
+
+	records := writePartitionRecords(t, ctx, bucketURL, namespace, 0, [][]byte{
+		[]byte("a"),
+	}, 0)
+
+	cfg := config.ReaderConfig{
+		BucketURL:            bucketURL,
+		Namespace:            namespace,
+		Partitions:           1,
+		CacheDir:             filepath.Join(rootDir, "cache"),
+		ManifestPollInterval: 20 * time.Millisecond,
+	}
+	backend, err := OpenIsleBackend(ctx, cfg)
+	if err != nil {
+		t.Fatalf("OpenIsleBackend() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := backend.Close(); err != nil {
+			t.Fatalf("backend.Close() error = %v", err)
+		}
+	})
+
+	result, err := backend.ConsumePartitionFromTimestamp(ctx, 0, records[0].TimestampMS+10_000, 10)
+	if err != nil {
+		t.Fatalf("ConsumePartitionFromTimestamp() error = %v", err)
+	}
+
+	if len(result.Events) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(result.Events))
+	}
+	if result.NextStartAfterLSN != records[0].LSN {
+		t.Fatalf("next_start_after_lsn = %d, want %d", result.NextStartAfterLSN, records[0].LSN)
 	}
 }
 
@@ -504,6 +640,12 @@ func TestIsleBackendTailPartitionWithoutStartAfterUsesPublishedViewBoundary(t *t
 func writePartitionEvents(t *testing.T, ctx context.Context, bucketURL, namespace string, partition int, values [][]byte) {
 	t.Helper()
 
+	_ = writePartitionRecords(t, ctx, bucketURL, namespace, partition, values, 0)
+}
+
+func writePartitionRecords(t *testing.T, ctx context.Context, bucketURL, namespace string, partition int, values [][]byte, delayBetweenAppends time.Duration) []writer.Record {
+	t.Helper()
+
 	cfg := config.WriterConfig{
 		BucketURL:      bucketURL,
 		Namespace:      namespace,
@@ -523,14 +665,21 @@ func writePartitionEvents(t *testing.T, ctx context.Context, bucketURL, namespac
 	if err != nil {
 		t.Fatalf("OpenIsleAppender() error = %v", err)
 	}
+	records := make([]writer.Record, 0, len(values))
 	for _, value := range values {
-		if _, err := appender.Append(ctx, value); err != nil {
+		record, err := appender.Append(ctx, value)
+		if err != nil {
 			t.Fatalf("Append(%q) error = %v", value, err)
+		}
+		records = append(records, record)
+		if delayBetweenAppends > 0 {
+			time.Sleep(delayBetweenAppends)
 		}
 	}
 	if err := appender.Close(); err != nil {
 		t.Fatalf("appender.Close() error = %v", err)
 	}
+	return records
 }
 
 func containsError(errs []error, want error) bool {

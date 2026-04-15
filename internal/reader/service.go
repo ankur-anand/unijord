@@ -87,6 +87,30 @@ func (s *Service) ConsumePartition(ctx context.Context, req *readerv1.ConsumePar
 	return resp, nil
 }
 
+func (s *Service) ConsumePartitionFromTimestamp(ctx context.Context, req *readerv1.ConsumePartitionFromTimestampRequest) (*readerv1.ConsumePartitionResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if req.GetPartition() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "partition must be non-negative")
+	}
+
+	result, err := s.backend.ConsumePartitionFromTimestamp(ctx, req.GetPartition(), req.GetTimestampMs(), req.GetLimit())
+	if err != nil {
+		return nil, status.Errorf(mapReadError(err), "consume partition from timestamp failed: %v", err)
+	}
+
+	resp := &readerv1.ConsumePartitionResponse{
+		NextStartAfterLsn:  result.NextStartAfterLSN,
+		HeadLsn:            result.HeadLSN,
+		OldestAvailableLsn: result.OldestAvailableLSN,
+	}
+	for _, event := range result.Events {
+		resp.Events = append(resp.Events, eventToProto(event))
+	}
+	return resp, nil
+}
+
 func (s *Service) TailPartition(req *readerv1.TailPartitionRequest, stream readerv1.ReaderService_TailPartitionServer) error {
 	if req == nil {
 		return status.Error(codes.InvalidArgument, "request is required")
@@ -114,9 +138,10 @@ func (s *Service) TailPartition(req *readerv1.TailPartitionRequest, stream reade
 
 func eventToProto(event Event) *readerv1.PartitionEvent {
 	return &readerv1.PartitionEvent{
-		Partition: event.Partition,
-		Lsn:       event.LSN,
-		Value:     event.Value,
+		Partition:   event.Partition,
+		Lsn:         event.LSN,
+		TimestampMs: event.TimestampMS,
+		Value:       event.Value,
 	}
 }
 
