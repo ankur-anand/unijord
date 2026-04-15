@@ -57,8 +57,11 @@ func TestIsleBackendConsumePartition(t *testing.T) {
 	if result.NextStartAfterLSN != 3 {
 		t.Fatalf("next_start_after_lsn = %d, want 3", result.NextStartAfterLSN)
 	}
-	if result.HighWatermarkLSN != 3 {
-		t.Fatalf("high_watermark_lsn = %d, want 3", result.HighWatermarkLSN)
+	if result.HeadLSN != 3 {
+		t.Fatalf("head_lsn = %d, want 3", result.HeadLSN)
+	}
+	if result.OldestAvailableLSN != 1 {
+		t.Fatalf("oldest_available_lsn = %d, want 1", result.OldestAvailableLSN)
 	}
 }
 
@@ -100,8 +103,11 @@ func TestIsleBackendGetPartitionHead(t *testing.T) {
 	if result.Partition != 0 {
 		t.Fatalf("partition = %d, want 0", result.Partition)
 	}
-	if result.HighWatermarkLSN != 3 {
-		t.Fatalf("high_watermark_lsn = %d, want 3", result.HighWatermarkLSN)
+	if result.HeadLSN != 3 {
+		t.Fatalf("head_lsn = %d, want 3", result.HeadLSN)
+	}
+	if result.OldestAvailableLSN != 1 {
+		t.Fatalf("oldest_available_lsn = %d, want 1", result.OldestAvailableLSN)
 	}
 }
 
@@ -146,11 +152,21 @@ func TestIsleBackendListPartitionHeads(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2", len(results))
 	}
-	if results[0].Partition != 0 || results[0].HighWatermarkLSN != 3 {
-		t.Fatalf("results[0] = (%d,%d), want (0,3)", results[0].Partition, results[0].HighWatermarkLSN)
+	if results[0].Partition != 0 || results[0].HeadLSN != 3 || results[0].OldestAvailableLSN != 1 {
+		t.Fatalf(
+			"results[0] = (%d,%d,%d), want (0,3,1)",
+			results[0].Partition,
+			results[0].HeadLSN,
+			results[0].OldestAvailableLSN,
+		)
 	}
-	if results[1].Partition != 1 || results[1].HighWatermarkLSN != 1 {
-		t.Fatalf("results[1] = (%d,%d), want (1,1)", results[1].Partition, results[1].HighWatermarkLSN)
+	if results[1].Partition != 1 || results[1].HeadLSN != 1 || results[1].OldestAvailableLSN != 1 {
+		t.Fatalf(
+			"results[1] = (%d,%d,%d), want (1,1,1)",
+			results[1].Partition,
+			results[1].HeadLSN,
+			results[1].OldestAvailableLSN,
+		)
 	}
 }
 
@@ -191,7 +207,8 @@ func TestIsleBackendTailPartition(t *testing.T) {
 	}()
 
 	stopErr := errors.New("stop after first tail event")
-	err = backend.TailPartition(ctx, 0, 1, false, func(event Event) error {
+	startAfterLSN := uint64(1)
+	err = backend.TailPartition(ctx, 0, &startAfterLSN, func(event Event) error {
 		if event.LSN != 2 {
 			t.Errorf("tail event lsn = %d, want 2", event.LSN)
 		}
@@ -292,7 +309,8 @@ func TestIsleBackendTailDoesNotBlockOtherConsumers(t *testing.T) {
 	errCh := make(chan error, 2)
 
 	go func() {
-		errCh <- backend.TailPartition(ctx, 0, 0, false, func(event Event) error {
+		startAfterLSN := uint64(0)
+		errCh <- backend.TailPartition(ctx, 0, &startAfterLSN, func(event Event) error {
 			if event.LSN != 1 {
 				t.Errorf("slow tail lsn = %d, want 1", event.LSN)
 			}
@@ -303,7 +321,8 @@ func TestIsleBackendTailDoesNotBlockOtherConsumers(t *testing.T) {
 	}()
 
 	go func() {
-		errCh <- backend.TailPartition(ctx, 0, 0, false, func(event Event) error {
+		startAfterLSN := uint64(0)
+		errCh <- backend.TailPartition(ctx, 0, &startAfterLSN, func(event Event) error {
 			if event.LSN != 1 {
 				t.Errorf("fast tail lsn = %d, want 1", event.LSN)
 			}
@@ -341,7 +360,7 @@ func TestIsleBackendTailDoesNotBlockOtherConsumers(t *testing.T) {
 	}
 }
 
-func TestIsleBackendTailPartitionFromNowSkipsHistory(t *testing.T) {
+func TestIsleBackendTailPartitionWithoutStartAfterSkipsHistory(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -379,7 +398,7 @@ func TestIsleBackendTailPartitionFromNowSkipsHistory(t *testing.T) {
 	}()
 
 	stopErr := errors.New("stop after first live event")
-	err = backend.TailPartition(ctx, 0, 0, true, func(event Event) error {
+	err = backend.TailPartition(ctx, 0, nil, func(event Event) error {
 		if event.LSN != 3 {
 			t.Errorf("tail event lsn = %d, want 3", event.LSN)
 		}
@@ -389,11 +408,11 @@ func TestIsleBackendTailPartitionFromNowSkipsHistory(t *testing.T) {
 		return stopErr
 	})
 	if !errors.Is(err, stopErr) {
-		t.Fatalf("TailPartition(from_now) error = %v, want %v", err, stopErr)
+		t.Fatalf("TailPartition(live) error = %v, want %v", err, stopErr)
 	}
 }
 
-func TestIsleBackendTailPartitionFromNowUsesPublishedViewBoundary(t *testing.T) {
+func TestIsleBackendTailPartitionWithoutStartAfterUsesPublishedViewBoundary(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -447,7 +466,7 @@ func TestIsleBackendTailPartitionFromNowUsesPublishedViewBoundary(t *testing.T) 
 		_ = view.Close()
 		t.Fatal("coord.Refresh() changed = false, want true")
 	}
-	if got := viewHighWatermark(view); got != 3 {
+	if got := viewHeadLSN(view); got != 3 {
 		_ = view.Close()
 		t.Fatalf("view high watermark = %d, want 3", got)
 	}
@@ -456,7 +475,7 @@ func TestIsleBackendTailPartitionFromNowUsesPublishedViewBoundary(t *testing.T) 
 	done := make(chan error, 1)
 	stopErr := errors.New("stop after first live event")
 	go func() {
-		done <- backend.TailPartition(ctx, 0, 0, true, func(event Event) error {
+		done <- backend.TailPartition(ctx, 0, nil, func(event Event) error {
 			if event.LSN != 4 {
 				t.Errorf("tail event lsn = %d, want 4", event.LSN)
 			}
@@ -475,10 +494,10 @@ func TestIsleBackendTailPartitionFromNowUsesPublishedViewBoundary(t *testing.T) 
 	select {
 	case err := <-done:
 		if !errors.Is(err, stopErr) {
-			t.Fatalf("TailPartition(from_now) error = %v, want %v", err, stopErr)
+			t.Fatalf("TailPartition(live) error = %v, want %v", err, stopErr)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("TailPartition(from_now) did not return")
+		t.Fatal("TailPartition(live) did not return")
 	}
 }
 

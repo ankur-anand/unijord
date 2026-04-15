@@ -16,8 +16,9 @@ func TestGatewayMuxGetPartitionHead(t *testing.T) {
 
 	service, err := NewService(&backendStub{
 		headResult: PartitionHeadResult{
-			Partition:        0,
-			HighWatermarkLSN: 15,
+			Partition:          0,
+			HeadLSN:            15,
+			OldestAvailableLSN: 4,
 		},
 	})
 	if err != nil {
@@ -37,8 +38,11 @@ func TestGatewayMuxGetPartitionHead(t *testing.T) {
 	if !strings.Contains(body, `"partition":0`) {
 		t.Fatalf("body = %q, want partition field", body)
 	}
-	if !strings.Contains(body, `"highWatermarkLsn":"15"`) {
-		t.Fatalf("body = %q, want highWatermarkLsn field", body)
+	if !strings.Contains(body, `"headLsn":"15"`) {
+		t.Fatalf("body = %q, want headLsn field", body)
+	}
+	if !strings.Contains(body, `"oldestAvailableLsn":"4"`) {
+		t.Fatalf("body = %q, want oldestAvailableLsn field", body)
 	}
 }
 
@@ -47,8 +51,8 @@ func TestGatewayMuxListPartitionHeads(t *testing.T) {
 
 	service, err := NewService(&backendStub{
 		listHeadsResult: []PartitionHeadResult{
-			{Partition: 0, HighWatermarkLSN: 12},
-			{Partition: 1, HighWatermarkLSN: 15},
+			{Partition: 0, HeadLSN: 12, OldestAvailableLSN: 3},
+			{Partition: 1, HeadLSN: 15, OldestAvailableLSN: 8},
 		},
 	})
 	if err != nil {
@@ -68,11 +72,49 @@ func TestGatewayMuxListPartitionHeads(t *testing.T) {
 	if !strings.Contains(body, `"heads":[`) {
 		t.Fatalf("body = %q, want heads array", body)
 	}
-	if !strings.Contains(body, `"partition":0`) || !strings.Contains(body, `"highWatermarkLsn":"12"`) {
+	if !strings.Contains(body, `"partition":0`) || !strings.Contains(body, `"headLsn":"12"`) || !strings.Contains(body, `"oldestAvailableLsn":"3"`) {
 		t.Fatalf("body = %q, want first head", body)
 	}
-	if !strings.Contains(body, `"partition":1`) || !strings.Contains(body, `"highWatermarkLsn":"15"`) {
+	if !strings.Contains(body, `"partition":1`) || !strings.Contains(body, `"headLsn":"15"`) || !strings.Contains(body, `"oldestAvailableLsn":"8"`) {
 		t.Fatalf("body = %q, want second head", body)
+	}
+}
+
+func TestGatewayMuxConsumePartition(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(&backendStub{
+		consumeResult: ConsumeResult{
+			Events: []Event{
+				{Partition: 0, LSN: 11, Value: []byte("hello")},
+			},
+			NextStartAfterLSN:  11,
+			HeadLSN:            15,
+			OldestAvailableLSN: 4,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	mux := newGatewayTestMux(t, service)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/partitions/0/consume?start_after_lsn=10&limit=1", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, `"nextStartAfterLsn":"11"`) {
+		t.Fatalf("body = %q, want nextStartAfterLsn field", body)
+	}
+	if !strings.Contains(body, `"headLsn":"15"`) {
+		t.Fatalf("body = %q, want headLsn field", body)
+	}
+	if !strings.Contains(body, `"oldestAvailableLsn":"4"`) {
+		t.Fatalf("body = %q, want oldestAvailableLsn field", body)
 	}
 }
 

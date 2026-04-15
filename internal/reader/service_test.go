@@ -24,8 +24,8 @@ func TestListPartitionHeads(t *testing.T) {
 
 	backend := &backendStub{
 		listHeadsResult: []PartitionHeadResult{
-			{Partition: 0, HighWatermarkLSN: 12},
-			{Partition: 1, HighWatermarkLSN: 15},
+			{Partition: 0, HeadLSN: 12, OldestAvailableLSN: 4},
+			{Partition: 1, HeadLSN: 15, OldestAvailableLSN: 7},
 		},
 	}
 	service, err := NewService(backend)
@@ -41,11 +41,21 @@ func TestListPartitionHeads(t *testing.T) {
 	if len(resp.GetHeads()) != 2 {
 		t.Fatalf("len(heads) = %d, want 2", len(resp.GetHeads()))
 	}
-	if resp.GetHeads()[0].GetPartition() != 0 || resp.GetHeads()[0].GetHighWatermarkLsn() != 12 {
-		t.Fatalf("heads[0] = (%d,%d), want (0,12)", resp.GetHeads()[0].GetPartition(), resp.GetHeads()[0].GetHighWatermarkLsn())
+	if resp.GetHeads()[0].GetPartition() != 0 || resp.GetHeads()[0].GetHeadLsn() != 12 || resp.GetHeads()[0].GetOldestAvailableLsn() != 4 {
+		t.Fatalf(
+			"heads[0] = (%d,%d,%d), want (0,12,4)",
+			resp.GetHeads()[0].GetPartition(),
+			resp.GetHeads()[0].GetHeadLsn(),
+			resp.GetHeads()[0].GetOldestAvailableLsn(),
+		)
 	}
-	if resp.GetHeads()[1].GetPartition() != 1 || resp.GetHeads()[1].GetHighWatermarkLsn() != 15 {
-		t.Fatalf("heads[1] = (%d,%d), want (1,15)", resp.GetHeads()[1].GetPartition(), resp.GetHeads()[1].GetHighWatermarkLsn())
+	if resp.GetHeads()[1].GetPartition() != 1 || resp.GetHeads()[1].GetHeadLsn() != 15 || resp.GetHeads()[1].GetOldestAvailableLsn() != 7 {
+		t.Fatalf(
+			"heads[1] = (%d,%d,%d), want (1,15,7)",
+			resp.GetHeads()[1].GetPartition(),
+			resp.GetHeads()[1].GetHeadLsn(),
+			resp.GetHeads()[1].GetOldestAvailableLsn(),
+		)
 	}
 	if backend.listHeadsCalls != 1 {
 		t.Fatalf("listHeadsCalls = %d, want 1", backend.listHeadsCalls)
@@ -57,8 +67,9 @@ func TestGetPartitionHead(t *testing.T) {
 
 	backend := &backendStub{
 		headResult: PartitionHeadResult{
-			Partition:        2,
-			HighWatermarkLSN: 15,
+			Partition:          2,
+			HeadLSN:            15,
+			OldestAvailableLSN: 7,
 		},
 	}
 	service, err := NewService(backend)
@@ -76,8 +87,11 @@ func TestGetPartitionHead(t *testing.T) {
 	if resp.GetPartition() != 2 {
 		t.Fatalf("partition = %d, want 2", resp.GetPartition())
 	}
-	if resp.GetHighWatermarkLsn() != 15 {
-		t.Fatalf("high_watermark_lsn = %d, want 15", resp.GetHighWatermarkLsn())
+	if resp.GetHeadLsn() != 15 {
+		t.Fatalf("head_lsn = %d, want 15", resp.GetHeadLsn())
+	}
+	if resp.GetOldestAvailableLsn() != 7 {
+		t.Fatalf("oldest_available_lsn = %d, want 7", resp.GetOldestAvailableLsn())
 	}
 	if backend.headPartition != 2 {
 		t.Fatalf("backend head partition = %d, want 2", backend.headPartition)
@@ -93,8 +107,9 @@ func TestConsumePartition(t *testing.T) {
 				{Partition: 2, LSN: 11, Value: []byte("hello")},
 				{Partition: 2, LSN: 12, Value: []byte("world")},
 			},
-			NextStartAfterLSN: 12,
-			HighWatermarkLSN:  15,
+			NextStartAfterLSN:  12,
+			HeadLSN:            15,
+			OldestAvailableLSN: 7,
 		},
 	}
 	service, err := NewService(backend)
@@ -120,8 +135,11 @@ func TestConsumePartition(t *testing.T) {
 	if resp.GetNextStartAfterLsn() != 12 {
 		t.Fatalf("next_start_after_lsn = %d, want 12", resp.GetNextStartAfterLsn())
 	}
-	if resp.GetHighWatermarkLsn() != 15 {
-		t.Fatalf("high_watermark_lsn = %d, want 15", resp.GetHighWatermarkLsn())
+	if resp.GetHeadLsn() != 15 {
+		t.Fatalf("head_lsn = %d, want 15", resp.GetHeadLsn())
+	}
+	if resp.GetOldestAvailableLsn() != 7 {
+		t.Fatalf("oldest_available_lsn = %d, want 7", resp.GetOldestAvailableLsn())
 	}
 	if backend.consumePartition != 2 || backend.consumeStartAfter != 10 || backend.consumeLimit != 2 {
 		t.Fatalf("backend consume args = (%d,%d,%d), want (2,10,2)", backend.consumePartition, backend.consumeStartAfter, backend.consumeLimit)
@@ -143,9 +161,10 @@ func TestTailPartition(t *testing.T) {
 	}
 
 	stream := &tailPartitionStreamStub{ctx: context.Background()}
+	startAfterLSN := uint64(6)
 	err = service.TailPartition(&readerv1.TailPartitionRequest{
 		Partition:     1,
-		StartAfterLsn: 6,
+		StartAfterLsn: &startAfterLSN,
 	}, stream)
 	if err != nil {
 		t.Fatalf("TailPartition() error = %v", err)
@@ -157,12 +176,12 @@ func TestTailPartition(t *testing.T) {
 	if stream.responses[1].GetEvent().GetLsn() != 8 {
 		t.Fatalf("responses[1].event.lsn = %d, want 8", stream.responses[1].GetEvent().GetLsn())
 	}
-	if backend.tailPartition != 1 || backend.tailStartAfter != 6 || backend.tailFromNow {
-		t.Fatalf("backend tail args = (%d,%d,%t), want (1,6,false)", backend.tailPartition, backend.tailStartAfter, backend.tailFromNow)
+	if backend.tailPartition != 1 || backend.tailStartAfter != 6 || !backend.tailHasStartAfter {
+		t.Fatalf("backend tail args = (%d,%d,%t), want (1,6,true)", backend.tailPartition, backend.tailStartAfter, backend.tailHasStartAfter)
 	}
 }
 
-func TestTailPartitionFromNow(t *testing.T) {
+func TestTailPartitionWithoutStartAfterBeginsLive(t *testing.T) {
 	t.Parallel()
 
 	backend := &backendStub{
@@ -178,38 +197,13 @@ func TestTailPartitionFromNow(t *testing.T) {
 	stream := &tailPartitionStreamStub{ctx: context.Background()}
 	err = service.TailPartition(&readerv1.TailPartitionRequest{
 		Partition: 1,
-		FromNow:   true,
 	}, stream)
 	if err != nil {
 		t.Fatalf("TailPartition() error = %v", err)
 	}
 
-	if !backend.tailFromNow {
-		t.Fatal("backend tail did not receive from_now=true")
-	}
-	if backend.tailStartAfter != 0 {
-		t.Fatalf("backend tail start_after = %d, want 0", backend.tailStartAfter)
-	}
-}
-
-func TestTailPartitionRejectsMixedStartModes(t *testing.T) {
-	t.Parallel()
-
-	service, err := NewService(&backendStub{})
-	if err != nil {
-		t.Fatalf("NewService() error = %v", err)
-	}
-
-	err = service.TailPartition(&readerv1.TailPartitionRequest{
-		Partition:     1,
-		StartAfterLsn: 6,
-		FromNow:       true,
-	}, &tailPartitionStreamStub{ctx: context.Background()})
-	if err == nil {
-		t.Fatal("TailPartition() error = nil, want invalid argument")
-	}
-	if got := status.Code(err); got != codes.InvalidArgument {
-		t.Fatalf("TailPartition() code = %s, want %s", got, codes.InvalidArgument)
+	if backend.tailHasStartAfter {
+		t.Fatal("backend tail unexpectedly received start_after_lsn")
 	}
 }
 
@@ -281,7 +275,7 @@ type backendStub struct {
 
 	tailPartition  int32
 	tailStartAfter uint64
-	tailFromNow    bool
+	tailHasStartAfter bool
 	tailEvents     []Event
 	tailErr        error
 }
@@ -312,10 +306,15 @@ func (b *backendStub) ConsumePartition(_ context.Context, partition int32, start
 	return b.consumeResult, nil
 }
 
-func (b *backendStub) TailPartition(_ context.Context, partition int32, startAfterLSN uint64, fromNow bool, handler func(Event) error) error {
+func (b *backendStub) TailPartition(_ context.Context, partition int32, startAfterLSN *uint64, handler func(Event) error) error {
 	b.tailPartition = partition
-	b.tailStartAfter = startAfterLSN
-	b.tailFromNow = fromNow
+	if startAfterLSN != nil {
+		b.tailStartAfter = *startAfterLSN
+		b.tailHasStartAfter = true
+	} else {
+		b.tailStartAfter = 0
+		b.tailHasStartAfter = false
+	}
 	if b.tailErr != nil {
 		return b.tailErr
 	}

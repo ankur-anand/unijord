@@ -3,7 +3,7 @@ module github.com/ankur-anand/unijord
 go 1.25.2
 
 require (
-	github.com/ankur-anand/isledb v0.3.0
+	github.com/ankur-anand/isledb v0.4.0
 	github.com/ankur-anand/walfs v0.0.1
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0
 	gocloud.dev v0.44.0
