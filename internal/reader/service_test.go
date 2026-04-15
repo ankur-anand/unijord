@@ -19,6 +19,39 @@ func TestNewServiceRequiresBackend(t *testing.T) {
 	}
 }
 
+func TestListPartitionHeads(t *testing.T) {
+	t.Parallel()
+
+	backend := &backendStub{
+		listHeadsResult: []PartitionHeadResult{
+			{Partition: 0, HighWatermarkLSN: 12},
+			{Partition: 1, HighWatermarkLSN: 15},
+		},
+	}
+	service, err := NewService(backend)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	resp, err := service.ListPartitionHeads(context.Background(), &readerv1.ListPartitionHeadsRequest{})
+	if err != nil {
+		t.Fatalf("ListPartitionHeads() error = %v", err)
+	}
+
+	if len(resp.GetHeads()) != 2 {
+		t.Fatalf("len(heads) = %d, want 2", len(resp.GetHeads()))
+	}
+	if resp.GetHeads()[0].GetPartition() != 0 || resp.GetHeads()[0].GetHighWatermarkLsn() != 12 {
+		t.Fatalf("heads[0] = (%d,%d), want (0,12)", resp.GetHeads()[0].GetPartition(), resp.GetHeads()[0].GetHighWatermarkLsn())
+	}
+	if resp.GetHeads()[1].GetPartition() != 1 || resp.GetHeads()[1].GetHighWatermarkLsn() != 15 {
+		t.Fatalf("heads[1] = (%d,%d), want (1,15)", resp.GetHeads()[1].GetPartition(), resp.GetHeads()[1].GetHighWatermarkLsn())
+	}
+	if backend.listHeadsCalls != 1 {
+		t.Fatalf("listHeadsCalls = %d, want 1", backend.listHeadsCalls)
+	}
+}
+
 func TestGetPartitionHead(t *testing.T) {
 	t.Parallel()
 
@@ -214,7 +247,28 @@ func TestGetPartitionHeadMapsPartitionNotFound(t *testing.T) {
 	}
 }
 
+func TestListPartitionHeadsMapsPartitionNotFound(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(&backendStub{listHeadsErr: ErrPartitionNotFound})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	_, err = service.ListPartitionHeads(context.Background(), &readerv1.ListPartitionHeadsRequest{})
+	if err == nil {
+		t.Fatal("ListPartitionHeads() error = nil, want not found")
+	}
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("ListPartitionHeads() code = %s, want %s", got, codes.NotFound)
+	}
+}
+
 type backendStub struct {
+	listHeadsCalls  int
+	listHeadsResult []PartitionHeadResult
+	listHeadsErr    error
+
 	headPartition int32
 	headResult    PartitionHeadResult
 	headErr       error
@@ -230,6 +284,14 @@ type backendStub struct {
 	tailFromNow    bool
 	tailEvents     []Event
 	tailErr        error
+}
+
+func (b *backendStub) ListPartitionHeads(_ context.Context) ([]PartitionHeadResult, error) {
+	b.listHeadsCalls++
+	if b.listHeadsErr != nil {
+		return nil, b.listHeadsErr
+	}
+	return b.listHeadsResult, nil
 }
 
 func (b *backendStub) GetPartitionHead(_ context.Context, partition int32) (PartitionHeadResult, error) {

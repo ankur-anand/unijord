@@ -35,6 +35,66 @@ var (
 	_ = metadata.Join
 )
 
+func request_ReaderService_ListPartitionHeads_0(ctx context.Context, marshaler runtime.Marshaler, client ReaderServiceClient, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
+	var (
+		protoReq ListPartitionHeadsRequest
+		metadata runtime.ServerMetadata
+	)
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+	}
+	msg, err := client.ListPartitionHeads(ctx, &protoReq, grpc.Header(&metadata.HeaderMD), grpc.Trailer(&metadata.TrailerMD))
+	return msg, metadata, err
+}
+
+func local_request_ReaderService_ListPartitionHeads_0(ctx context.Context, marshaler runtime.Marshaler, server ReaderServiceServer, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
+	var (
+		protoReq ListPartitionHeadsRequest
+		metadata runtime.ServerMetadata
+	)
+	msg, err := server.ListPartitionHeads(ctx, &protoReq)
+	return msg, metadata, err
+}
+
+func request_ReaderService_GetPartitionHead_0(ctx context.Context, marshaler runtime.Marshaler, client ReaderServiceClient, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
+	var (
+		protoReq GetPartitionHeadRequest
+		metadata runtime.ServerMetadata
+		err      error
+	)
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+	}
+	val, ok := pathParams["partition"]
+	if !ok {
+		return nil, metadata, status.Errorf(codes.InvalidArgument, "missing parameter %s", "partition")
+	}
+	protoReq.Partition, err = runtime.Int32(val)
+	if err != nil {
+		return nil, metadata, status.Errorf(codes.InvalidArgument, "type mismatch, parameter: %s, error: %v", "partition", err)
+	}
+	msg, err := client.GetPartitionHead(ctx, &protoReq, grpc.Header(&metadata.HeaderMD), grpc.Trailer(&metadata.TrailerMD))
+	return msg, metadata, err
+}
+
+func local_request_ReaderService_GetPartitionHead_0(ctx context.Context, marshaler runtime.Marshaler, server ReaderServiceServer, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
+	var (
+		protoReq GetPartitionHeadRequest
+		metadata runtime.ServerMetadata
+		err      error
+	)
+	val, ok := pathParams["partition"]
+	if !ok {
+		return nil, metadata, status.Errorf(codes.InvalidArgument, "missing parameter %s", "partition")
+	}
+	protoReq.Partition, err = runtime.Int32(val)
+	if err != nil {
+		return nil, metadata, status.Errorf(codes.InvalidArgument, "type mismatch, parameter: %s, error: %v", "partition", err)
+	}
+	msg, err := server.GetPartitionHead(ctx, &protoReq)
+	return msg, metadata, err
+}
+
 var filter_ReaderService_ConsumePartition_0 = &utilities.DoubleArray{Encoding: map[string]int{"partition": 0}, Base: []int{1, 1, 0}, Check: []int{0, 1, 2}}
 
 func request_ReaderService_ConsumePartition_0(ctx context.Context, marshaler runtime.Marshaler, client ReaderServiceClient, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error) {
@@ -131,6 +191,46 @@ func request_ReaderService_TailPartition_0(ctx context.Context, marshaler runtim
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using RegisterReaderServiceHandlerFromEndpoint instead.
 // GRPC interceptors will not work for this type of registration. To use interceptors, you must use the "runtime.WithMiddlewares" option in the "runtime.NewServeMux" call.
 func RegisterReaderServiceHandlerServer(ctx context.Context, mux *runtime.ServeMux, server ReaderServiceServer) error {
+	mux.Handle(http.MethodGet, pattern_ReaderService_ListPartitionHeads_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		var stream runtime.ServerTransportStream
+		ctx = grpc.NewContextWithServerTransportStream(ctx, &stream)
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		annotatedContext, err := runtime.AnnotateIncomingContext(ctx, mux, req, "/eventlake.reader.v1.ReaderService/ListPartitionHeads", runtime.WithHTTPPathPattern("/api/partitions/heads"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := local_request_ReaderService_ListPartitionHeads_0(annotatedContext, inboundMarshaler, server, req, pathParams)
+		md.HeaderMD, md.TrailerMD = metadata.Join(md.HeaderMD, stream.Header()), metadata.Join(md.TrailerMD, stream.Trailer())
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		forward_ReaderService_ListPartitionHeads_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+	})
+	mux.Handle(http.MethodGet, pattern_ReaderService_GetPartitionHead_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		var stream runtime.ServerTransportStream
+		ctx = grpc.NewContextWithServerTransportStream(ctx, &stream)
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		annotatedContext, err := runtime.AnnotateIncomingContext(ctx, mux, req, "/eventlake.reader.v1.ReaderService/GetPartitionHead", runtime.WithHTTPPathPattern("/api/partitions/{partition}/head"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := local_request_ReaderService_GetPartitionHead_0(annotatedContext, inboundMarshaler, server, req, pathParams)
+		md.HeaderMD, md.TrailerMD = metadata.Join(md.HeaderMD, stream.Header()), metadata.Join(md.TrailerMD, stream.Trailer())
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		forward_ReaderService_GetPartitionHead_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+	})
 	mux.Handle(http.MethodGet, pattern_ReaderService_ConsumePartition_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
 		ctx, cancel := context.WithCancel(req.Context())
 		defer cancel()
@@ -198,6 +298,40 @@ func RegisterReaderServiceHandler(ctx context.Context, mux *runtime.ServeMux, co
 // doesn't go through the normal gRPC flow (creating a gRPC client etc.) then it will be up to the passed in
 // "ReaderServiceClient" to call the correct interceptors. This client ignores the HTTP middlewares.
 func RegisterReaderServiceHandlerClient(ctx context.Context, mux *runtime.ServeMux, client ReaderServiceClient) error {
+	mux.Handle(http.MethodGet, pattern_ReaderService_ListPartitionHeads_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		annotatedContext, err := runtime.AnnotateContext(ctx, mux, req, "/eventlake.reader.v1.ReaderService/ListPartitionHeads", runtime.WithHTTPPathPattern("/api/partitions/heads"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := request_ReaderService_ListPartitionHeads_0(annotatedContext, inboundMarshaler, client, req, pathParams)
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		forward_ReaderService_ListPartitionHeads_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+	})
+	mux.Handle(http.MethodGet, pattern_ReaderService_GetPartitionHead_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		inboundMarshaler, outboundMarshaler := runtime.MarshalerForRequest(mux, req)
+		annotatedContext, err := runtime.AnnotateContext(ctx, mux, req, "/eventlake.reader.v1.ReaderService/GetPartitionHead", runtime.WithHTTPPathPattern("/api/partitions/{partition}/head"))
+		if err != nil {
+			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		resp, md, err := request_ReaderService_GetPartitionHead_0(annotatedContext, inboundMarshaler, client, req, pathParams)
+		annotatedContext = runtime.NewServerMetadataContext(annotatedContext, md)
+		if err != nil {
+			runtime.HTTPError(annotatedContext, mux, outboundMarshaler, w, req, err)
+			return
+		}
+		forward_ReaderService_GetPartitionHead_0(annotatedContext, mux, outboundMarshaler, w, req, resp, mux.GetForwardResponseOptions()...)
+	})
 	mux.Handle(http.MethodGet, pattern_ReaderService_ConsumePartition_0, func(w http.ResponseWriter, req *http.Request, pathParams map[string]string) {
 		ctx, cancel := context.WithCancel(req.Context())
 		defer cancel()
@@ -236,11 +370,15 @@ func RegisterReaderServiceHandlerClient(ctx context.Context, mux *runtime.ServeM
 }
 
 var (
-	pattern_ReaderService_ConsumePartition_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 1, 0, 4, 1, 5, 2, 2, 3}, []string{"api", "partitions", "partition", "consume"}, ""))
-	pattern_ReaderService_TailPartition_0    = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 1, 0, 4, 1, 5, 2, 2, 3}, []string{"api", "partitions", "partition", "tail"}, ""))
+	pattern_ReaderService_ListPartitionHeads_0 = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 2, 2}, []string{"api", "partitions", "heads"}, ""))
+	pattern_ReaderService_GetPartitionHead_0   = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 1, 0, 4, 1, 5, 2, 2, 3}, []string{"api", "partitions", "partition", "head"}, ""))
+	pattern_ReaderService_ConsumePartition_0   = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 1, 0, 4, 1, 5, 2, 2, 3}, []string{"api", "partitions", "partition", "consume"}, ""))
+	pattern_ReaderService_TailPartition_0      = runtime.MustPattern(runtime.NewPattern(1, []int{2, 0, 2, 1, 1, 0, 4, 1, 5, 2, 2, 3}, []string{"api", "partitions", "partition", "tail"}, ""))
 )
 
 var (
-	forward_ReaderService_ConsumePartition_0 = runtime.ForwardResponseMessage
-	forward_ReaderService_TailPartition_0    = runtime.ForwardResponseStream
+	forward_ReaderService_ListPartitionHeads_0 = runtime.ForwardResponseMessage
+	forward_ReaderService_GetPartitionHead_0   = runtime.ForwardResponseMessage
+	forward_ReaderService_ConsumePartition_0   = runtime.ForwardResponseMessage
+	forward_ReaderService_TailPartition_0      = runtime.ForwardResponseStream
 )

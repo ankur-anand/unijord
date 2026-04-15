@@ -1,18 +1,22 @@
 package reader
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	readerv1 "github.com/ankur-anand/unijord/gen/go/eventlake/reader/v1"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 )
 
-func TestHTTPHandlerGetPartitionHead(t *testing.T) {
+func TestGatewayMuxGetPartitionHead(t *testing.T) {
 	t.Parallel()
 
 	service, err := NewService(&backendStub{
 		headResult: PartitionHeadResult{
-			Partition:        2,
+			Partition:        0,
 			HighWatermarkLSN: 15,
 		},
 	})
@@ -20,19 +24,17 @@ func TestHTTPHandlerGetPartitionHead(t *testing.T) {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
-	handler := newHTTPHandler(service, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("gateway handler should not be called for /head")
-	}))
+	mux := newGatewayTestMux(t, service)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/partitions/2/head", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/partitions/0/head", nil)
 	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
+	mux.ServeHTTP(resp, req)
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
 	}
 	body := resp.Body.String()
-	if !strings.Contains(body, `"partition":2`) {
+	if !strings.Contains(body, `"partition":0`) {
 		t.Fatalf("body = %q, want partition field", body)
 	}
 	if !strings.Contains(body, `"highWatermarkLsn":"15"`) {
@@ -40,7 +42,41 @@ func TestHTTPHandlerGetPartitionHead(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerGetPartitionHeadNotFound(t *testing.T) {
+func TestGatewayMuxListPartitionHeads(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(&backendStub{
+		listHeadsResult: []PartitionHeadResult{
+			{Partition: 0, HighWatermarkLSN: 12},
+			{Partition: 1, HighWatermarkLSN: 15},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	mux := newGatewayTestMux(t, service)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/partitions/heads", nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, `"heads":[`) {
+		t.Fatalf("body = %q, want heads array", body)
+	}
+	if !strings.Contains(body, `"partition":0`) || !strings.Contains(body, `"highWatermarkLsn":"12"`) {
+		t.Fatalf("body = %q, want first head", body)
+	}
+	if !strings.Contains(body, `"partition":1`) || !strings.Contains(body, `"highWatermarkLsn":"15"`) {
+		t.Fatalf("body = %q, want second head", body)
+	}
+}
+
+func TestGatewayMuxGetPartitionHeadNotFound(t *testing.T) {
 	t.Parallel()
 
 	service, err := NewService(&backendStub{headErr: ErrPartitionNotFound})
@@ -48,44 +84,50 @@ func TestHTTPHandlerGetPartitionHeadNotFound(t *testing.T) {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
-	handler := newHTTPHandler(service, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Fatal("gateway handler should not be called for /head")
-	}))
+	mux := newGatewayTestMux(t, service)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/partitions/99/head", nil)
 	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
+	mux.ServeHTTP(resp, req)
 
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNotFound)
 	}
-	if !strings.Contains(resp.Body.String(), `"message":"get partition head failed:`) {
-		t.Fatalf("body = %q, want error message", resp.Body.String())
+	if !strings.Contains(resp.Body.String(), `"code":5`) {
+		t.Fatalf("body = %q, want grpc not found code", resp.Body.String())
 	}
 }
 
-func TestHTTPHandlerFallsBackToGateway(t *testing.T) {
+func TestGatewayMuxListPartitionHeadsNotFound(t *testing.T) {
 	t.Parallel()
 
-	service, err := NewService(&backendStub{})
+	service, err := NewService(&backendStub{listHeadsErr: ErrPartitionNotFound})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
-	called := false
-	handler := newHTTPHandler(service, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusNoContent)
-	}))
+	mux := newGatewayTestMux(t, service)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/partitions/2/consume", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/partitions/heads", nil)
 	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
+	mux.ServeHTTP(resp, req)
 
-	if !called {
-		t.Fatal("gateway handler was not called")
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNotFound)
 	}
-	if resp.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	if !strings.Contains(resp.Body.String(), `"code":5`) {
+		t.Fatalf("body = %q, want grpc not found code", resp.Body.String())
 	}
+}
+
+func newGatewayTestMux(t *testing.T, service *Service) http.Handler {
+	t.Helper()
+
+	mux := runtime.NewServeMux(
+		runtime.WithMarshalerOption(runtime.MIMEWildcard, gatewayMarshaler),
+	)
+	if err := readerv1.RegisterReaderServiceHandlerServer(context.Background(), mux, service); err != nil {
+		t.Fatalf("RegisterReaderServiceHandlerServer() error = %v", err)
+	}
+	return mux
 }
