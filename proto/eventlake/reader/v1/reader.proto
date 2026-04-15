@@ -40,7 +40,8 @@ message PartitionEvent {
 
 message PartitionHead {
   int32 partition = 1;
-  uint64 high_watermark_lsn = 2;
+  uint64 head_lsn = 2;
+  uint64 oldest_available_lsn = 3;
 }
 
 message ListPartitionHeadsRequest {}
@@ -55,7 +56,8 @@ message GetPartitionHeadRequest {
 
 message GetPartitionHeadResponse {
   int32 partition = 1;
-  uint64 high_watermark_lsn = 2;
+  uint64 head_lsn = 2;
+  uint64 oldest_available_lsn = 3;
 }
 
 message ConsumePartitionRequest {
@@ -67,13 +69,13 @@ message ConsumePartitionRequest {
 message ConsumePartitionResponse {
   repeated PartitionEvent events = 1;
   uint64 next_start_after_lsn = 2;
-  uint64 high_watermark_lsn = 3;
+  uint64 head_lsn = 3;
+  uint64 oldest_available_lsn = 4;
 }
 
 message TailPartitionRequest {
   int32 partition = 1;
-  uint64 start_after_lsn = 2;
-  bool from_now = 3;
+  optional uint64 start_after_lsn = 2;
 }
 
 message TailPartitionResponse {

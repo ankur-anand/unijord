@@ -35,8 +35,9 @@ func (s *Service) ListPartitionHeads(ctx context.Context, req *readerv1.ListPart
 	resp := &readerv1.ListPartitionHeadsResponse{}
 	for _, result := range results {
 		resp.Heads = append(resp.Heads, &readerv1.PartitionHead{
-			Partition:        result.Partition,
-			HighWatermarkLsn: result.HighWatermarkLSN,
+			Partition:          result.Partition,
+			HeadLsn:            result.HeadLSN,
+			OldestAvailableLsn: result.OldestAvailableLSN,
 		})
 	}
 	return resp, nil
@@ -56,8 +57,9 @@ func (s *Service) GetPartitionHead(ctx context.Context, req *readerv1.GetPartiti
 	}
 
 	return &readerv1.GetPartitionHeadResponse{
-		Partition:        result.Partition,
-		HighWatermarkLsn: result.HighWatermarkLSN,
+		Partition:          result.Partition,
+		HeadLsn:            result.HeadLSN,
+		OldestAvailableLsn: result.OldestAvailableLSN,
 	}, nil
 }
 
@@ -75,8 +77,9 @@ func (s *Service) ConsumePartition(ctx context.Context, req *readerv1.ConsumePar
 	}
 
 	resp := &readerv1.ConsumePartitionResponse{
-		NextStartAfterLsn: result.NextStartAfterLSN,
-		HighWatermarkLsn:  result.HighWatermarkLSN,
+		NextStartAfterLsn:  result.NextStartAfterLSN,
+		HeadLsn:            result.HeadLSN,
+		OldestAvailableLsn: result.OldestAvailableLSN,
 	}
 	for _, event := range result.Events {
 		resp.Events = append(resp.Events, eventToProto(event))
@@ -91,11 +94,14 @@ func (s *Service) TailPartition(req *readerv1.TailPartitionRequest, stream reade
 	if req.GetPartition() < 0 {
 		return status.Error(codes.InvalidArgument, "partition must be non-negative")
 	}
-	if req.GetFromNow() && req.GetStartAfterLsn() != 0 {
-		return status.Error(codes.InvalidArgument, "from_now cannot be combined with start_after_lsn")
+
+	var startAfterLSN *uint64
+	if req.StartAfterLsn != nil {
+		lsn := req.GetStartAfterLsn()
+		startAfterLSN = &lsn
 	}
 
-	err := s.backend.TailPartition(stream.Context(), req.GetPartition(), req.GetStartAfterLsn(), req.GetFromNow(), func(event Event) error {
+	err := s.backend.TailPartition(stream.Context(), req.GetPartition(), startAfterLSN, func(event Event) error {
 		return stream.Send(&readerv1.TailPartitionResponse{
 			Event: eventToProto(event),
 		})

@@ -30,9 +30,9 @@ type partitionController struct {
 	coord        *isledb.Coordinator
 	pollInterval time.Duration
 
-	mu            sync.RWMutex
-	highWatermark uint64
-	notify        chan struct{}
+	mu      sync.RWMutex
+	headLSN uint64
+	notify  chan struct{}
 
 	stopCh    chan struct{}
 	closeOnce sync.Once
@@ -101,7 +101,7 @@ func openPartitionController(ctx context.Context, cfg config.ReaderConfig, parti
 		store:         store,
 		coord:         coord,
 		pollInterval:  cfg.EffectiveManifestPollInterval(),
-		highWatermark: viewHighWatermark(initialView),
+		headLSN:       viewHeadLSN(initialView),
 		notify:        make(chan struct{}),
 		stopCh:        make(chan struct{}),
 	}
@@ -151,25 +151,28 @@ func (b *IsleBackend) GetPartitionHead(_ context.Context, partition int32) (Part
 	defer view.Close()
 
 	return PartitionHeadResult{
-		Partition:        partition,
-		HighWatermarkLSN: viewHighWatermark(view),
+		Partition:          partition,
+		HeadLSN:            viewHeadLSN(view),
+		OldestAvailableLSN: viewOldestAvailableLSN(view),
 	}, nil
 }
 
-func (b *IsleBackend) TailPartition(ctx context.Context, partition int32, startAfterLSN uint64, fromNow bool, handler func(Event) error) error {
+func (b *IsleBackend) TailPartition(ctx context.Context, partition int32, startAfterLSN *uint64, handler func(Event) error) error {
 	controller, err := b.partition(partition)
 	if err != nil {
 		return err
 	}
 
-	lastSeen := startAfterLSN
-	if fromNow {
+	var lastSeen uint64
+	if startAfterLSN == nil {
 		view := controller.coord.Current()
 		if view == nil {
 			return context.Canceled
 		}
-		lastSeen = viewHighWatermark(view)
+		lastSeen = viewHeadLSN(view)
 		_ = view.Close()
+	} else {
+		lastSeen = *startAfterLSN
 	}
 	for {
 		result, err := controller.consume(ctx, lastSeen, defaultTailBatchSize)
@@ -184,11 +187,11 @@ func (b *IsleBackend) TailPartition(ctx context.Context, partition int32, startA
 			lastSeen = event.LSN
 		}
 
-		if lastSeen < result.HighWatermarkLSN {
+		if lastSeen < result.HeadLSN {
 			continue
 		}
 
-		if err := controller.waitForAdvance(ctx, result.HighWatermarkLSN); err != nil {
+		if err := controller.waitForAdvance(ctx, result.HeadLSN); err != nil {
 			return err
 		}
 	}
@@ -220,17 +223,18 @@ func (c *partitionController) consume(ctx context.Context, startAfterLSN uint64,
 	}
 	defer view.Close()
 
-	highWatermark := viewHighWatermark(view)
+	headLSN := viewHeadLSN(view)
 	result := ConsumeResult{
-		NextStartAfterLSN: startAfterLSN,
-		HighWatermarkLSN:  highWatermark,
+		NextStartAfterLSN:  startAfterLSN,
+		HeadLSN:            headLSN,
+		OldestAvailableLSN: viewOldestAvailableLSN(view),
 	}
-	if highWatermark == 0 || startAfterLSN >= highWatermark {
+	if headLSN == 0 || startAfterLSN >= headLSN {
 		return result, nil
 	}
 
 	catchUpOpts := isledb.CatchUpOptions{
-		MaxKey: encodeLSNKey(highWatermark),
+		MaxKey: encodeLSNKey(headLSN),
 		Limit:  int(limit),
 	}
 	if startAfterLSN > 0 {
@@ -260,8 +264,8 @@ func (c *partitionController) consume(ctx context.Context, startAfterLSN uint64,
 
 func (c *partitionController) waitForAdvance(ctx context.Context, afterLSN uint64) error {
 	for {
-		highWatermark, notify := c.snapshot()
-		if highWatermark > afterLSN {
+		headLSN, notify := c.snapshot()
+		if headLSN > afterLSN {
 			return nil
 		}
 
@@ -305,19 +309,19 @@ func (c *partitionController) pollCommittedState() error {
 	}
 	defer view.Close()
 
-	c.advanceHighWatermark(viewHighWatermark(view))
+	c.advanceHeadLSN(viewHeadLSN(view))
 	return nil
 }
 
-func (c *partitionController) advanceHighWatermark(lsn uint64) {
+func (c *partitionController) advanceHeadLSN(lsn uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if lsn <= c.highWatermark {
+	if lsn <= c.headLSN {
 		return
 	}
 
-	c.highWatermark = lsn
+	c.headLSN = lsn
 	oldNotify := c.notify
 	c.notify = make(chan struct{})
 	close(oldNotify)
@@ -326,7 +330,7 @@ func (c *partitionController) advanceHighWatermark(lsn uint64) {
 func (c *partitionController) snapshot() (uint64, <-chan struct{}) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.highWatermark, c.notify
+	return c.headLSN, c.notify
 }
 
 func (c *partitionController) Close() error {
@@ -360,15 +364,26 @@ func closePartitionControllers(controllers map[int32]*partitionController) error
 	return firstErr
 }
 
-func viewHighWatermark(view isledb.View) uint64 {
+func viewHeadLSN(view isledb.View) uint64 {
 	if view == nil {
 		return 0
 	}
-	highWatermark, found := view.MaxCommittedLSN()
+	headLSN, found := view.MaxCommittedLSN()
 	if !found {
 		return 0
 	}
-	return highWatermark
+	return headLSN
+}
+
+func viewOldestAvailableLSN(view isledb.View) uint64 {
+	if view == nil {
+		return 0
+	}
+	oldestAvailableLSN, found := view.LowWatermarkLSN()
+	if !found {
+		return 0
+	}
+	return oldestAvailableLSN
 }
 
 func cloneBytes(src []byte) []byte {
