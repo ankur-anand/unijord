@@ -47,6 +47,9 @@ func TestAppend(t *testing.T) {
 	if got := string(records[0].Value); got != "hello" {
 		t.Fatalf("Snapshot()[0].Value = %q, want %q", got, "hello")
 	}
+	if records[0].TimestampMS != 1001 {
+		t.Fatalf("Snapshot()[0].TimestampMS = %d, want 1001", records[0].TimestampMS)
+	}
 }
 
 func TestAppendStream(t *testing.T) {
@@ -149,8 +152,9 @@ func (a *recordingAppender) Append(_ context.Context, value []byte) (Record, err
 
 	a.nextLSN++
 	record := Record{
-		LSN:   a.nextLSN,
-		Value: cloneBytes(value),
+		LSN:         a.nextLSN,
+		TimestampMS: 1000 + a.nextLSN,
+		Value:       cloneBytes(value),
 	}
 	a.records = append(a.records, record)
 	return record, nil
@@ -167,8 +171,9 @@ func (a *recordingAppender) snapshot() []Record {
 	records := make([]Record, 0, len(a.records))
 	for _, record := range a.records {
 		records = append(records, Record{
-			LSN:   record.LSN,
-			Value: cloneBytes(record.Value),
+			LSN:         record.LSN,
+			TimestampMS: record.TimestampMS,
+			Value:       cloneBytes(record.Value),
 		})
 	}
 	return records
