@@ -194,23 +194,23 @@ func (w *Writer) Append(ctx context.Context, r Record) error {
 		return ErrWriterAborted
 	}
 	if err := w.getFirstErr(); err != nil {
-		return w.fail(ctx, err)
+		return w.abortWith(ctx, err, true)
 	}
 	if err := w.validateRecord(r); err != nil {
-		return w.fail(ctx, err)
+		return w.abortWith(ctx, err, true)
 	}
 
 	recordSize := segformat.RecordHeaderSize + len(r.Value)
 	if w.active.Len() > 0 && !w.active.CanAppend(recordSize, w.opts.TargetBlockSize) {
 		if err := w.enqueueActive(ctx); err != nil {
-			return w.fail(ctx, err)
+			return w.abortWith(ctx, err, true)
 		}
 		if err := w.takeFreeBuffer(ctx); err != nil {
-			return w.fail(ctx, err)
+			return w.abortWith(ctx, err, true)
 		}
 	}
 	if err := w.active.Append(r, w.opts.TargetBlockSize); err != nil {
-		return w.fail(ctx, err)
+		return w.abortWith(ctx, err, true)
 	}
 
 	if !w.hasRecords {
@@ -234,52 +234,52 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 		return Result{}, ErrWriterAborted
 	}
 	if err := w.getFirstErr(); err != nil {
-		return Result{}, w.fail(ctx, err)
+		return Result{}, w.abortWith(ctx, err, true)
 	}
 	if !w.hasRecords {
-		return Result{}, w.fail(ctx, ErrEmptySegment)
+		return Result{}, w.abortWith(ctx, ErrEmptySegment, true)
 	}
 	restoreEmitCtx := w.setEmitContext(ctx)
 	defer restoreEmitCtx()
 	if w.active != nil && w.active.Len() > 0 {
 		if err := w.enqueueActive(ctx); err != nil {
-			return Result{}, w.fail(ctx, err)
+			return Result{}, w.abortWith(ctx, err, true)
 		}
 		w.active = nil
 	}
 	emitted := w.finishPipeline()
 	if emitted.Err != nil {
-		return Result{}, w.failAfterPipeline(ctx, emitted.Err)
+		return Result{}, w.abortWith(ctx, emitted.Err, false)
 	}
 	if err := w.getFirstErr(); err != nil {
-		return Result{}, w.failAfterPipeline(ctx, err)
+		return Result{}, w.abortWith(ctx, err, false)
 	}
 
 	p := emitted.Packer
 	if p == nil {
-		return Result{}, w.failAfterPipeline(ctx, ErrEmptySegment)
+		return Result{}, w.abortWith(ctx, ErrEmptySegment, false)
 	}
 	indexOffset := p.Offset()
 	trailer := w.trailer(indexOffset, uint32(len(emitted.Index)), 0)
 	indexBytes, _, err := segformat.MarshalBlockIndex(emitted.Index, trailer)
 	if err != nil {
-		return Result{}, w.failAfterPipeline(ctx, err)
+		return Result{}, w.abortWith(ctx, err, false)
 	}
 	if err := p.WriteBody(ctx, indexBytes); err != nil {
-		return Result{}, w.failAfterPipeline(ctx, err)
+		return Result{}, w.abortWith(ctx, err, false)
 	}
 	trailer.SegmentHash = p.BodyHash()
 	trailerBytes, sealedTrailer, err := segformat.MarshalTrailer(trailer)
 	if err != nil {
-		return Result{}, w.failAfterPipeline(ctx, err)
+		return Result{}, w.abortWith(ctx, err, false)
 	}
 	trailer = sealedTrailer
 	if err := p.WriteFinal(ctx, trailerBytes); err != nil {
-		return Result{}, w.failAfterPipeline(ctx, err)
+		return Result{}, w.abortWith(ctx, err, false)
 	}
 	object, err := p.Complete(ctx)
 	if err != nil {
-		return Result{}, w.failAfterPipeline(ctx, err)
+		return Result{}, w.abortWith(ctx, err, false)
 	}
 
 	w.closed = true
@@ -542,25 +542,15 @@ func (w *Writer) trailer(indexOffset uint64, blockCount uint32, segmentHash uint
 	}
 }
 
-func (w *Writer) fail(ctx context.Context, err error) error {
+func (w *Writer) abortWith(ctx context.Context, err error, drainPipeline bool) error {
 	if err == nil {
 		return nil
 	}
 	w.setFirstErr(err)
 	w.aborted = true
-	w.finishPipeline()
-	if p := w.getPacker(); p != nil {
-		_ = p.Abort(ctx)
+	if drainPipeline {
+		_ = w.finishPipeline()
 	}
-	return err
-}
-
-func (w *Writer) failAfterPipeline(ctx context.Context, err error) error {
-	if err == nil {
-		return nil
-	}
-	w.setFirstErr(err)
-	w.aborted = true
 	if p := w.getPacker(); p != nil {
 		_ = p.Abort(ctx)
 	}
