@@ -297,7 +297,7 @@ func (w *Writer) Abort(ctx context.Context) error {
 	}
 	w.aborted = true
 	w.setFirstErr(ErrWriterAborted)
-	w.finishPipeline()
+	_ = w.finishPipeline()
 	if p := w.getPacker(); p != nil {
 		return p.Abort(ctx)
 	}
@@ -624,12 +624,11 @@ func (w *Writer) returnPending(pending map[uint64]sealedBlockResult) {
 
 func (w *Writer) setEmitContext(ctx context.Context) func() {
 	w.emitCtxMu.Lock()
-	prev := w.emitCtx
 	w.emitCtx = ctx
 	w.emitCtxMu.Unlock()
 	return func() {
 		w.emitCtxMu.Lock()
-		w.emitCtx = prev
+		w.emitCtx = nil
 		w.emitCtxMu.Unlock()
 	}
 }

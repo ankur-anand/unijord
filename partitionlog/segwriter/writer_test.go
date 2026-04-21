@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -382,6 +383,7 @@ func TestWriterAbortsTxnOnUploadFailure(t *testing.T) {
 func TestWriterCloseAfterAsyncUploadErrorDrainsAndAborts(t *testing.T) {
 	t.Parallel()
 
+	before := runtime.NumGoroutine()
 	sink := &failingSink{failErr: errors.New("upload failed async")}
 	opts := testWriterOptions(segformat.CodecNone)
 	opts.TargetBlockSize = 32
@@ -408,6 +410,7 @@ func TestWriterCloseAfterAsyncUploadErrorDrainsAndAborts(t *testing.T) {
 	if got := sink.abortCount(); got != 1 {
 		t.Fatalf("Abort calls = %d, want 1", got)
 	}
+	assertNoGoroutineLeak(t, before, 4)
 }
 
 func TestWriterCloseContextCancelsLazyBegin(t *testing.T) {
@@ -556,6 +559,24 @@ func waitForWriterErr(t *testing.T, w *Writer) {
 		select {
 		case <-deadline:
 			t.Fatal("timed out waiting for writer error")
+		case <-ticker.C:
+		}
+	}
+}
+
+func assertNoGoroutineLeak(t *testing.T, before int, slack int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		runtime.GC()
+		if got := runtime.NumGoroutine(); got <= before+slack {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("goroutine count did not settle: got=%d before=%d slack=%d", runtime.NumGoroutine(), before, slack)
 		case <-ticker.C:
 		}
 	}

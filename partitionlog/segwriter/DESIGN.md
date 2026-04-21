@@ -210,7 +210,8 @@ uploads.
 ## Contexts
 
 `Append(ctx)` uses `ctx` while enqueueing work or waiting for a free block
-buffer.
+buffer. Work that has already been handed to seal workers, the emitter, or
+upload workers runs on the writer lifetime context until `Close` or `Abort`.
 
 `Close(ctx)` uses `ctx` for final enqueue, lazy `sink.Begin`, index/trailer
 writes, final flush, and `Txn.Complete`. Already-enqueued upload workers use the
