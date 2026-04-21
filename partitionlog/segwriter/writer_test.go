@@ -91,6 +91,40 @@ func TestWriterEndToEndZstd(t *testing.T) {
 	}
 }
 
+func TestWriterEndToEndCRC32C(t *testing.T) {
+	t.Parallel()
+
+	records := makeWriterRecords(64, 700, 20_000, 128)
+	sink := NewMemorySink("memory://crc32c")
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.HashAlgo = segformat.HashCRC32C
+	opts.TargetBlockSize = 512
+	opts.PartSize = 256
+
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, record := range records {
+		if err := w.Append(context.Background(), record); err != nil {
+			t.Fatalf("Append() error = %v", err)
+		}
+	}
+	result, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	decoded := decodeSegmentForTest(t, sink.Bytes())
+	assertRecordsEqual(t, decoded.records, records)
+	if decoded.trailer.HashAlgo != segformat.HashCRC32C {
+		t.Fatalf("hash_algo = %v, want %v", decoded.trailer.HashAlgo, segformat.HashCRC32C)
+	}
+	if result.Trailer != decoded.trailer {
+		t.Fatalf("result trailer = %+v, decoded trailer = %+v", result.Trailer, decoded.trailer)
+	}
+}
+
 func TestWriterParallelSealingProducesOrderedSegment(t *testing.T) {
 	t.Parallel()
 

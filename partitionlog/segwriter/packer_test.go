@@ -388,6 +388,41 @@ func TestPackerUploadLimiterBoundsConcurrency(t *testing.T) {
 	}
 }
 
+func TestSemaphoreUploadLimiterRejectsInvalidSize(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewSemaphoreUploadLimiter(0); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("NewSemaphoreUploadLimiter(0) error = %v, want %v", err, ErrInvalidOptions)
+	}
+	if _, err := NewSemaphoreUploadLimiter(-1); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("NewSemaphoreUploadLimiter(-1) error = %v, want %v", err, ErrInvalidOptions)
+	}
+}
+
+func TestSemaphoreUploadLimiterAcquireHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	limiter, err := NewSemaphoreUploadLimiter(1)
+	if err != nil {
+		t.Fatalf("NewSemaphoreUploadLimiter() error = %v", err)
+	}
+	if err := limiter.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire(first) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := limiter.Acquire(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Acquire(canceled) error = %v, want %v", err, context.Canceled)
+	}
+
+	limiter.Release()
+	if err := limiter.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire(after release) error = %v", err)
+	}
+	limiter.Release()
+}
+
 func TestPackerRejectsInvalidOptions(t *testing.T) {
 	t.Parallel()
 

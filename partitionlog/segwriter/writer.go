@@ -297,6 +297,7 @@ func (w *Writer) Abort(ctx context.Context) error {
 	}
 	w.aborted = true
 	w.setFirstErr(ErrWriterAborted)
+	w.cancel()
 	_ = w.finishPipeline()
 	if p := w.getPacker(); p != nil {
 		return p.Abort(ctx)
@@ -520,7 +521,7 @@ func (w *Writer) getPacker() *packer {
 }
 
 func (w *Writer) trailer(indexOffset uint64, blockCount uint32, segmentHash uint64) segformat.Trailer {
-	indexLength := uint32(segformat.IndexPreambleSize) + blockCount*uint32(segformat.BlockIndexEntrySize)
+	indexLength := uint64(segformat.IndexPreambleSize) + uint64(blockCount)*uint64(segformat.BlockIndexEntrySize)
 	return segformat.Trailer{
 		Partition:        w.opts.Partition,
 		Codec:            w.opts.Codec,
@@ -533,8 +534,8 @@ func (w *Writer) trailer(indexOffset uint64, blockCount uint32, segmentHash uint
 		RecordCount:      w.recordCount,
 		BlockCount:       blockCount,
 		BlockIndexOffset: indexOffset,
-		BlockIndexLength: indexLength,
-		TotalSize:        indexOffset + uint64(indexLength) + uint64(segformat.TrailerSize),
+		BlockIndexLength: uint32(indexLength),
+		TotalSize:        indexOffset + indexLength + uint64(segformat.TrailerSize),
 		CreatedUnixMS:    w.opts.CreatedUnixMS,
 		SegmentUUID:      w.opts.SegmentUUID,
 		WriterTag:        w.opts.WriterTag,

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"hash"
-	"hash/crc32"
 	"sort"
 	"sync"
 
@@ -287,6 +286,9 @@ func (p *packer) uploadPart(part Part) (PartReceipt, error) {
 }
 
 func (p *packer) pollResults() error {
+	// Results drained here are intentionally counted in p.collected.
+	// collectUntilDone waits on collected < enqueued, so early polling during
+	// writes cannot cause Complete to wait for already-observed uploads.
 	for {
 		select {
 		case result := <-p.results:
@@ -348,7 +350,7 @@ func (p *packer) closeParts() {
 func newDigest(algo segformat.HashAlgo) (digest64, error) {
 	switch algo {
 	case segformat.HashCRC32C:
-		return crc32Digest{Hash32: crc32.New(crc32.MakeTable(crc32.Castagnoli))}, nil
+		return crc32Digest{Hash32: segformat.NewCRC32C()}, nil
 	case segformat.HashXXH64:
 		return xxhash.New(), nil
 	default:
