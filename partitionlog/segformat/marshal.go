@@ -216,6 +216,20 @@ func (t Trailer) MarshalBinary() ([]byte, error) {
 	return buf, nil
 }
 
+// MarshalTrailer serializes t and returns the parsed trailer with the derived
+// TrailerHash populated.
+func MarshalTrailer(t Trailer) ([]byte, Trailer, error) {
+	buf, err := t.MarshalBinary()
+	if err != nil {
+		return nil, Trailer{}, err
+	}
+	sealed, err := ParseTrailer(buf, t.TotalSize)
+	if err != nil {
+		return nil, Trailer{}, err
+	}
+	return buf, sealed, nil
+}
+
 func ParseTrailer(buf []byte, objectSize uint64) (Trailer, error) {
 	var t Trailer
 	if len(buf) != TrailerSize {

@@ -122,9 +122,9 @@ func TestTrailerMarshalParseVerifiesHash(t *testing.T) {
 		WriterTag:        writer,
 		SegmentHash:      0xabc123,
 	}
-	buf, err := in.MarshalBinary()
+	buf, out, err := MarshalTrailer(in)
 	if err != nil {
-		t.Fatalf("MarshalBinary() error = %v", err)
+		t.Fatalf("MarshalTrailer() error = %v", err)
 	}
 	if string(buf[0:4]) != "PLFT" {
 		t.Fatalf("magic = %q", buf[0:4])
@@ -132,15 +132,18 @@ func TestTrailerMarshalParseVerifiesHash(t *testing.T) {
 	if got := binary.BigEndian.Uint64(buf[128:136]); got != in.SegmentHash {
 		t.Fatalf("segment_hash = %x, want %x", got, in.SegmentHash)
 	}
-	if got := binary.BigEndian.Uint64(buf[136:144]); got == 0 {
+	if out.TrailerHash == 0 {
 		t.Fatal("trailer_hash = 0, want non-zero")
 	}
 
-	out, err := ParseTrailer(buf, in.TotalSize)
+	parsed, err := ParseTrailer(buf, in.TotalSize)
 	if err != nil {
 		t.Fatalf("ParseTrailer() error = %v", err)
 	}
-	in.TrailerHash = binary.BigEndian.Uint64(buf[136:144])
+	if parsed != out {
+		t.Fatalf("parsed trailer = %+v, want %+v", parsed, out)
+	}
+	in.TrailerHash = out.TrailerHash
 	if out != in {
 		t.Fatalf("parsed trailer = %+v, want %+v", out, in)
 	}
