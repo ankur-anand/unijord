@@ -7,6 +7,17 @@ import (
 )
 
 func Seal(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta Meta) (Sealed, error) {
+	return seal(codec, hashAlgo, raw, meta, false)
+}
+
+// SealOwned is equivalent to Seal, except the caller transfers ownership of
+// raw to segblock. For CodecNone this lets the sealed block reuse raw as the
+// stored payload instead of copying it.
+func SealOwned(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta Meta) (Sealed, error) {
+	return seal(codec, hashAlgo, raw, meta, true)
+}
+
+func seal(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta Meta, rawOwned bool) (Sealed, error) {
 	if err := codec.Validate(); err != nil {
 		return Sealed{}, err
 	}
@@ -17,7 +28,7 @@ func Seal(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta M
 		return Sealed{}, err
 	}
 
-	stored, err := encodeStored(codec, raw)
+	stored, err := encodeStored(codec, raw, rawOwned)
 	if err != nil {
 		return Sealed{}, err
 	}
@@ -44,9 +55,12 @@ func Seal(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta M
 	return Sealed{Preamble: preamble, Stored: stored}, nil
 }
 
-func encodeStored(codec segformat.Codec, raw []byte) ([]byte, error) {
+func encodeStored(codec segformat.Codec, raw []byte, rawOwned bool) ([]byte, error) {
 	switch codec {
 	case segformat.CodecNone:
+		if rawOwned {
+			return raw, nil
+		}
 		return append([]byte(nil), raw...), nil
 	case segformat.CodecZstd:
 		enc := getZstdEncoder()
