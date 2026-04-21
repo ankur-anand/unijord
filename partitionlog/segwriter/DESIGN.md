@@ -47,10 +47,14 @@ err = w.Append(ctx, segwriter.Record{
 result, err := w.Close(ctx)
 ```
 
+`Writer` is not safe for concurrent use. The partition writer should call
+`Append`, `Close`, and `Abort` from one goroutine. Internal sealing and upload
+stages are concurrent, but the public writer API is single-owner.
+
 Convenience helper for tests and small local use:
 
 ```go
-bytes, meta, err := segwriter.Encode(records, opts)
+bytes, meta, err := segwriter.Encode(ctx, records, opts)
 ```
 
 ## Public Types
@@ -64,6 +68,8 @@ type Options struct {
 
     TargetBlockSize   int
     PartSize          int
+    SealParallelism   int
+    BlockBufferCount  int
     UploadParallelism int
     UploadQueueSize   int
     UploadLimiter     UploadLimiter
@@ -82,6 +88,7 @@ type Record struct {
 type Result struct {
     Metadata Metadata
     Object   CommittedObject
+    Trailer  segformat.Trailer
 }
 
 type Metadata struct {
@@ -96,14 +103,22 @@ type Metadata struct {
     SegmentUUID    [16]byte
     Codec          segformat.Codec
     HashAlgo       segformat.HashAlgo
+    SegmentHash    uint64
+    TrailerHash    uint64
 }
 ```
+
+`Metadata` is the stable commit summary intended for manifest/catalog
+publication. `Trailer` is the raw on-disk trailer, exposed for tests and
+debugging.
 
 Defaults:
 
 ```text
 TargetBlockSize   = 1 MiB
 PartSize          = 8 MiB
+SealParallelism   = min(runtime.NumCPU(), 4)
+BlockBufferCount  = 2 * SealParallelism + 1
 UploadParallelism = 2
 UploadQueueSize   = UploadParallelism
 ```
@@ -111,6 +126,11 @@ UploadQueueSize   = UploadParallelism
 Use `DefaultOptions(partition)` when the desired defaults are zstd + xxh64.
 The raw zero value of `Options` still maps to the format's zero-value codec and
 hash algorithm (`none` + `crc32c`).
+
+If `SegmentUUID` is zero, `New` generates a random 16-byte segment identity.
+If `CreatedUnixMS` is zero, `New` fills it with the current UTC Unix
+millisecond timestamp. `WriterTag` remains caller-owned and may be zero when
+the deployment does not need an operator-visible writer identity.
 
 ## Sink API
 
@@ -172,7 +192,6 @@ func (p *packer) BodyHash() uint64
 func (p *packer) WriteFinal(ctx context.Context, b []byte) error
 func (p *packer) Complete(ctx context.Context) (CommittedObject, error)
 func (p *packer) Abort(ctx context.Context) error
-func (p *packer) Err() error
 ```
 
 Rules:
@@ -295,24 +314,28 @@ Append(record)
   -> validate writer state
   -> validate LSN continuity
   -> validate timestamp monotonicity
-  -> flush current block if record would exceed target block size
-  -> append record to current block builder
+  -> enqueue current block if record would exceed target block size
+  -> take a free block buffer
+  -> append record to active block buffer
 
-flushBlock
-  -> segformat.EncodeRawBlock(current records)
-  -> segblock.Seal(codec, hash, raw, meta)
+seal workers
+  -> receive frozen block buffers
+  -> segblock.SealOwned(codec, hash, raw, meta)
+  -> send sealed blocks to ordered emitter
+
+ordered emitter
   -> ensurePacker
   -> blockOffset = packer.Offset()
   -> marshal block preamble
   -> packer.WriteBody(block preamble)
   -> packer.WriteBody(stored block bytes)
   -> append block index entry
-  -> discard raw and stored bytes
-  -> reset block builder
+  -> return block buffer to freeBuffers
 
 Close
   -> if no records were appended: return empty segment error
-  -> flush current block
+  -> enqueue current block
+  -> drain seal workers and ordered emitter
   -> indexOffset = packer.Offset()
   -> build trailer summary fields except hashes
   -> marshal index region from index entries
@@ -343,21 +366,85 @@ boundary. Object storage reassembles parts by part number.
 
 ## Block Builder
 
-The writer has an internal block builder.
+The writer has an internal ring of block buffers.
+
+One `Writer` owns exactly one segment, and the ring is local to that writer.
+Buffers never move between writers.
+
+```text
+writer A -> segment A -> ring A
+writer B -> segment B -> ring B
+```
+
+On partition rotation:
+
+```text
+old := activeWriter
+activeWriter = new writer with a fresh ring
+go old.Close(ctx)
+```
+
+The old writer drains and commits its own ring in the background. The new writer
+accepts appends into a different ring. No buffer needs to carry segment identity
+because the writer is the segment owner.
+
+### Ring Buffer Pipeline
+
+```text
+Append goroutine
+  -> active block buffer
+  -> when full: enqueue active buffer to seal queue
+  -> take next buffer from freeBuffers
+  -> continue appending
+
+seal workers
+  -> receive frozen block buffer
+  -> segblock.SealOwned(codec, hash, raw, meta)
+  -> send sealed result to ordered emitter
+
+ordered emitter
+  -> waits for sequence 0,1,2...
+  -> ensurePacker
+  -> WriteBody(block preamble)
+  -> WriteBody(stored bytes)
+  -> append block index entry
+  -> reset buffer
+  -> return buffer to freeBuffers
+```
+
+The emitter is single-threaded so final segment byte order stays deterministic.
+Seal workers may finish out of order; the emitter buffers those results until
+the next expected sequence is available.
+
+Backpressure is explicit:
+
+```text
+seal workers slow or upload slow
+  -> buffers are not returned to freeBuffers
+  -> Append eventually blocks waiting for a free buffer
+```
+
+Memory is bounded by:
+
+```text
+BlockBufferCount * TargetBlockSize
++ packer queued/uploading parts
++ small ordered-emitter pending map
+```
 
 It tracks:
 
 ```text
+seq
 base_lsn
 record_count
 min_timestamp_ms
 max_timestamp_ms
 raw_size
-records
+raw bytes
 ```
 
-It is not public initially. If another package needs it later, it can be
-extracted.
+It is not public. If another package needs it later, it can be extracted.
 
 ## Roll Conditions
 
@@ -422,6 +509,6 @@ This slice proves:
 - upload limiter bounds concurrent uploads
 - byte-level e2e validation through `segformat` + `segblock`
 
-The first full writer implementation is intentionally serial for block sealing.
-Parallel block sealing can be added later without changing the format or sink
-contract.
+The current implementation uses a bounded async seal pipeline, so Append blocks
+only when all block buffers are in use or upload backpressure prevents the
+emitter from returning buffers.

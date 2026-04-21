@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sort"
 	"sync"
 )
 
@@ -57,10 +56,10 @@ func (t *memoryTxn) UploadPart(_ context.Context, part Part) (PartReceipt, error
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.aborted {
-		return PartReceipt{}, ErrWriterAborted
+		return PartReceipt{}, ErrTxnAborted
 	}
 	if t.completed {
-		return PartReceipt{}, ErrWriterClosed
+		return PartReceipt{}, ErrTxnCompleted
 	}
 	if part.Number <= 0 {
 		return PartReceipt{}, fmt.Errorf("%w: invalid part number %d", ErrInvalidOptions, part.Number)
@@ -76,15 +75,12 @@ func (t *memoryTxn) Complete(_ context.Context, receipts []PartReceipt) (Committ
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.aborted {
-		return CommittedObject{}, ErrWriterAborted
+		return CommittedObject{}, ErrTxnAborted
 	}
 	if t.completed {
-		return CommittedObject{}, ErrWriterClosed
+		return CommittedObject{}, ErrTxnCompleted
 	}
 
-	sort.Slice(receipts, func(i, j int) bool {
-		return receipts[i].Number < receipts[j].Number
-	})
 	var out bytes.Buffer
 	for i, receipt := range receipts {
 		want := i + 1
@@ -116,6 +112,10 @@ func (t *memoryTxn) Complete(_ context.Context, receipts []PartReceipt) (Committ
 
 func (t *memoryTxn) Abort(_ context.Context) error {
 	t.mu.Lock()
+	if t.completed {
+		t.mu.Unlock()
+		return nil
+	}
 	t.aborted = true
 	t.parts = nil
 	t.mu.Unlock()

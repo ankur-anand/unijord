@@ -14,4 +14,6 @@ var (
 	ErrBodySealed       = errors.New("segwriter: body already sealed")
 	ErrBodyNotSealed    = errors.New("segwriter: body not sealed")
 	ErrEmptyObject      = errors.New("segwriter: empty object")
+	ErrTxnAborted       = errors.New("segwriter: transaction aborted")
+	ErrTxnCompleted     = errors.New("segwriter: transaction completed")
 )

@@ -217,6 +217,58 @@ func TestPackerUploadErrorPropagatesAndAbortIsAllowed(t *testing.T) {
 	}
 }
 
+func TestPackerWriteFinalReturnsPriorUploadError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("upload failed before final")
+	txn := newRecordingTxn()
+	txn.failPart = 1
+	txn.failErr = wantErr
+	p := newTestPacker(t, txn, packerOptions{PartSize: 4, UploadParallelism: 1})
+
+	if err := p.WriteBody(context.Background(), []byte("abcd")); err != nil {
+		t.Fatalf("WriteBody() error = %v", err)
+	}
+	_ = p.BodyHash()
+	waitForPackerResult(t, p)
+
+	if err := p.WriteFinal(context.Background(), []byte("x")); !errors.Is(err, wantErr) {
+		t.Fatalf("WriteFinal() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestPackerWriteBodyHonorsContextWhenUploadQueueFull(t *testing.T) {
+	t.Parallel()
+
+	txn := newBlockingUploadTxn()
+	defer txn.unblock()
+	p := newTestPacker(t, txn, packerOptions{PartSize: 1, UploadParallelism: 1, UploadQueueSize: 1})
+
+	if err := p.WriteBody(context.Background(), []byte("a")); err != nil {
+		t.Fatalf("WriteBody(first) error = %v", err)
+	}
+	txn.waitStarted(t)
+	if err := p.WriteBody(context.Background(), []byte("b")); err != nil {
+		t.Fatalf("WriteBody(second) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- p.WriteBody(ctx, []byte("c"))
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("WriteBody completed before context cancellation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteBody() error = %v, want %v", err, context.Canceled)
+	}
+}
+
 func TestPackerAbortIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -345,8 +397,25 @@ func TestPackerRejectsInvalidOptions(t *testing.T) {
 	if _, err := newPacker(context.Background(), newRecordingTxn(), packerOptions{PartSize: 0, HashAlgo: segformat.HashXXH64}); !errors.Is(err, ErrInvalidOptions) {
 		t.Fatalf("bad part size error = %v, want %v", err, ErrInvalidOptions)
 	}
-	if _, err := newPacker(context.Background(), newRecordingTxn(), packerOptions{PartSize: 1, HashAlgo: segformat.HashAlgo(99)}); !errors.Is(err, segformat.ErrUnsupportedHashAlgo) {
-		t.Fatalf("bad hash error = %v, want %v", err, segformat.ErrUnsupportedHashAlgo)
+	if _, err := newPacker(context.Background(), newRecordingTxn(), packerOptions{PartSize: 1, HashAlgo: segformat.HashAlgo(99)}); !errors.Is(err, ErrInvalidOptions) || !errors.Is(err, segformat.ErrUnsupportedHashAlgo) {
+		t.Fatalf("bad hash error = %v, want %v wrapping %v", err, ErrInvalidOptions, segformat.ErrUnsupportedHashAlgo)
+	}
+}
+
+func waitForPackerResult(t *testing.T, p *packer) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(p.results) > 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for packer upload result")
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -518,4 +587,55 @@ func (t *recordingTxn) maxActiveUploads() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.maxUploads
+}
+
+type blockingUploadTxn struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingUploadTxn() *blockingUploadTxn {
+	return &blockingUploadTxn{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (t *blockingUploadTxn) UploadPart(ctx context.Context, part Part) (PartReceipt, error) {
+	t.once.Do(func() {
+		close(t.started)
+	})
+	select {
+	case <-t.release:
+	case <-ctx.Done():
+		return PartReceipt{}, ctx.Err()
+	}
+	return PartReceipt{Number: part.Number, Token: fmt.Sprintf("blocked-%d", part.Number)}, nil
+}
+
+func (t *blockingUploadTxn) Complete(context.Context, []PartReceipt) (CommittedObject, error) {
+	return CommittedObject{URI: "memory://blocked", Token: "complete"}, nil
+}
+
+func (t *blockingUploadTxn) Abort(context.Context) error {
+	t.unblock()
+	return nil
+}
+
+func (t *blockingUploadTxn) waitStarted(tb testing.TB) {
+	tb.Helper()
+	select {
+	case <-t.started:
+	case <-time.After(2 * time.Second):
+		tb.Fatal("timed out waiting for blocking upload to start")
+	}
+}
+
+func (t *blockingUploadTxn) unblock() {
+	select {
+	case <-t.release:
+	default:
+		close(t.release)
+	}
 }

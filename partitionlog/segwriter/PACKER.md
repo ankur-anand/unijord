@@ -53,7 +53,6 @@ func (p *packer) BodyHash() uint64
 func (p *packer) WriteFinal(ctx context.Context, b []byte) error
 func (p *packer) Complete(ctx context.Context) (CommittedObject, error)
 func (p *packer) Abort(ctx context.Context) error
-func (p *packer) Err() error
 ```
 
 ## Sink Contract
@@ -208,6 +207,14 @@ Uploads may finish out of order.
 
 `Complete` sorts receipts by part number before calling `Txn.Complete`.
 
+The context passed to `WriteBody`, `WriteFinal`, and `Complete` controls the
+writer goroutine while it is enqueueing parts or waiting for completion. Once a
+part is accepted by the upload queue, the upload worker uses the packer's
+lifetime context created by `newPacker`. Canceling one write call does not
+cancel a part that was already handed to an upload worker. `Abort` cancels the
+packer lifetime context and stops in-flight uploads that honor context
+cancellation.
+
 ## Upload Limiter
 
 `UploadParallelism` is local to one packer.
@@ -273,7 +280,6 @@ The first upload error wins.
 
 After first error:
 
-- `Err()` returns that error
 - future writes return that error
 - `Complete` returns that error
 - writer should call `Abort`

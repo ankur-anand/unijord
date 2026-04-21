@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ankur-anand/unijord/partitionlog/segblock"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
@@ -89,6 +90,87 @@ func TestWriterEndToEndZstd(t *testing.T) {
 	}
 }
 
+func TestWriterParallelSealingProducesOrderedSegment(t *testing.T) {
+	t.Parallel()
+
+	records := makeWriterRecords(256, 10_000, 1_000_000, 512)
+	for i := range records {
+		if i%7 == 0 {
+			records[i].Value = bytes.Repeat([]byte{byte(i)}, 2048)
+		}
+	}
+	sink := NewMemorySink("memory://parallel")
+	opts := testWriterOptions(segformat.CodecZstd)
+	opts.TargetBlockSize = 4 << 10
+	opts.SealParallelism = 4
+	opts.BlockBufferCount = 9
+	opts.PartSize = 16 << 10
+	opts.UploadParallelism = 2
+
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, record := range records {
+		if err := w.Append(context.Background(), record); err != nil {
+			t.Fatalf("Append() error = %v", err)
+		}
+	}
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	decoded := decodeSegmentForTest(t, sink.Bytes())
+	assertRecordsEqual(t, decoded.records, records)
+	if decoded.trailer.BlockCount < 8 {
+		t.Fatalf("block_count = %d, want enough blocks to exercise parallel sealing", decoded.trailer.BlockCount)
+	}
+}
+
+func TestWriterRingBackpressureWhenUploadIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	sink := newBlockingSink()
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 32
+	opts.PartSize = 16
+	opts.SealParallelism = 1
+	opts.BlockBufferCount = 2
+	opts.UploadParallelism = 1
+	opts.UploadQueueSize = 1
+
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		for _, record := range makeWriterRecords(64, 1, 1, 24) {
+			if err := w.Append(context.Background(), record); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	sink.waitForUpload(t)
+	select {
+	case err := <-done:
+		t.Fatalf("Append loop completed before blocked upload was released: %v", err)
+	default:
+	}
+
+	sink.unblock()
+	if err := <-done; err != nil {
+		t.Fatalf("Append loop error = %v", err)
+	}
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestWriterEncodeHelper(t *testing.T) {
 	t.Parallel()
 
@@ -162,6 +244,33 @@ func TestWriterRejectsInvalidRecordSequence(t *testing.T) {
 	}
 }
 
+func TestWriterRejectsExhaustedLSNRange(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testWriterOptions(segformat.CodecNone), NewMemorySink("memory://lsn-exhausted"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: ^uint64(0), TimestampMS: 100, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(max lsn) error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 0, TimestampMS: 101, Value: []byte("b")}); !errors.Is(err, ErrNonContiguousLSN) {
+		t.Fatalf("Append(after max lsn) error = %v, want %v", err, ErrNonContiguousLSN)
+	}
+}
+
+func TestBlockBufferRejectsTimestampRegression(t *testing.T) {
+	t.Parallel()
+
+	var b blockBuffer
+	if err := b.Append(Record{LSN: 1, TimestampMS: 10, Value: []byte("a")}, 128); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := b.Append(Record{LSN: 2, TimestampMS: 9, Value: []byte("b")}, 128); !errors.Is(err, ErrTimestampOrder) {
+		t.Fatalf("Append(regression) error = %v, want %v", err, ErrTimestampOrder)
+	}
+}
+
 func TestWriterRejectsEmptyClose(t *testing.T) {
 	t.Parallel()
 
@@ -171,6 +280,51 @@ func TestWriterRejectsEmptyClose(t *testing.T) {
 	}
 	if _, err := w.Close(context.Background()); !errors.Is(err, ErrEmptySegment) {
 		t.Fatalf("Close(empty) error = %v, want %v", err, ErrEmptySegment)
+	}
+}
+
+func TestWriterRejectsInvalidOptions(t *testing.T) {
+	t.Parallel()
+
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.Codec = segformat.Codec(99)
+	if _, err := New(opts, NewMemorySink("memory://bad-codec")); !errors.Is(err, ErrInvalidOptions) || !errors.Is(err, segformat.ErrUnsupportedCodec) {
+		t.Fatalf("New(bad codec) error = %v, want %v wrapping %v", err, ErrInvalidOptions, segformat.ErrUnsupportedCodec)
+	}
+
+	opts = testWriterOptions(segformat.CodecNone)
+	opts.HashAlgo = segformat.HashAlgo(99)
+	if _, err := New(opts, NewMemorySink("memory://bad-hash")); !errors.Is(err, ErrInvalidOptions) || !errors.Is(err, segformat.ErrUnsupportedHashAlgo) {
+		t.Fatalf("New(bad hash) error = %v, want %v wrapping %v", err, ErrInvalidOptions, segformat.ErrUnsupportedHashAlgo)
+	}
+}
+
+func TestWriterFillsDefaultIdentityMetadata(t *testing.T) {
+	t.Parallel()
+
+	opts := DefaultOptions(3)
+	opts.Codec = segformat.CodecNone
+	opts.HashAlgo = segformat.HashXXH64
+	opts.CreatedUnixMS = 0
+	opts.SegmentUUID = [16]byte{}
+	before := time.Now().UTC().UnixMilli()
+
+	w, err := New(opts, NewMemorySink("memory://default-identity"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 1, TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	result, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if result.Metadata.SegmentUUID == ([16]byte{}) {
+		t.Fatal("SegmentUUID was not auto-filled")
+	}
+	if result.Trailer.CreatedUnixMS < before {
+		t.Fatalf("CreatedUnixMS = %d, want >= %d", result.Trailer.CreatedUnixMS, before)
 	}
 }
 
@@ -209,15 +363,13 @@ func TestWriterAbortsTxnOnUploadFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	var appendErr error
 	for _, record := range makeWriterRecords(4, 1, 1, 24) {
-		appendErr = w.Append(context.Background(), record)
-		if appendErr != nil {
-			break
+		if err := w.Append(context.Background(), record); err != nil {
+			t.Fatalf("Append() error = %v", err)
 		}
 	}
-	if !errors.Is(appendErr, sink.failErr) {
-		t.Fatalf("Append() upload error = %v, want %v", appendErr, sink.failErr)
+	if _, err := w.Close(context.Background()); !errors.Is(err, sink.failErr) {
+		t.Fatalf("Close() error = %v, want %v", err, sink.failErr)
 	}
 	if got := sink.abortCount(); got != 1 {
 		t.Fatalf("Abort calls = %d, want 1", got)
@@ -348,6 +500,68 @@ type failingSink struct {
 	mu      sync.Mutex
 	failErr error
 	aborts  int
+}
+
+type blockingSink struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingSink() *blockingSink {
+	return &blockingSink{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *blockingSink) Begin(context.Context, Plan) (Txn, error) {
+	return &blockingTxn{sink: s}, nil
+}
+
+func (s *blockingSink) waitForUpload(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upload to start")
+	}
+}
+
+func (s *blockingSink) unblock() {
+	close(s.release)
+}
+
+type blockingTxn struct {
+	sink *blockingSink
+	mu   sync.Mutex
+	size uint64
+}
+
+func (t *blockingTxn) UploadPart(ctx context.Context, part Part) (PartReceipt, error) {
+	t.sink.once.Do(func() {
+		close(t.sink.started)
+	})
+	select {
+	case <-t.sink.release:
+	case <-ctx.Done():
+		return PartReceipt{}, ctx.Err()
+	}
+	t.mu.Lock()
+	t.size += uint64(len(part.Bytes))
+	t.mu.Unlock()
+	return PartReceipt{Number: part.Number, Token: fmt.Sprintf("blocked-%d", part.Number)}, nil
+}
+
+func (t *blockingTxn) Complete(context.Context, []PartReceipt) (CommittedObject, error) {
+	t.mu.Lock()
+	size := t.size
+	t.mu.Unlock()
+	return CommittedObject{URI: "blocking://segment", SizeBytes: size, Token: "complete"}, nil
+}
+
+func (t *blockingTxn) Abort(context.Context) error {
+	return nil
 }
 
 func (s *failingSink) Begin(context.Context, Plan) (Txn, error) {

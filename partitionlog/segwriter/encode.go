@@ -16,7 +16,6 @@ func Encode(ctx context.Context, records []Record, opts Options) ([]byte, Metada
 	}
 	result, err := w.Close(ctx)
 	if err != nil {
-		_ = w.Abort(ctx)
 		return nil, Metadata{}, err
 	}
 	return sink.Bytes(), result.Metadata, nil

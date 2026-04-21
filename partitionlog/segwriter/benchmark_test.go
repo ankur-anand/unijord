@@ -82,6 +82,37 @@ func BenchmarkEncodeMemorySink(b *testing.B) {
 	}
 }
 
+func BenchmarkWriterSealParallelism(b *testing.B) {
+	for _, parallelism := range []int{1, 2, 4} {
+		b.Run(fmt.Sprintf("zstd_16k_x_128b_p%d", parallelism), func(b *testing.B) {
+			records := makeWriterRecords(16*1024, 1_000, 1_776_263_000_000, 128)
+			opts := benchOptions(segformat.CodecZstd)
+			opts.SealParallelism = parallelism
+			opts.BlockBufferCount = 2*parallelism + 1
+			b.SetBytes(int64(len(records) * (128 + segformat.RecordHeaderSize)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sink := &discardSink{}
+				w, err := New(opts, sink)
+				if err != nil {
+					b.Fatal(err)
+				}
+				for _, record := range records {
+					if err := w.Append(context.Background(), record); err != nil {
+						b.Fatal(err)
+					}
+				}
+				result, err := w.Close(context.Background())
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchWriterResult = result
+			}
+		})
+	}
+}
+
 func benchOptions(codec segformat.Codec) Options {
 	opts := DefaultOptions(7)
 	opts.Codec = codec

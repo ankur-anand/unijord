@@ -80,7 +80,7 @@ func newPacker(ctx context.Context, txn Txn, opts packerOptions) (*packer, error
 		opts.UploadQueueSize = opts.UploadParallelism
 	}
 	if err := opts.HashAlgo.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidOptions, err)
 	}
 	hasher, err := newDigest(opts.HashAlgo)
 	if err != nil {
@@ -176,11 +176,6 @@ func (p *packer) Abort(ctx context.Context) error {
 	p.aborted = true
 	p.stopWorkers()
 	return p.txn.Abort(ctx)
-}
-
-func (p *packer) Err() error {
-	_ = p.pollResults()
-	return p.firstErr
 }
 
 func (p *packer) write(ctx context.Context, b []byte, hashBody bool) error {
