@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/klauspost/compress/zstd"
 )
 
 func Seal(codec segformat.Codec, hashAlgo segformat.HashAlgo, raw []byte, meta Meta) (Sealed, error) {
@@ -50,11 +49,8 @@ func encodeStored(codec segformat.Codec, raw []byte) ([]byte, error) {
 	case segformat.CodecNone:
 		return append([]byte(nil), raw...), nil
 	case segformat.CodecZstd:
-		enc, err := zstd.NewWriter(nil)
-		if err != nil {
-			return nil, fmt.Errorf("create zstd encoder: %w", err)
-		}
-		defer enc.Close()
+		enc := getZstdEncoder()
+		defer putZstdEncoder(enc)
 		return enc.EncodeAll(raw, nil), nil
 	default:
 		return nil, fmt.Errorf("%w: %d", segformat.ErrUnsupportedCodec, uint16(codec))

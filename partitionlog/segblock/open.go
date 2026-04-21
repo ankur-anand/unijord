@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
-	"github.com/klauspost/compress/zstd"
 )
 
 func Open(codec segformat.Codec, hashAlgo segformat.HashAlgo, preamble segformat.BlockPreamble, stored []byte) ([]byte, error) {
@@ -42,11 +41,8 @@ func decodeStored(codec segformat.Codec, stored []byte, rawSize uint32) ([]byte,
 	case segformat.CodecNone:
 		return append([]byte(nil), stored...), nil
 	case segformat.CodecZstd:
-		dec, err := zstd.NewReader(nil)
-		if err != nil {
-			return nil, fmt.Errorf("create zstd decoder: %w", err)
-		}
-		defer dec.Close()
+		dec := getZstdDecoder()
+		defer putZstdDecoder(dec)
 		raw, err := dec.DecodeAll(stored, make([]byte, 0, rawSize))
 		if err != nil {
 			return nil, fmt.Errorf("decode zstd block: %w", err)
