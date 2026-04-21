@@ -2,6 +2,7 @@ package segformat
 
 import (
 	"fmt"
+	"hash"
 	"hash/crc32"
 
 	"github.com/cespare/xxhash/v2"
