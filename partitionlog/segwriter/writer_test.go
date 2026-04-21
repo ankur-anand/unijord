@@ -379,6 +379,64 @@ func TestWriterAbortsTxnOnUploadFailure(t *testing.T) {
 	}
 }
 
+func TestWriterCloseAfterAsyncUploadErrorDrainsAndAborts(t *testing.T) {
+	t.Parallel()
+
+	sink := &failingSink{failErr: errors.New("upload failed async")}
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 32
+	opts.PartSize = 16
+	opts.SealParallelism = 1
+	opts.BlockBufferCount = 3
+	opts.UploadParallelism = 1
+	opts.UploadQueueSize = 1
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 1, TimestampMS: 1, Value: bytes.Repeat([]byte("a"), 24)}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 2, TimestampMS: 2, Value: bytes.Repeat([]byte("b"), 24)}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	waitForWriterErr(t, w)
+	if _, err := w.Close(context.Background()); !errors.Is(err, sink.failErr) {
+		t.Fatalf("Close() error = %v, want %v", err, sink.failErr)
+	}
+	if got := sink.abortCount(); got != 1 {
+		t.Fatalf("Abort calls = %d, want 1", got)
+	}
+}
+
+func TestWriterCloseContextCancelsLazyBegin(t *testing.T) {
+	t.Parallel()
+
+	sink := newBlockingBeginSink()
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 1 << 20
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 1, TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Close(ctx)
+		done <- err
+	}()
+	sink.waitStarted(t)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close() error = %v, want %v", err, context.Canceled)
+	}
+}
+
 type decodedSegment struct {
 	preamble segformat.FilePreamble
 	trailer  segformat.Trailer
@@ -486,6 +544,23 @@ func assertRecordsEqual(t *testing.T, got []Record, want []Record) {
 	}
 }
 
+func waitForWriterErr(t *testing.T, w *Writer) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if w.getFirstErr() != nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for writer error")
+		case <-ticker.C:
+		}
+	}
+}
+
 func testWriterOptions(codec segformat.Codec) Options {
 	opts := DefaultOptions(3)
 	opts.Codec = codec
@@ -506,6 +581,32 @@ type blockingSink struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type blockingBeginSink struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func newBlockingBeginSink() *blockingBeginSink {
+	return &blockingBeginSink{started: make(chan struct{})}
+}
+
+func (s *blockingBeginSink) Begin(ctx context.Context, _ Plan) (Txn, error) {
+	s.once.Do(func() {
+		close(s.started)
+	})
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (s *blockingBeginSink) waitStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink.Begin")
+	}
 }
 
 func newBlockingSink() *blockingSink {

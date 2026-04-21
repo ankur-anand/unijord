@@ -1,13 +1,16 @@
 # segwriter packer
 
-The packer turns an ordered stream of segment bytes into multipart upload
-parts.
+The packer is an internal `segwriter` component that converts an ordered stream
+of segment bytes into ordered sink parts.
 
-It is internal to `segwriter`.
+It has no segment-format knowledge. The writer decides which bytes to emit; the
+packer preserves byte order, computes the segment-body hash, splits bytes into
+parts, sends full parts asynchronously, and completes or aborts the sink
+transaction.
 
-## Purpose
+## Byte Model
 
-The writer produces final segment bytes in order:
+The writer emits this ordered stream:
 
 ```text
 file preamble
@@ -18,7 +21,7 @@ index preamble + index entries
 trailer
 ```
 
-The sink wants multipart upload parts:
+The packer turns that stream into numbered parts:
 
 ```text
 part 1
@@ -27,24 +30,12 @@ part 2
 part N
 ```
 
-The packer is the boundary between those two models.
+Part boundaries are independent from segment-format boundaries. A part may cut
+through any format region.
 
-Multipart parts are not format regions. A part may split anywhere in the final
-byte stream.
-
-## API
+## API Shape
 
 ```go
-type packerOptions struct {
-    PartSize          int
-    UploadParallelism int
-    UploadQueueSize   int
-    HashAlgo          segformat.HashAlgo
-    UploadLimiter     UploadLimiter
-}
-
-type packer struct { /* internal */ }
-
 func newPacker(ctx context.Context, txn Txn, opts packerOptions) (*packer, error)
 
 func (p *packer) Offset() uint64
@@ -55,6 +46,13 @@ func (p *packer) Complete(ctx context.Context) (CommittedObject, error)
 func (p *packer) Abort(ctx context.Context) error
 ```
 
+`WriteBody` appends bytes to the object and includes them in the segment-body
+hash. `WriteFinal` appends bytes without hashing them. `BodyHash` seals the
+body hash and must be called before `WriteFinal` or `Complete`.
+
+The segment trailer is written through `WriteFinal`, so it is outside
+`segment_hash`.
+
 ## Sink Contract
 
 ```go
@@ -63,104 +61,17 @@ type Txn interface {
     Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
     Abort(ctx context.Context) error
 }
-
-type Part struct {
-    Number int
-    Bytes  []byte
-}
-
-type PartReceipt struct {
-    Number int
-    Token  string
-}
 ```
 
-`Txn.UploadPart` must be concurrency-safe.
-
-`Txn.UploadPart` must fully consume or copy `part.Bytes` before returning.
-The caller transfers ownership of the byte slice to the upload worker until
-`UploadPart` returns.
-
-## State
-
-The packer owns:
-
-```text
-part buffer
-current byte offset
-next part number
-upload queue
-upload workers
-part receipts
-first error
-segment hasher
-terminal state
-```
-
-The writer owns:
-
-```text
-format bytes
-block index entries
-trailer construction
-```
-
-## Write Semantics
-
-### `WriteBody`
-
-```go
-func (p *packer) WriteBody(ctx context.Context, b []byte) error
-```
-
-Effects:
-
-- appends `b` to the final object stream
-- advances `Offset()` by `len(b)`
-- updates `segment_hash`
-- flushes full parts to upload workers
-- returns any prior upload error
-
-### `WriteFinal`
-
-```go
-func (p *packer) WriteFinal(ctx context.Context, b []byte) error
-```
-
-Effects:
-
-- appends `b` to the final object stream
-- advances `Offset()` by `len(b)`
-- does not update `segment_hash`
-- flushes full parts to upload workers
-- returns any prior upload error
-
-`WriteFinal` may only be called after `BodyHash`.
-
-### `BodyHash`
-
-```go
-func (p *packer) BodyHash() uint64
-```
-
-Returns the hash over bytes written through `WriteBody`.
-
-The trailer is outside the segment hash.
+`UploadPart` must be concurrency-safe and must fully consume or copy
+`part.Bytes` before returning. `Complete` receives sorted contiguous receipts.
+`Abort` must be idempotent.
 
 ## Part Splitting
 
-The packer appends bytes into an active part buffer.
-
-```text
-if active buffer reaches PartSize:
-  flush non-final part
-```
-
-Non-final parts are exactly `PartSize` bytes.
-
-The final part is flushed by `Complete` and may be smaller.
-
-Example:
+The packer appends writes into an active part buffer. When the buffer reaches
+`PartSize`, it transfers that buffer to an upload worker and starts a new
+buffer.
 
 ```text
 WriteBody("abc")
@@ -171,198 +82,89 @@ part 1 = "abcd"
 part 2 = "efgh"
 ```
 
-The packer does not care whether `abcd` splits a block preamble or payload.
-It is only preserving byte order.
+Non-final parts are exactly `PartSize` bytes. The final part is flushed by
+`Complete` and may be smaller.
 
-## Ownership Transfer
+## Ownership
 
-When flushing a part:
+When a part is flushed, ownership of the byte slice transfers to an upload
+worker:
 
 ```go
-partBytes := p.buf
-p.buf = make([]byte, 0, p.partSize)
+part := Part{Number: n, Bytes: p.buf}
+p.buf = nil
 ```
 
-The worker owns `partBytes` until `Txn.UploadPart` returns.
-
-The packer must never mutate `partBytes` after enqueue.
-
-This avoids copying full part buffers before upload.
+The packer never mutates the part bytes after enqueueing. The sink owns the
+bytes for the duration of `UploadPart`; after `UploadPart` returns, ownership
+ends.
 
 ## Async Upload
 
-The packer starts `UploadParallelism` workers.
+The packer starts `UploadParallelism` workers. Full parts are sent to the sink
+while the writer continues producing later bytes.
 
 ```text
-packer write path
-  -> enqueue part
-  -> worker uploads part
-  -> worker sends result
-  -> packer collects receipt or first error
+writer goroutine
+  -> WriteBody / WriteFinal
+  -> enqueue full part
+
+upload workers
+  -> Txn.UploadPart concurrently
+  -> return receipts or first error
+
+Complete
+  -> flush final part
+  -> wait for uploads
+  -> sort receipts
+  -> Txn.Complete
 ```
 
-Part numbers are assigned in byte order.
+Part numbers are assigned in byte order. Uploads may finish out of order; the
+packer sorts receipts before completion.
 
-Uploads may finish out of order.
+## Contexts
 
-`Complete` sorts receipts by part number before calling `Txn.Complete`.
+The context passed to `WriteBody`, `WriteFinal`, or `Complete` controls the
+caller while it is enqueueing a part or waiting for completion.
 
-The context passed to `WriteBody`, `WriteFinal`, and `Complete` controls the
-writer goroutine while it is enqueueing parts or waiting for completion. Once a
-part is accepted by the upload queue, the upload worker uses the packer's
-lifetime context created by `newPacker`. Canceling one write call does not
-cancel a part that was already handed to an upload worker. `Abort` cancels the
-packer lifetime context and stops in-flight uploads that honor context
-cancellation.
-
-## Upload Limiter
-
-`UploadParallelism` is local to one packer.
-
-`UploadLimiter` is shared across packers when the partition writer wants a
-process-level or bucket-level cap.
-
-```go
-type UploadLimiter interface {
-    Acquire(ctx context.Context) error
-    Release()
-}
-```
-
-Workers acquire the limiter immediately before `Txn.UploadPart` and release it
-after `UploadPart` returns.
-
-This gives two knobs:
-
-```text
-UploadParallelism = max upload goroutines for this segment
-UploadLimiter     = max simultaneous object-store uploads across a wider scope
-```
-
-Example:
-
-```text
-16 active partitions
-UploadParallelism = 4 per partition
-shared limiter = 32
-```
-
-Without the limiter the process can issue up to 64 concurrent upload requests.
-With the limiter it never exceeds 32, while each hot partition can still use up
-to 4 slots when capacity is available.
+Once a part has been accepted by the upload queue, the upload worker uses the
+packer lifetime context created by `newPacker`. Canceling a single write call
+does not cancel an already-enqueued upload. `Abort` cancels the packer lifetime
+context and calls `Txn.Abort`.
 
 ## Backpressure
 
-The part queue is bounded.
+The upload queue is bounded by `UploadQueueSize`. If uploads are slower than
+writes and the queue fills, `WriteBody` / `WriteFinal` block until capacity is
+available, an upload fails, or the caller context is canceled.
 
-```text
-UploadQueueSize default = UploadParallelism
-```
-
-Maximum part-buffer memory is approximately:
+Approximate part-buffer memory:
 
 ```text
 (1 active buffer + UploadQueueSize queued + UploadParallelism uploading) * PartSize
 ```
 
-Default:
+`UploadLimiter` is optional and sits below `UploadParallelism`. Use it to share
+a broader concurrency cap across many packers.
 
-```text
-PartSize = 8 MiB
-UploadParallelism = 2
-UploadQueueSize = 2
-Max part memory ~= 40 MiB
-```
+## Error Semantics
 
-## Error Handling
+The first upload or sink error wins. After the first error:
 
-The first upload error wins.
+- future writes return that error;
+- `Complete` returns that error;
+- the writer should call `Abort`.
 
-After first error:
-
-- future writes return that error
-- `Complete` returns that error
-- writer should call `Abort`
-
-The packer must poll upload results during writes so background upload failure
-does not remain hidden until `Complete`.
-
-## Complete
-
-```text
-Complete
-  -> flush active buffer, if non-empty
-  -> close upload queue
-  -> wait for all workers/results
-  -> if any upload failed: return first error
-  -> sort receipts by part number
-  -> txn.Complete(receipts)
-```
-
-If no bytes were written, `Complete` returns an error. A valid segment is never
-empty.
-
-## Abort
-
-```text
-Abort
-  -> cancel worker context
-  -> stop accepting writes
-  -> close upload queue if not already closed
-  -> call txn.Abort
-```
-
-Abort is idempotent.
-
-`Abort` may race with in-flight uploads. Sinks must tolerate abort while parts
-are in flight, which matches object-store multipart semantics.
-
-## Terminal States
-
-After `Complete` succeeds:
-
-- future writes fail
-- future `Complete` fails
-- `Abort` is a no-op
-
-After `Abort`:
-
-- future writes fail
-- future `Complete` fails
-- repeated `Abort` succeeds
+`Complete` returns an error for an empty object. `Abort` is idempotent. After a
+successful `Complete`, future writes and completes fail, while `Abort` is a
+no-op.
 
 ## Invariants
 
-- `Offset()` equals total bytes accepted by the packer.
-- part numbers are contiguous starting at `1`.
-- non-final parts have `len(Bytes) == PartSize`.
-- receipts passed to `Txn.Complete` are sorted by part number.
-- `BodyHash()` excludes bytes written by `WriteFinal`.
-- a part byte slice is never mutated after enqueue.
-
-## Tests
-
-Required tests:
-
-- one small write produces one final part
-- large write produces multiple parts
-- multiple small writes split correctly across part boundaries
-- `Offset` advances correctly
-- `WriteBody` changes body hash
-- `WriteFinal` does not change body hash
-- uploads may complete out of order and receipts are sorted
-- upload error is returned by later writes or `Complete`
-- `Abort` is idempotent
-- writes after `Complete` fail
-- writes after `Abort` fail
-- non-final part size equals `PartSize`
-- upload limiter bounds concurrent `UploadPart` calls
-
-## Non-goals
-
-- No segment-format knowledge.
-- No block sealing.
-- No index construction.
-- No manifest publishing.
-- No retry policy in the first implementation. Retries belong in sink
-  implementations or a later wrapper.
+- `Offset()` equals total accepted object bytes.
+- Part numbers are contiguous starting at `1`.
+- Non-final parts have `len(Bytes) == PartSize`.
+- Receipts passed to `Txn.Complete` are sorted by part number.
+- `BodyHash()` excludes bytes written through `WriteFinal`.
+- Part byte slices are never mutated after enqueue.

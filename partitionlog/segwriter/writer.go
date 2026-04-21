@@ -93,6 +93,9 @@ type Writer struct {
 	packerMu sync.Mutex
 	packer   *packer
 
+	emitCtxMu sync.Mutex
+	emitCtx   context.Context
+
 	active *blockBuffer
 
 	hasRecords bool
@@ -231,14 +234,13 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 		return Result{}, ErrWriterAborted
 	}
 	if err := w.getFirstErr(); err != nil {
-		return Result{}, err
+		return Result{}, w.fail(ctx, err)
 	}
 	if !w.hasRecords {
-		w.setFirstErr(ErrEmptySegment)
-		_ = w.finishPipeline()
-		w.aborted = true
-		return Result{}, ErrEmptySegment
+		return Result{}, w.fail(ctx, ErrEmptySegment)
 	}
+	restoreEmitCtx := w.setEmitContext(ctx)
+	defer restoreEmitCtx()
 	if w.active != nil && w.active.Len() > 0 {
 		if err := w.enqueueActive(ctx); err != nil {
 			return Result{}, w.fail(ctx, err)
@@ -247,37 +249,37 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 	}
 	emitted := w.finishPipeline()
 	if emitted.Err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, emitted.Err, emitted.Packer)
+		return Result{}, w.failAfterPipeline(ctx, emitted.Err)
 	}
 	if err := w.getFirstErr(); err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, err, emitted.Packer)
+		return Result{}, w.failAfterPipeline(ctx, err)
 	}
 
 	p := emitted.Packer
 	if p == nil {
-		return Result{}, w.failCompletedPipeline(ctx, ErrEmptySegment, nil)
+		return Result{}, w.failAfterPipeline(ctx, ErrEmptySegment)
 	}
 	indexOffset := p.Offset()
 	trailer := w.trailer(indexOffset, uint32(len(emitted.Index)), 0)
 	indexBytes, _, err := segformat.MarshalBlockIndex(emitted.Index, trailer)
 	if err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, err, p)
+		return Result{}, w.failAfterPipeline(ctx, err)
 	}
 	if err := p.WriteBody(ctx, indexBytes); err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, err, p)
+		return Result{}, w.failAfterPipeline(ctx, err)
 	}
 	trailer.SegmentHash = p.BodyHash()
 	trailerBytes, sealedTrailer, err := segformat.MarshalTrailer(trailer)
 	if err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, err, p)
+		return Result{}, w.failAfterPipeline(ctx, err)
 	}
 	trailer = sealedTrailer
 	if err := p.WriteFinal(ctx, trailerBytes); err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, err, p)
+		return Result{}, w.failAfterPipeline(ctx, err)
 	}
 	object, err := p.Complete(ctx)
 	if err != nil {
-		return Result{}, w.failCompletedPipeline(ctx, err, p)
+		return Result{}, w.failAfterPipeline(ctx, err)
 	}
 
 	w.closed = true
@@ -344,12 +346,12 @@ func (w *Writer) enqueueActive(ctx context.Context) error {
 	if w.active == nil || w.active.Len() == 0 {
 		return nil
 	}
-	w.active.Seq = w.nextSeq
-	w.nextSeq++
 	buf := w.active
-	w.active = nil
+	buf.Seq = w.nextSeq
 	select {
 	case w.sealJobs <- buf:
+		w.nextSeq++
+		w.active = nil
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -365,6 +367,9 @@ func (w *Writer) sealWorker() {
 	defer w.sealWG.Done()
 	for buf := range w.sealJobs {
 		sealed, err := segblock.SealOwned(w.opts.Codec, w.opts.HashAlgo, buf.Raw, buf.Meta())
+		if err != nil {
+			w.setFirstErr(err)
+		}
 		result := sealedBlockResult{
 			Buf:    buf,
 			Seq:    buf.Seq,
@@ -377,7 +382,6 @@ func (w *Writer) sealWorker() {
 			return
 		}
 		if err != nil {
-			w.setFirstErr(err)
 			return
 		}
 	}
@@ -393,8 +397,16 @@ func (w *Writer) emitter() {
 			w.returnBuffer(result.Buf)
 			continue
 		}
+		if w.getFirstErr() != nil {
+			w.returnBuffer(result.Buf)
+			continue
+		}
 		pending[result.Seq] = result
 		for {
+			if w.getFirstErr() != nil {
+				w.returnPending(pending)
+				break
+			}
 			next, ok := pending[nextEmit]
 			if !ok {
 				break
@@ -404,14 +416,15 @@ func (w *Writer) emitter() {
 			delete(pending, nextEmit)
 			if err != nil {
 				w.setFirstErr(err)
-				w.emitted <- emitResult{Err: err, Packer: w.getPacker()}
-				return
+				w.returnPending(pending)
+				break
 			}
 			index = append(index, entry)
 			nextEmit++
 		}
 	}
 	if err := w.getFirstErr(); err != nil {
+		w.returnPending(pending)
 		w.emitted <- emitResult{Err: err, Packer: w.getPacker()}
 		return
 	}
@@ -419,7 +432,9 @@ func (w *Writer) emitter() {
 }
 
 func (w *Writer) emitSealed(sealed segblock.Sealed) (segformat.BlockIndexEntry, error) {
-	p, err := w.ensurePacker(w.ctx)
+	ctx, cancel := w.emitContext()
+	defer cancel()
+	p, err := w.ensurePacker(ctx)
 	if err != nil {
 		return segformat.BlockIndexEntry{}, err
 	}
@@ -428,10 +443,10 @@ func (w *Writer) emitSealed(sealed segblock.Sealed) (segformat.BlockIndexEntry, 
 	if err != nil {
 		return segformat.BlockIndexEntry{}, err
 	}
-	if err := p.WriteBody(w.ctx, preambleBytes); err != nil {
+	if err := p.WriteBody(ctx, preambleBytes); err != nil {
 		return segformat.BlockIndexEntry{}, err
 	}
-	if err := p.WriteBody(w.ctx, sealed.Stored); err != nil {
+	if err := p.WriteBody(ctx, sealed.Stored); err != nil {
 		return segformat.BlockIndexEntry{}, err
 	}
 	return segformat.BlockIndexEntry{
@@ -466,7 +481,7 @@ func (w *Writer) ensurePacker(ctx context.Context) (*packer, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := newPacker(ctx, txn, packerOptions{
+	p, err := newPacker(w.ctx, txn, packerOptions{
 		PartSize:          w.opts.PartSize,
 		UploadParallelism: w.opts.UploadParallelism,
 		UploadQueueSize:   w.opts.UploadQueueSize,
@@ -540,13 +555,13 @@ func (w *Writer) fail(ctx context.Context, err error) error {
 	return err
 }
 
-func (w *Writer) failCompletedPipeline(ctx context.Context, err error, p *packer) error {
+func (w *Writer) failAfterPipeline(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
 	w.setFirstErr(err)
 	w.aborted = true
-	if p != nil {
+	if p := w.getPacker(); p != nil {
 		_ = p.Abort(ctx)
 	}
 	return err
@@ -597,6 +612,40 @@ func (w *Writer) returnBuffer(buf *blockBuffer) {
 	select {
 	case w.freeBuffers <- buf:
 	case <-w.ctx.Done():
+	}
+}
+
+func (w *Writer) returnPending(pending map[uint64]sealedBlockResult) {
+	for seq, result := range pending {
+		w.returnBuffer(result.Buf)
+		delete(pending, seq)
+	}
+}
+
+func (w *Writer) setEmitContext(ctx context.Context) func() {
+	w.emitCtxMu.Lock()
+	prev := w.emitCtx
+	w.emitCtx = ctx
+	w.emitCtxMu.Unlock()
+	return func() {
+		w.emitCtxMu.Lock()
+		w.emitCtx = prev
+		w.emitCtxMu.Unlock()
+	}
+}
+
+func (w *Writer) emitContext() (context.Context, context.CancelFunc) {
+	w.emitCtxMu.Lock()
+	base := w.emitCtx
+	w.emitCtxMu.Unlock()
+	if base == nil {
+		return w.ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(base)
+	stop := context.AfterFunc(w.ctx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
 	}
 }
 

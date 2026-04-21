@@ -1,63 +1,62 @@
 # segwriter
 
-`segwriter` writes one immutable partition segment using `segformat` and
-`segblock`.
+`segwriter` writes one immutable partition segment using `segformat` for the
+wire format and `segblock` for block sealing. It streams segment bytes into an
+ordered-part sink and never holds the full segment object in memory.
 
-The writer streams final segment bytes into a multipart-shaped sink. It does
-not keep the full segment object in memory.
+`segwriter` does not own manifests, retention, partition assignment, reader
+visibility, or segment roll policy. The caller decides when a segment is
+closed and publishes the returned metadata to the catalog layer.
 
-## Package Boundaries
+## Package Boundary
 
 ```text
 segwriter -> segblock -> segformat
 ```
 
-Responsibilities:
+- `segformat`: fixed-width segment format, raw block layout, validation, hashes.
+- `segblock`: compression and integrity for one block payload.
+- `segwriter`: record validation, block buffering, ordered segment assembly,
+  ordered-part upload, and commit metadata.
 
-- `segformat`: byte layout, fixed-width structs, raw block format, hashes
-- `segblock`: seal/open one block payload
-- `segwriter`: collect records, build blocks, pack bytes, commit object
-
-`segwriter` does not own manifests, retention, partition assignment, or reader
-visibility.
-
-## User API
+## Usage
 
 ```go
-sink := s3sink.New(client, bucket, key)
+opts := segwriter.DefaultOptions(0)
+opts.SegmentUUID = segmentUUID
+opts.WriterTag = writerTag
 
-w, err := segwriter.New(segwriter.Options{
-    Partition:         0,
-    Codec:             segformat.CodecZstd,
-    HashAlgo:          segformat.HashXXH64,
-    TargetBlockSize:   1 << 20,
-    PartSize:          8 << 20,
-    UploadParallelism: 2,
-    SegmentUUID:       segmentUUID,
-    WriterTag:         writerTag,
-    CreatedUnixMS:     now,
-}, sink)
+w, err := segwriter.New(opts, sink)
+if err != nil {
+    return err
+}
+defer w.Abort(ctx) // no-op after successful Close
 
 err = w.Append(ctx, segwriter.Record{
     LSN:         1000,
     TimestampMS: ts,
     Value:       payload,
 })
+if err != nil {
+    return err
+}
 
 result, err := w.Close(ctx)
+if err != nil {
+    return err
+}
 ```
 
-`Writer` is not safe for concurrent use. The partition writer should call
-`Append`, `Close`, and `Abort` from one goroutine. Internal sealing and upload
-stages are concurrent, but the public writer API is single-owner.
+`Writer` is single-owner: call `Append`, `Close`, and `Abort` from one
+goroutine. Internal sealing and uploads are concurrent.
 
-Convenience helper for tests and small local use:
+For in-memory encoding:
 
 ```go
 bytes, meta, err := segwriter.Encode(ctx, records, opts)
 ```
 
-## Public Types
+## Options
 
 ```go
 type Options struct {
@@ -78,43 +77,13 @@ type Options struct {
     WriterTag     [16]byte
     CreatedUnixMS int64
 }
-
-type Record struct {
-    LSN         uint64
-    TimestampMS int64
-    Value       []byte
-}
-
-type Result struct {
-    Metadata Metadata
-    Object   CommittedObject
-    Trailer  segformat.Trailer
-}
-
-type Metadata struct {
-    Partition      uint32
-    BaseLSN        uint64
-    LastLSN        uint64
-    MinTimestampMS int64
-    MaxTimestampMS int64
-    RecordCount    uint32
-    BlockCount     uint32
-    SizeBytes      uint64
-    SegmentUUID    [16]byte
-    Codec          segformat.Codec
-    HashAlgo       segformat.HashAlgo
-    SegmentHash    uint64
-    TrailerHash    uint64
-}
 ```
 
-`Metadata` is the stable commit summary intended for manifest/catalog
-publication. `Trailer` is the raw on-disk trailer, exposed for tests and
-debugging.
-
-Defaults:
+Defaults from `DefaultOptions(partition)`:
 
 ```text
+Codec             = zstd
+HashAlgo          = xxh64
 TargetBlockSize   = 1 MiB
 PartSize          = 8 MiB
 SealParallelism   = min(runtime.NumCPU(), 4)
@@ -123,19 +92,18 @@ UploadParallelism = 2
 UploadQueueSize   = UploadParallelism
 ```
 
-Use `DefaultOptions(partition)` when the desired defaults are zstd + xxh64.
-The raw zero value of `Options` still maps to the format's zero-value codec and
-hash algorithm (`none` + `crc32c`).
-
 If `SegmentUUID` is zero, `New` generates a random 16-byte segment identity.
-If `CreatedUnixMS` is zero, `New` fills it with the current UTC Unix
-millisecond timestamp. `WriterTag` remains caller-owned and may be zero when
-the deployment does not need an operator-visible writer identity.
+If `CreatedUnixMS` is zero, `New` fills it with current UTC Unix milliseconds.
+`WriterTag` is caller-owned and may remain zero if the deployment does not need
+an operator-visible writer identity.
 
-## Sink API
+## Sink Contract
 
-The sink is multipart-shaped because the production target is object storage.
-Memory and file sinks can implement the same contract for tests.
+The sink API is an ordered-part transaction. The writer emits bounded byte
+parts; each backend maps those parts to its native commit mechanism. For
+example, an in-memory sink can concatenate parts, a file sink can write parts in
+order to a temp file and rename on commit, and an object-store sink can map
+parts to multipart or resumable upload primitives.
 
 ```go
 type Sink interface {
@@ -147,210 +115,66 @@ type Txn interface {
     Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
     Abort(ctx context.Context) error
 }
-
-type Plan struct {
-    Partition uint32
-    Codec     segformat.Codec
-    HashAlgo  segformat.HashAlgo
-    PartSize  int
-}
-
-type Part struct {
-    Number int
-    Bytes  []byte
-}
-
-type PartReceipt struct {
-    Number int
-    Token  string
-}
-
-type CommittedObject struct {
-    URI       string
-    SizeBytes uint64
-    Token     string
-}
 ```
 
-`Txn.UploadPart` must be safe for concurrent calls. It must consume or copy
-`part.Bytes` before returning, because ownership returns to the caller after
-the call completes.
+`Txn.UploadPart` must be safe for concurrent calls and must fully consume or
+copy `part.Bytes` before returning. `Txn.Complete` receives receipts sorted by
+part number with a contiguous range starting at `1`. `Txn.Abort` must be
+idempotent.
 
-## Internal Packer
+`New` does not call `sink.Begin`. The sink transaction is opened lazily when the
+first sealed block is emitted, which keeps segment rotation off the sink setup
+latency path.
 
-The packer is internal to `segwriter`. The writer sees it as a byte-stream
-builder for the final segment object.
+## Result
 
 ```go
-type packer struct { /* internal */ }
-
-func newPacker(ctx context.Context, txn Txn, opts packerOptions) (*packer, error)
-
-func (p *packer) Offset() uint64
-func (p *packer) WriteBody(ctx context.Context, b []byte) error
-func (p *packer) BodyHash() uint64
-func (p *packer) WriteFinal(ctx context.Context, b []byte) error
-func (p *packer) Complete(ctx context.Context) (CommittedObject, error)
-func (p *packer) Abort(ctx context.Context) error
+type Result struct {
+    Metadata Metadata
+    Object   CommittedObject
+    Trailer  segformat.Trailer
+}
 ```
 
-Rules:
+`Metadata` is the stable summary intended for manifest/catalog publication:
+partition, LSN range, timestamp range, counts, object size, block index
+location, segment identity, codec, hash algorithm, and hashes.
 
-- `WriteBody` appends bytes and updates `segment_hash`.
-- `WriteFinal` appends bytes and does not update `segment_hash`.
-- `BodyHash` is called after the index region is written and before the
-  trailer is written.
-- `Offset` is the current byte offset in the final object.
-- Full non-final parts are uploaded asynchronously.
-- `Complete` flushes the final part, waits for uploads, sorts receipts by part
-  number, and calls `Txn.Complete`.
-- `Abort` is idempotent and calls `Txn.Abort`.
+`Trailer` is the exact on-disk trailer, exposed for tests and low-level
+debugging.
 
-## Packer Ownership Model
-
-When a part is flushed:
-
-```go
-partBytes := p.buf
-p.buf = make([]byte, 0, p.partSize)
-```
-
-Ownership of `partBytes` transfers to an upload worker. The packer must never
-mutate those bytes again.
-
-This keeps the implementation safe while allowing concurrent upload.
-
-## Async Upload Model
+## Write Pipeline
 
 ```text
-writer goroutine
-  -> packer.WriteBody / WriteFinal
-  -> packer fills part buffer
-  -> full part sent to upload queue
-  -> workers call Txn.UploadPart concurrently
-  -> receipts collected by part number
-  -> Complete sorts receipts and finalizes object
-```
-
-Part numbers are assigned in byte order. Uploads may finish out of order.
-`Txn.Complete` always receives receipts sorted by part number.
-
-Backpressure comes from a bounded upload queue:
-
-```text
-memory ~= active part buffer
-        + queued parts
-        + uploading parts
-```
-
-Default:
-
-```text
-PartSize = 8 MiB
-UploadParallelism = 2
-UploadQueueSize = 2
-Approx max part memory = (1 + 2 + 2) * 8 MiB = 40 MiB
-```
-
-`UploadLimiter` is separate from `UploadParallelism`.
-
-```text
-UploadParallelism = per-segment worker count
-UploadLimiter     = shared concurrency cap across packers
-```
-
-The partition writer should pass the same limiter to all active segment writers
-when it wants a process-level or bucket-level bound on object-store upload
-pressure.
-
-## Lazy Sink Begin
-
-`New` must not touch object storage.
-
-Segment rotation happens on the hot append path. If `New` calls
-`sink.Begin`, rotation inherits object-store latency from multipart-init or
-other sink setup. In a high-throughput partition that can stall appends for
-tens or hundreds of milliseconds.
-
-The writer is created in memory first. The sink transaction and packer are
-opened lazily when the first block is flushed or when `Close` needs to commit a
-small segment.
-
-```text
-New
-  -> validate options
-  -> initialize in-memory writer state
-  -> no sink.Begin
-  -> no packer
-  -> no object-store call
-
-ensurePacker
-  -> if packer already exists: return
-  -> sink.Begin
-  -> new packer
-  -> write file preamble through WriteBody
-```
-
-This lets the partition layer rotate cheaply:
-
-```text
-old := active
-active = new in-memory segment writer
-go old.Close(ctx)
-```
-
-Appends continue into the new active writer while the old segment closes,
-uploads final bytes, and publishes metadata through higher layers.
-
-## Writer Flow
-
-```text
-New
-  -> validate options
-  -> initialize in-memory writer state
-  -> no sink.Begin yet
-
-Append(record)
-  -> validate writer state
-  -> validate LSN continuity
-  -> validate timestamp monotonicity
-  -> enqueue current block if record would exceed target block size
-  -> take a free block buffer
-  -> append record to active block buffer
+Append
+  -> validate LSN and timestamp order
+  -> append record into active raw block buffer
+  -> when full, enqueue block buffer to seal workers
 
 seal workers
-  -> receive frozen block buffers
-  -> segblock.SealOwned(codec, hash, raw, meta)
-  -> send sealed blocks to ordered emitter
+  -> compress/hash raw block through segblock.SealOwned
+  -> send sealed block to ordered emitter
 
 ordered emitter
-  -> ensurePacker
-  -> blockOffset = packer.Offset()
-  -> marshal block preamble
-  -> packer.WriteBody(block preamble)
-  -> packer.WriteBody(stored block bytes)
-  -> append block index entry
-  -> return block buffer to freeBuffers
+  -> emit blocks by sequence number
+  -> lazily open packer/sink transaction
+  -> write block preamble + stored bytes
+  -> collect block index entries
+  -> return raw block buffer to free pool
 
 Close
-  -> if no records were appended: return empty segment error
-  -> enqueue current block
-  -> drain seal workers and ordered emitter
-  -> indexOffset = packer.Offset()
-  -> build trailer summary fields except hashes
-  -> marshal index region from index entries
-  -> packer.WriteBody(index region)
-  -> segmentHash = packer.BodyHash()
-  -> build trailer with segmentHash
-  -> marshal trailer
-  -> packer.WriteFinal(trailer)
-  -> packer.Complete
-  -> return Result
+  -> enqueue final block
+  -> drain seal workers and emitter
+  -> write index region
+  -> compute segment hash
+  -> write trailer
+  -> complete sink transaction
 ```
 
-## Segment Byte Order
+The emitter is single-threaded, so segment byte order and block offsets remain
+deterministic even when block sealing is parallel.
 
-The writer emits bytes in exactly this order:
+## Segment Byte Order
 
 ```text
 file preamble
@@ -361,154 +185,58 @@ index preamble + block index entries
 trailer
 ```
 
-Multipart parts are not format regions. A part may cut across any byte
-boundary. Object storage reassembles parts by part number.
+Sink parts are transport chunks, not format regions. A part may split a block
+preamble, block payload, index region, or trailer. The sink commits parts in
+part-number order.
 
-## Block Builder
+## Memory And Backpressure
 
-The writer has an internal ring of block buffers.
-
-One `Writer` owns exactly one segment, and the ring is local to that writer.
-Buffers never move between writers.
-
-```text
-writer A -> segment A -> ring A
-writer B -> segment B -> ring B
-```
-
-On partition rotation:
+The writer uses a bounded ring of raw block buffers. A buffer belongs to exactly
+one writer and one segment.
 
 ```text
-old := activeWriter
-activeWriter = new writer with a fresh ring
-go old.Close(ctx)
+peak memory ~= BlockBufferCount * TargetBlockSize
+            + packer active/queued/uploading parts
+            + small ordered-emitter pending map
 ```
 
-The old writer drains and commits its own ring in the background. The new writer
-accepts appends into a different ring. No buffer needs to carry segment identity
-because the writer is the segment owner.
+Backpressure is intentional. If seal workers or uploads are slow, buffers stop
+returning to the free pool and `Append` eventually blocks waiting for capacity.
 
-### Ring Buffer Pipeline
+`UploadLimiter` is optional and should be shared across writers when the caller
+wants a process-level, backend-level, or bucket-level cap on concurrent part
+uploads.
 
-```text
-Append goroutine
-  -> active block buffer
-  -> when full: enqueue active buffer to seal queue
-  -> take next buffer from freeBuffers
-  -> continue appending
+## Contexts
 
-seal workers
-  -> receive frozen block buffer
-  -> segblock.SealOwned(codec, hash, raw, meta)
-  -> send sealed result to ordered emitter
+`Append(ctx)` uses `ctx` while enqueueing work or waiting for a free block
+buffer.
 
-ordered emitter
-  -> waits for sequence 0,1,2...
-  -> ensurePacker
-  -> WriteBody(block preamble)
-  -> WriteBody(stored bytes)
-  -> append block index entry
-  -> reset buffer
-  -> return buffer to freeBuffers
-```
+`Close(ctx)` uses `ctx` for final enqueue, lazy `sink.Begin`, index/trailer
+writes, final flush, and `Txn.Complete`. Already-enqueued upload workers use the
+writer lifetime context; call `Abort` to cancel them.
 
-The emitter is single-threaded so final segment byte order stays deterministic.
-Seal workers may finish out of order; the emitter buffers those results until
-the next expected sequence is available.
-
-Backpressure is explicit:
-
-```text
-seal workers slow or upload slow
-  -> buffers are not returned to freeBuffers
-  -> Append eventually blocks waiting for a free buffer
-```
-
-Memory is bounded by:
-
-```text
-BlockBufferCount * TargetBlockSize
-+ packer queued/uploading parts
-+ small ordered-emitter pending map
-```
-
-It tracks:
-
-```text
-seq
-base_lsn
-record_count
-min_timestamp_ms
-max_timestamp_ms
-raw_size
-raw bytes
-```
-
-It is not public. If another package needs it later, it can be extracted.
-
-## Roll Conditions
-
-The writer closes one segment when the caller calls `Close`.
-
-The higher-level partition writer decides when to call `Close`, typically:
-
-```text
-target segment size reached
-max segment age reached
-max record count reached
-shutdown
-explicit flush
-writer fence/epoch changed
-```
-
-`segwriter` itself only enforces block sizing and segment format limits.
+`Abort(ctx)` cancels the writer lifetime context, drains internal workers, and
+aborts the sink transaction if one exists.
 
 ## Failure Semantics
 
-Any append/flush/close error makes the writer terminal.
+Any append, seal, upload, close, or validation error makes the writer terminal.
+On terminal failure the writer drains internal workers and aborts the sink
+transaction if it has been opened.
 
-```text
-error during Append flush -> Abort transaction -> writer aborted
-error during Close        -> Abort transaction -> writer aborted
-upload part error         -> Abort transaction -> writer aborted
-```
-
-After abort:
+After terminal failure:
 
 ```text
 Append -> ErrWriterAborted
-Close  -> ErrWriterAborted
+Close  -> ErrWriterAborted or the first terminal error
 Abort  -> nil
 ```
 
-`Abort` is idempotent.
+`Abort` is idempotent. Calling `Abort` after a successful `Close` is a no-op.
 
-## First Implementation Slice
+## Roll Policy
 
-Implement before full writer:
-
-```text
-sink.go
-memory_sink.go
-packer.go
-writer.go
-packer_test.go
-writer_test.go
-benchmark_test.go
-```
-
-This slice proves:
-
-- part splitting
-- async upload
-- receipt sorting
-- offset tracking
-- segment hash excludes trailer
-- abort behavior
-- upload error propagation
-- upload limiter bounds concurrent uploads
-- byte-level e2e validation through `segformat` + `segblock`
-
-The current implementation uses a bounded async seal pipeline, so Append blocks
-only when all block buffers are in use or upload backpressure prevents the
-emitter from returning buffers.
+`segwriter` closes only when the caller calls `Close`. Higher layers normally
+roll segments on target segment size, segment age, shutdown, explicit flush, or
+writer fence/epoch changes.
