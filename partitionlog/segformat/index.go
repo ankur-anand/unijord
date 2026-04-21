@@ -1,6 +1,9 @@
 package segformat
 
-import "fmt"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 func MarshalBlockIndex(entries []BlockIndexEntry, trailer Trailer) ([]byte, IndexPreamble, error) {
 	if len(entries) == 0 {
@@ -12,13 +15,13 @@ func MarshalBlockIndex(entries []BlockIndexEntry, trailer Trailer) ([]byte, Inde
 	if err := ValidateIndex(entries, trailer); err != nil {
 		return nil, IndexPreamble{}, err
 	}
-	entriesBytes := make([]byte, 0, len(entries)*BlockIndexEntrySize)
-	for _, e := range entries {
-		buf, err := e.MarshalBinary()
-		if err != nil {
+	out := make([]byte, IndexPreambleSize+len(entries)*BlockIndexEntrySize)
+	entriesBytes := out[IndexPreambleSize:]
+	for i, e := range entries {
+		if err := e.Validate(); err != nil {
 			return nil, IndexPreamble{}, err
 		}
-		entriesBytes = append(entriesBytes, buf...)
+		writeBlockIndexEntry(entriesBytes[i*BlockIndexEntrySize:(i+1)*BlockIndexEntrySize], e)
 	}
 	indexHash, err := HashBytes(trailer.HashAlgo, entriesBytes)
 	if err != nil {
@@ -29,13 +32,7 @@ func MarshalBlockIndex(entries []BlockIndexEntry, trailer Trailer) ([]byte, Inde
 		EntryCount: uint32(len(entries)),
 		IndexHash:  indexHash,
 	}
-	preambleBytes, err := preamble.MarshalBinary()
-	if err != nil {
-		return nil, IndexPreamble{}, err
-	}
-	out := make([]byte, 0, IndexPreambleSize+len(entriesBytes))
-	out = append(out, preambleBytes...)
-	out = append(out, entriesBytes...)
+	writeIndexPreamble(out[:IndexPreambleSize], preamble)
 	return out, preamble, nil
 }
 
@@ -68,4 +65,24 @@ func ParseBlockIndex(buf []byte, algo HashAlgo) (IndexPreamble, []BlockIndexEntr
 		}
 	}
 	return preamble, entries, nil
+}
+
+func writeIndexPreamble(buf []byte, p IndexPreamble) {
+	copy(buf[0:4], indexMagic[:])
+	binary.BigEndian.PutUint16(buf[4:6], IndexPreambleSize)
+	binary.BigEndian.PutUint16(buf[6:8], p.Flags)
+	binary.BigEndian.PutUint32(buf[8:12], p.EntrySize)
+	binary.BigEndian.PutUint32(buf[12:16], p.EntryCount)
+	binary.BigEndian.PutUint64(buf[16:24], p.IndexHash)
+}
+
+func writeBlockIndexEntry(buf []byte, e BlockIndexEntry) {
+	binary.BigEndian.PutUint64(buf[0:8], e.BlockOffset)
+	binary.BigEndian.PutUint32(buf[8:12], e.StoredSize)
+	binary.BigEndian.PutUint32(buf[12:16], e.RawSize)
+	binary.BigEndian.PutUint32(buf[16:20], e.RecordCount)
+	binary.BigEndian.PutUint64(buf[24:32], e.BaseLSN)
+	binary.BigEndian.PutUint64(buf[32:40], uint64(e.MinTimestampMS))
+	binary.BigEndian.PutUint64(buf[40:48], uint64(e.MaxTimestampMS))
+	binary.BigEndian.PutUint64(buf[48:56], e.BlockHash)
 }

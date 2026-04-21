@@ -257,11 +257,12 @@ func ParseTrailer(buf []byte, objectSize uint64) (Trailer, error) {
 	if err := t.Validate(objectSize); err != nil {
 		return Trailer{}, err
 	}
-	check := append([]byte(nil), buf...)
+	var check [TrailerSize]byte
+	copy(check[:], buf)
 	for i := 136; i < 144; i++ {
 		check[i] = 0
 	}
-	got, err := HashBytes(t.HashAlgo, check)
+	got, err := HashBytes(t.HashAlgo, check[:])
 	if err != nil {
 		return Trailer{}, err
 	}
