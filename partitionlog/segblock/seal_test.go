@@ -40,6 +40,22 @@ func TestSealOpenRoundTripCodecNone(t *testing.T) {
 	}
 }
 
+func TestSealOwnedCodecNoneTransfersRawOwnership(t *testing.T) {
+	raw := []byte("raw block bytes")
+	sealed, err := SealOwned(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
+		BaseLSN:        10,
+		RecordCount:    1,
+		MinTimestampMS: 100,
+		MaxTimestampMS: 100,
+	})
+	if err != nil {
+		t.Fatalf("SealOwned() error = %v", err)
+	}
+	if len(sealed.Stored) == 0 || &sealed.Stored[0] != &raw[0] {
+		t.Fatal("SealOwned(codec none) should reuse caller-owned raw bytes")
+	}
+}
+
 func TestSealOpenRoundTripZstd(t *testing.T) {
 	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{
 		{TimestampMS: 100, Value: bytes.Repeat([]byte("a"), 256)},
