@@ -260,7 +260,11 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 		return Result{}, w.abortWith(ctx, ErrEmptySegment, false)
 	}
 	indexOffset := p.Offset()
-	trailer := w.trailer(indexOffset, uint32(len(emitted.Index)), 0)
+	blockCount, err := checkedBlockCount(len(emitted.Index))
+	if err != nil {
+		return Result{}, w.abortWith(ctx, err, false)
+	}
+	trailer := w.trailer(indexOffset, blockCount, 0)
 	indexBytes, _, err := segformat.MarshalBlockIndex(emitted.Index, trailer)
 	if err != nil {
 		return Result{}, w.abortWith(ctx, err, false)
@@ -518,6 +522,13 @@ func (w *Writer) getPacker() *packer {
 	w.packerMu.Lock()
 	defer w.packerMu.Unlock()
 	return w.packer
+}
+
+func checkedBlockCount(n int) (uint32, error) {
+	if n > segformat.MaxBlockCount {
+		return 0, fmt.Errorf("%w: block_count=%d max=%d", segformat.ErrInvalidSegment, n, segformat.MaxBlockCount)
+	}
+	return uint32(n), nil
 }
 
 func (w *Writer) trailer(indexOffset uint64, blockCount uint32, segmentHash uint64) segformat.Trailer {

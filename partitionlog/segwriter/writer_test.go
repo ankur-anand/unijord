@@ -334,6 +334,22 @@ func TestWriterRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
+func TestCheckedBlockCountRejectsIndexLengthOverflow(t *testing.T) {
+	t.Parallel()
+
+	got, err := checkedBlockCount(segformat.MaxBlockCount)
+	if err != nil {
+		t.Fatalf("checkedBlockCount(max) error = %v", err)
+	}
+	if got != uint32(segformat.MaxBlockCount) {
+		t.Fatalf("checkedBlockCount(max) = %d, want %d", got, segformat.MaxBlockCount)
+	}
+
+	if _, err := checkedBlockCount(segformat.MaxBlockCount + 1); !errors.Is(err, segformat.ErrInvalidSegment) {
+		t.Fatalf("checkedBlockCount(overflow) error = %v, want %v", err, segformat.ErrInvalidSegment)
+	}
+}
+
 func TestWriterFillsDefaultIdentityMetadata(t *testing.T) {
 	t.Parallel()
 
