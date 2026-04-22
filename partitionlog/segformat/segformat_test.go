@@ -1,6 +1,7 @@
 package segformat
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -187,6 +188,24 @@ func TestRawBlockEncodeDecode(t *testing.T) {
 	raw[len(raw)-1] = '!'
 	if string(records[1].Value) != "bet!" {
 		t.Fatal("decoded value should alias raw block bytes")
+	}
+}
+
+func TestRecordCloneDetachesValue(t *testing.T) {
+	in := Record{LSN: 7, TimestampMS: 99, Value: []byte("alpha")}
+	out := in.Clone()
+	if out.LSN != in.LSN || out.TimestampMS != in.TimestampMS || !bytes.Equal(out.Value, in.Value) {
+		t.Fatalf("Clone() = %+v, want %+v", out, in)
+	}
+
+	in.Value[0] = 'z'
+	if string(out.Value) != "alpha" {
+		t.Fatalf("cloned value = %q, want detached copy", out.Value)
+	}
+
+	empty := Record{LSN: 8, TimestampMS: 100}
+	if cloned := empty.Clone(); cloned.Value != nil {
+		t.Fatalf("empty Clone().Value = %v, want nil", cloned.Value)
 	}
 }
 

@@ -58,8 +58,8 @@ func ParseBlockIndex(buf []byte, algo HashAlgo) (IndexPreamble, []BlockIndexEntr
 	}
 	entries := make([]BlockIndexEntry, preamble.EntryCount)
 	for i := range entries {
-		start := IndexPreambleSize + i*BlockIndexEntrySize
-		entries[i], err = ParseBlockIndexEntry(buf[start : start+BlockIndexEntrySize])
+		start := i * BlockIndexEntrySize
+		entries[i], err = ParseBlockIndexEntry(entriesBytes[start : start+BlockIndexEntrySize])
 		if err != nil {
 			return IndexPreamble{}, nil, err
 		}
