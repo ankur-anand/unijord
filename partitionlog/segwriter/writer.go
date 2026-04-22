@@ -301,7 +301,6 @@ func (w *Writer) Abort(ctx context.Context) error {
 	}
 	w.aborted = true
 	w.setFirstErr(ErrWriterAborted)
-	w.cancel()
 	_ = w.finishPipeline()
 	if p := w.getPacker(); p != nil {
 		return p.Abort(ctx)
