@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	"github.com/ankur-anand/unijord/partitionlog/segwriter"
 )
 
@@ -15,18 +15,37 @@ const (
 
 type UUIDGen func() ([16]byte, error)
 
-type Options struct {
-	Partition   uint32
-	Catalog     catalog.Catalog
-	SinkFactory SinkFactory
+type WriterIdentity struct {
+	Epoch uint64
+	Tag   [16]byte
+}
 
-	WriterEpoch uint64
-	WriterTag   [16]byte
+type Snapshot struct {
+	Head     pmeta.PartitionHead
+	Identity WriterIdentity
+}
 
-	SegmentOptions segwriter.Options
+type PublishRequest struct {
+	ExpectedNextLSN uint64
+	Segment         pmeta.SegmentRef
+}
 
+type Session interface {
+	Snapshot() Snapshot
+	PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error)
+}
+
+type RollPolicy struct {
 	MaxSegmentRecords  uint32
 	MaxSegmentRawBytes uint64
+}
+
+type Options struct {
+	Session     Session
+	SinkFactory SinkFactory
+
+	SegmentOptions segwriter.Options
+	Roll           RollPolicy
 
 	Clock   func() time.Time
 	UUIDGen UUIDGen
@@ -38,15 +57,13 @@ type Record struct {
 }
 
 type AppendResult struct {
-	LSN     uint64
-	Flushed bool
-	Flush   FlushResult
+	LSN   uint64
+	Flush *FlushResult
 }
 
 type FlushResult struct {
-	Flushed bool
-	State   catalog.PartitionState
-	Segment catalog.SegmentRef
+	Snapshot Snapshot
+	Segment  pmeta.SegmentRef
 }
 
 type SegmentInfo struct {
