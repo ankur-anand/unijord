@@ -9,6 +9,7 @@ var (
 	ErrAborted              = errors.New("writer: writer aborted")
 	ErrTimestampOrder       = errors.New("writer: timestamp regression")
 	ErrLSNExhausted         = errors.New("writer: lsn exhausted")
+	ErrSegmentStartFailed   = errors.New("writer: segment start failed")
 	ErrSegmentWriteFailed   = errors.New("writer: segment write failed")
 	ErrStaleWriter          = errors.New("writer: stale writer")
 	ErrPublishFailed        = errors.New("writer: publish failed")

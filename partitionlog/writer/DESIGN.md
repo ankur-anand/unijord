@@ -213,6 +213,9 @@ recorded asynchronously, then return `ErrAborted`.
 for finalize or publish completion except when bounded in-flight backpressure
 blocks a cut.
 
+If `Append` fails before a new active segment is started, it returns
+`ErrSegmentStartFailed` and the writer remains usable.
+
 ## Cut
 
 `Cut(ctx)` is the periodic segment-boundary operation.
@@ -230,6 +233,9 @@ If the active segment has records, `Cut`:
 After a successful `Cut`, new appends go to the new active segment.
 
 `Cut` is not a committed-state barrier.
+
+If `Cut` fails before the active-writer swap completes, it returns
+`ErrSegmentStartFailed` and the existing active segment remains in place.
 
 ## Background Finalize
 
@@ -270,6 +276,10 @@ In-flight includes:
 
 - detached segments not yet finalized;
 - ready segments not yet published.
+
+`MaxInflightBytes` is reserved against a conservative segment-size bound that
+includes fixed format overhead and worst-case stored-byte expansion, not only
+raw appended payload bytes.
 
 Rules:
 
@@ -350,6 +360,7 @@ Construction errors:
 
 Foreground write errors:
 
+- `ErrSegmentStartFailed`
 - `ErrTimestampOrder`
 - `ErrLSNExhausted`
 - `ErrSegmentWriteFailed`
@@ -373,7 +384,9 @@ Context-sensitive waits may also return:
 
 Rules:
 
-- a foreground failure returns its direct cause and makes the writer terminal;
+- `ErrSegmentStartFailed` is retryable and does not make the writer terminal;
+- `ErrTimestampOrder`, `ErrLSNExhausted`, and `ErrSegmentWriteFailed` are
+  terminal;
 - an asynchronous finalize or publish failure is recorded and returned by the
   next foreground call once;
 - `Err()` returns the first terminal cause.

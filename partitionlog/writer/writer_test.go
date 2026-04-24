@@ -370,12 +370,120 @@ func TestWriterCutFailureBeforeSwapKeepsWriterUsable(t *testing.T) {
 	}
 	if err := w.Cut(context.Background()); err == nil {
 		t.Fatal("Cut() error = nil, want failure before swap")
+	} else if !errors.Is(err, ErrSegmentStartFailed) {
+		t.Fatalf("Cut() error = %v, want %v", err, ErrSegmentStartFailed)
 	}
 	if w.Err() != nil {
 		t.Fatalf("Err() = %v, want nil after pre-swap cut failure", w.Err())
 	}
 	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
 		t.Fatalf("Append(second) error = %v, want writer still usable", err)
+	}
+}
+
+func TestWriterAppendStartFailureIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{0: errors.New("sink unavailable")},
+	}
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, factory)
+	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err == nil {
+		t.Fatal("Append() error = nil, want start failure")
+	} else if !errors.Is(err, ErrSegmentStartFailed) {
+		t.Fatalf("Append() error = %v, want %v", err, ErrSegmentStartFailed)
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err() = %v, want nil after append start failure", w.Err())
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(retry) error = %v, want writer still usable", err)
+	}
+}
+
+func TestWriterCutBackpressureUsesEstimatedSegmentBytes(t *testing.T) {
+	t.Parallel()
+
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Queue = QueuePolicy{
+		MaxInflightSegments: 1,
+		MaxInflightBytes:    uint64(segformat.RecordHeaderSize + 1),
+	}
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := w.Abort(context.Background()); err != nil {
+			t.Fatalf("Abort() error = %v", err)
+		}
+	}()
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := w.Cut(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cut() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err() = %v, want nil after byte-budget backpressure", w.Err())
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(after blocked cut) error = %v, want writer still usable", err)
 	}
 }
 

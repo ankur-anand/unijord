@@ -443,7 +443,7 @@ func (w *Writer) cutLocked(ctx context.Context) error {
 	}
 
 	old := w.active
-	estBytes := estimateInflightBytes(old.rawBytes)
+	estBytes := estimateInflightBytes(old.rawBytes, old.records, w.opts.SegmentOptions.Codec)
 	if err := w.reserveInflightLocked(ctx, 1, estBytes); err != nil {
 		return err
 	}
@@ -468,7 +468,7 @@ func (w *Writer) detachActiveLocked(ctx context.Context) error {
 	}
 
 	old := w.active
-	estBytes := estimateInflightBytes(old.rawBytes)
+	estBytes := estimateInflightBytes(old.rawBytes, old.records, w.opts.SegmentOptions.Codec)
 	if err := w.reserveInflightLocked(ctx, 1, estBytes); err != nil {
 		return err
 	}
@@ -487,7 +487,7 @@ func (w *Writer) detachActiveLocked(ctx context.Context) error {
 func (w *Writer) startSegmentLocked(ctx context.Context) error {
 	segmentUUID, err := w.opts.UUIDGen()
 	if err != nil {
-		return wrapSegmentWrite(err)
+		return wrapSegmentStart(err)
 	}
 	createdUnixMS := w.opts.Clock().UnixMilli()
 	info := SegmentInfo{
@@ -500,7 +500,7 @@ func (w *Writer) startSegmentLocked(ctx context.Context) error {
 	}
 	sink, err := w.opts.SinkFactory.NewSegmentSink(ctx, info)
 	if err != nil {
-		return wrapSegmentWrite(err)
+		return wrapSegmentStart(err)
 	}
 	segmentOptions := w.opts.SegmentOptions
 	segmentOptions.Partition = w.partition
@@ -510,7 +510,7 @@ func (w *Writer) startSegmentLocked(ctx context.Context) error {
 
 	sw, err := segwriter.New(segmentOptions, sink)
 	if err != nil {
-		return wrapSegmentWrite(err)
+		return wrapSegmentStart(err)
 	}
 	w.active = &activeSegment{
 		writer:  sw,
@@ -802,6 +802,16 @@ func wrapSegmentWrite(err error) error {
 	return fmt.Errorf("%w: %w", ErrSegmentWriteFailed, err)
 }
 
+func wrapSegmentStart(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrSegmentStartFailed) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrSegmentStartFailed, err)
+}
+
 func normalizePublishErr(err error) error {
 	if err == nil {
 		return nil
@@ -852,11 +862,35 @@ func normalizeOptions(opts Options, snapshot Snapshot) (Options, error) {
 	return opts, nil
 }
 
-func estimateInflightBytes(rawBytes uint64) uint64 {
-	if rawBytes == 0 {
-		return 1
+func estimateInflightBytes(rawBytes uint64, records uint32, codec segformat.Codec) uint64 {
+	storedUpper := rawBytes
+	if codec == segformat.CodecZstd && rawBytes > 0 {
+		storedUpper = satAdd(rawBytes, (rawBytes+3)/4)
 	}
-	return rawBytes
+	blockCountUpper := uint64(records)
+	if blockCountUpper == 0 {
+		blockCountUpper = 1
+	}
+	perBlockOverhead := uint64(segformat.BlockPreambleSize + segformat.BlockIndexEntrySize)
+	fixedOverhead := uint64(segformat.FilePreambleSize + segformat.IndexPreambleSize + segformat.TrailerSize)
+	return satAdd(fixedOverhead, satAdd(storedUpper, satMul(perBlockOverhead, blockCountUpper)))
+}
+
+func satAdd(a, b uint64) uint64 {
+	if math.MaxUint64-a < b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+
+func satMul(a, b uint64) uint64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > math.MaxUint64/b {
+		return math.MaxUint64
+	}
+	return a * b
 }
 
 func isZeroSegmentOptions(opts segwriter.Options) bool {
