@@ -1,4 +1,4 @@
-package pwriter
+package writer
 
 import (
 	"context"
@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	DefaultMaxSegmentRecords  uint32 = 16_384
-	DefaultMaxSegmentRawBytes uint64 = 64 << 20
+	DefaultMaxSegmentRecords   uint32 = 16_384
+	DefaultMaxSegmentRawBytes  uint64 = 64 << 20
+	DefaultMaxInflightSegments int    = 4
+	DefaultMaxInflightBytes    uint64 = 256 << 20
 )
 
 type UUIDGen func() ([16]byte, error)
@@ -23,6 +25,13 @@ type WriterIdentity struct {
 type Snapshot struct {
 	Head     pmeta.PartitionHead
 	Identity WriterIdentity
+}
+
+type State struct {
+	Snapshot          Snapshot
+	OptimisticNextLSN uint64
+	InflightSegments  int
+	InflightBytes     uint64
 }
 
 type PublishRequest struct {
@@ -40,12 +49,18 @@ type RollPolicy struct {
 	MaxSegmentRawBytes uint64
 }
 
+type QueuePolicy struct {
+	MaxInflightSegments int
+	MaxInflightBytes    uint64
+}
+
 type Options struct {
 	Session     Session
 	SinkFactory SinkFactory
 
 	SegmentOptions segwriter.Options
 	Roll           RollPolicy
+	Queue          QueuePolicy
 
 	Clock   func() time.Time
 	UUIDGen UUIDGen
@@ -57,13 +72,7 @@ type Record struct {
 }
 
 type AppendResult struct {
-	LSN   uint64
-	Flush *FlushResult
-}
-
-type FlushResult struct {
-	Snapshot Snapshot
-	Segment  pmeta.SegmentRef
+	LSN uint64
 }
 
 type SegmentInfo struct {
