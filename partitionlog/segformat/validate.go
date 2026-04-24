@@ -40,6 +40,9 @@ func (p BlockPreamble) Validate() error {
 	if p.RecordCount > p.RawSize/RecordHeaderSize {
 		return fmt.Errorf("%w: record_count=%d cannot fit in raw_size=%d", ErrInvalidSegment, p.RecordCount, p.RawSize)
 	}
+	if _, err := lastLSN(p.BaseLSN, p.RecordCount); err != nil {
+		return err
+	}
 	if p.MaxTimestampMS < p.MinTimestampMS {
 		return fmt.Errorf("%w: block max timestamp < min timestamp", ErrInvalidSegment)
 	}
@@ -80,6 +83,9 @@ func (e BlockIndexEntry) Validate() error {
 	}
 	if e.RecordCount > e.RawSize/RecordHeaderSize {
 		return fmt.Errorf("%w: index record_count=%d cannot fit in raw_size=%d", ErrInvalidSegment, e.RecordCount, e.RawSize)
+	}
+	if _, err := lastLSN(e.BaseLSN, e.RecordCount); err != nil {
+		return err
 	}
 	if e.MaxTimestampMS < e.MinTimestampMS {
 		return fmt.Errorf("%w: index max timestamp < min timestamp", ErrInvalidSegment)

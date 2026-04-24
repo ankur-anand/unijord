@@ -120,3 +120,22 @@ func TestSealRejectsInvalidMeta(t *testing.T) {
 		t.Fatalf("Seal() error = %v, want %v", err, segformat.ErrInvalidSegment)
 	}
 }
+
+func TestSealRejectsLSNOverflow(t *testing.T) {
+	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{
+		{TimestampMS: 100, Value: []byte("a")},
+		{TimestampMS: 101, Value: []byte("b")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	_, err = Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
+		BaseLSN:        ^uint64(0) - 1,
+		RecordCount:    2,
+		MinTimestampMS: 100,
+		MaxTimestampMS: 101,
+	})
+	if !errors.Is(err, segformat.ErrInvalidSegment) {
+		t.Fatalf("Seal() error = %v, want %v", err, segformat.ErrInvalidSegment)
+	}
+}
