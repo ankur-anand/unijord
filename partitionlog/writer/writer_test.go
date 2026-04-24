@@ -430,6 +430,62 @@ func TestWriterAppendStartFailureIsRetryable(t *testing.T) {
 	}
 }
 
+func TestWriterForegroundFailureCleanupUsesBestEffortAbortContext(t *testing.T) {
+	t.Parallel()
+
+	factory := newCleanupAwareSegmentFactory()
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, factory)
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.SegmentOptions.TargetBlockSize = 32
+	opts.SegmentOptions.PartSize = 16
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("aaaaaaaaaaaaaaaaaaaaaaaa")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("bbbbbbbbbbbbbbbbbbbbbbbb")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	sink := factory.firstSink(t)
+	sink.waitBeginStarted(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := w.Append(ctx, Record{TimestampMS: 1, Value: []byte("c")}); !errors.Is(err, ErrTimestampOrder) {
+		t.Fatalf("Append(regression) error = %v, want %v", err, ErrTimestampOrder)
+	}
+
+	sink.waitAbort(t)
+	if got := sink.abortCtxErr(); got != nil {
+		t.Fatalf("Abort() ctx.Err() = %v, want nil cleanup context", got)
+	}
+}
+
 func TestWriterCutBackpressureUsesEstimatedSegmentBytes(t *testing.T) {
 	t.Parallel()
 
@@ -780,6 +836,122 @@ func (f *memorySegmentFactory) Bytes(uri string) []byte {
 		return nil
 	}
 	return sink.Bytes()
+}
+
+type cleanupAwareSegmentFactory struct {
+	mu    sync.Mutex
+	sinks []*cleanupAwareSegmentSink
+}
+
+func newCleanupAwareSegmentFactory() *cleanupAwareSegmentFactory {
+	return &cleanupAwareSegmentFactory{}
+}
+
+func (f *cleanupAwareSegmentFactory) NewSegmentSink(context.Context, SegmentInfo) (segwriter.Sink, error) {
+	sink := newCleanupAwareSegmentSink()
+	f.mu.Lock()
+	f.sinks = append(f.sinks, sink)
+	f.mu.Unlock()
+	return sink, nil
+}
+
+func (f *cleanupAwareSegmentFactory) firstSink(t *testing.T) *cleanupAwareSegmentSink {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		f.mu.Lock()
+		if len(f.sinks) > 0 {
+			sink := f.sinks[0]
+			f.mu.Unlock()
+			return sink
+		}
+		f.mu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for segment sink")
+		case <-ticker.C:
+		}
+	}
+}
+
+type cleanupAwareSegmentSink struct {
+	txn *cleanupAwareSegmentTxn
+}
+
+func newCleanupAwareSegmentSink() *cleanupAwareSegmentSink {
+	return &cleanupAwareSegmentSink{
+		txn: &cleanupAwareSegmentTxn{
+			beginStarted: make(chan struct{}),
+			abortCalled:  make(chan struct{}),
+		},
+	}
+}
+
+func (s *cleanupAwareSegmentSink) Begin(context.Context, segwriter.Plan) (segwriter.Txn, error) {
+	s.txn.beginOnce.Do(func() {
+		close(s.txn.beginStarted)
+	})
+	return s.txn, nil
+}
+
+func (s *cleanupAwareSegmentSink) waitBeginStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.txn.beginStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sink.Begin")
+	}
+}
+
+func (s *cleanupAwareSegmentSink) waitAbort(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.txn.abortCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for txn.Abort")
+	}
+}
+
+func (s *cleanupAwareSegmentSink) abortCtxErr() error {
+	s.txn.mu.Lock()
+	defer s.txn.mu.Unlock()
+	return s.txn.abortErr
+}
+
+type cleanupAwareSegmentTxn struct {
+	mu           sync.Mutex
+	size         uint64
+	beginStarted chan struct{}
+	abortCalled  chan struct{}
+	beginOnce    sync.Once
+	abortOnce    sync.Once
+	abortErr     error
+}
+
+func (t *cleanupAwareSegmentTxn) UploadPart(_ context.Context, part segwriter.Part) (segwriter.PartReceipt, error) {
+	t.mu.Lock()
+	t.size += uint64(len(part.Bytes))
+	t.mu.Unlock()
+	return segwriter.PartReceipt{Number: part.Number, Token: fmt.Sprintf("cleanup-%d", part.Number)}, nil
+}
+
+func (t *cleanupAwareSegmentTxn) Complete(context.Context, []segwriter.PartReceipt) (segwriter.CommittedObject, error) {
+	t.mu.Lock()
+	size := t.size
+	t.mu.Unlock()
+	return segwriter.CommittedObject{URI: "cleanup://segment", SizeBytes: size, Token: "complete"}, nil
+}
+
+func (t *cleanupAwareSegmentTxn) Abort(ctx context.Context) error {
+	t.mu.Lock()
+	t.abortErr = ctx.Err()
+	t.mu.Unlock()
+	t.abortOnce.Do(func() {
+		close(t.abortCalled)
+	})
+	return nil
 }
 
 func testCatalogSegment(partition uint32, baseLSN uint64, lastLSN uint64, epoch uint64) pmeta.SegmentRef {

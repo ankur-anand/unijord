@@ -490,6 +490,42 @@ func TestWriterCloseContextCancelsLazyBegin(t *testing.T) {
 	}
 }
 
+func TestWriterFailureCleanupUsesBestEffortAbortContext(t *testing.T) {
+	t.Parallel()
+
+	sink := newCleanupAwareSink()
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 32
+	opts.PartSize = 16
+
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, record := range makeWriterRecords(2, 1, 1, 24) {
+		if err := w.Append(context.Background(), record); err != nil {
+			t.Fatalf("Append() error = %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Close(ctx)
+		done <- err
+	}()
+
+	sink.waitCompleteStarted(t)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close() error = %v, want %v", err, context.Canceled)
+	}
+	sink.waitAbort(t)
+	if got := sink.abortCtxErr(); got != nil {
+		t.Fatalf("Abort() ctx.Err() = %v, want nil cleanup context", got)
+	}
+}
+
 type decodedSegment struct {
 	preamble segformat.FilePreamble
 	trailer  segformat.Trailer
@@ -762,5 +798,81 @@ func (t *failingTxn) Abort(context.Context) error {
 	t.sink.mu.Lock()
 	t.sink.aborts++
 	t.sink.mu.Unlock()
+	return nil
+}
+
+type cleanupAwareSink struct {
+	txn *cleanupAwareTxn
+}
+
+func newCleanupAwareSink() *cleanupAwareSink {
+	return &cleanupAwareSink{
+		txn: &cleanupAwareTxn{
+			completeStarted: make(chan struct{}),
+			abortCalled:     make(chan struct{}),
+		},
+	}
+}
+
+func (s *cleanupAwareSink) Begin(context.Context, Plan) (Txn, error) {
+	return s.txn, nil
+}
+
+func (s *cleanupAwareSink) waitCompleteStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.txn.completeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for txn.Complete")
+	}
+}
+
+func (s *cleanupAwareSink) waitAbort(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.txn.abortCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for txn.Abort")
+	}
+}
+
+func (s *cleanupAwareSink) abortCtxErr() error {
+	s.txn.mu.Lock()
+	defer s.txn.mu.Unlock()
+	return s.txn.abortErr
+}
+
+type cleanupAwareTxn struct {
+	mu              sync.Mutex
+	size            uint64
+	completeStarted chan struct{}
+	abortCalled     chan struct{}
+	completeOnce    sync.Once
+	abortOnce       sync.Once
+	abortErr        error
+}
+
+func (t *cleanupAwareTxn) UploadPart(_ context.Context, part Part) (PartReceipt, error) {
+	t.mu.Lock()
+	t.size += uint64(len(part.Bytes))
+	t.mu.Unlock()
+	return PartReceipt{Number: part.Number, Token: fmt.Sprintf("cleanup-%d", part.Number)}, nil
+}
+
+func (t *cleanupAwareTxn) Complete(ctx context.Context, _ []PartReceipt) (CommittedObject, error) {
+	t.completeOnce.Do(func() {
+		close(t.completeStarted)
+	})
+	<-ctx.Done()
+	return CommittedObject{}, ctx.Err()
+}
+
+func (t *cleanupAwareTxn) Abort(ctx context.Context) error {
+	t.mu.Lock()
+	t.abortErr = ctx.Err()
+	t.mu.Unlock()
+	t.abortOnce.Do(func() {
+		close(t.abortCalled)
+	})
 	return nil
 }

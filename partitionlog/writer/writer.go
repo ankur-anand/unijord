@@ -14,6 +14,8 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/segwriter"
 )
 
+const cleanupTimeout = 5 * time.Second
+
 // Writer owns one partition's append flow. It is not safe for concurrent use.
 type Writer struct {
 	mu   sync.Mutex
@@ -132,14 +134,14 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		err := fmt.Errorf("%w: next_lsn=%d", ErrLSNExhausted, w.optimisticNextLSN)
 		active, detached := w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegments(ctx, active, detached)
+		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 	if w.hasTimestamp && record.TimestampMS < w.lastTimestamp {
 		err := fmt.Errorf("%w: got=%d previous=%d", ErrTimestampOrder, record.TimestampMS, w.lastTimestamp)
 		active, detached := w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegments(ctx, active, detached)
+		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 
@@ -166,7 +168,7 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		err = wrapSegmentWrite(err)
 		active, detached := w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegments(ctx, active, detached)
+		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 
@@ -216,7 +218,7 @@ func (w *Writer) Flush(ctx context.Context) (Snapshot, error) {
 	w.mu.Unlock()
 
 	if emptyActive != nil {
-		_ = emptyActive.writer.Abort(ctx)
+		abortWriterBestEffort(emptyActive.writer)
 	}
 
 	w.mu.Lock()
@@ -250,7 +252,7 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 	w.mu.Unlock()
 
 	if emptyActive != nil {
-		_ = emptyActive.writer.Abort(ctx)
+		abortWriterBestEffort(emptyActive.writer)
 	}
 
 	w.mu.Lock()
@@ -668,7 +670,7 @@ func (w *Writer) noteAsyncErr(err error) {
 	w.signalAllLocked()
 	w.mu.Unlock()
 
-	w.abortSegments(context.Background(), active, detached)
+	w.abortSegmentsBestEffort(active, detached)
 }
 
 func (w *Writer) signalStateLocked() {
@@ -928,4 +930,19 @@ func (w *Writer) abortSegments(ctx context.Context, active *activeSegment, detac
 	for _, item := range detached {
 		_ = item.writer.Abort(ctx)
 	}
+}
+
+func (w *Writer) abortSegmentsBestEffort(active *activeSegment, detached []detachedSegment) {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	w.abortSegments(ctx, active, detached)
+}
+
+func abortWriterBestEffort(sw *segwriter.Writer) {
+	if sw == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_ = sw.Abort(ctx)
 }

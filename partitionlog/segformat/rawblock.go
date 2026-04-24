@@ -40,6 +40,9 @@ func DecodeRawBlock(raw []byte, block BlockPreamble) ([]Record, error) {
 	if err := block.Validate(); err != nil {
 		return nil, err
 	}
+	if _, err := lastLSN(block.BaseLSN, block.RecordCount); err != nil {
+		return nil, err
+	}
 	if len(raw) != int(block.RawSize) {
 		return nil, fmt.Errorf("%w: raw_size=%d want=%d", ErrInvalidSegment, len(raw), block.RawSize)
 	}

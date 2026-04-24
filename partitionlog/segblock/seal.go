@@ -81,6 +81,9 @@ func validateMeta(meta Meta, rawSize int) error {
 	if meta.RecordCount == 0 {
 		return fmt.Errorf("%w: record_count must be positive", segformat.ErrInvalidSegment)
 	}
+	if meta.BaseLSN > ^uint64(0)-uint64(meta.RecordCount-1) {
+		return fmt.Errorf("%w: lsn range overflows uint64", segformat.ErrInvalidSegment)
+	}
 	if int64(meta.RecordCount) > int64(rawSize/segformat.RecordHeaderSize) {
 		return fmt.Errorf("%w: record_count=%d cannot fit in raw_size=%d", segformat.ErrInvalidSegment, meta.RecordCount, rawSize)
 	}

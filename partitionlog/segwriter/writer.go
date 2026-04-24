@@ -18,6 +18,8 @@ const (
 	DefaultTargetBlockSize   = 1 << 20
 	DefaultPartSize          = 8 << 20
 	DefaultUploadParallelism = 2
+	
+	cleanupTimeout = 5 * time.Second
 )
 
 type Options struct {
@@ -493,7 +495,7 @@ func (w *Writer) ensurePacker(ctx context.Context) (*packer, error) {
 		UploadLimiter:     w.opts.UploadLimiter,
 	})
 	if err != nil {
-		_ = txn.Abort(ctx)
+		abortTxnBestEffort(txn)
 		return nil, err
 	}
 	preamble, err := (segformat.FilePreamble{
@@ -506,11 +508,11 @@ func (w *Writer) ensurePacker(ctx context.Context) (*packer, error) {
 		WriterTag:    w.opts.WriterTag,
 	}).MarshalBinary()
 	if err != nil {
-		_ = p.Abort(ctx)
+		abortPackerBestEffort(p)
 		return nil, err
 	}
 	if err := p.WriteBody(ctx, preamble); err != nil {
-		_ = p.Abort(ctx)
+		abortPackerBestEffort(p)
 		return nil, err
 	}
 	w.packer = p
@@ -563,7 +565,7 @@ func (w *Writer) abortWith(ctx context.Context, err error, drainPipeline bool) e
 		_ = w.finishPipeline()
 	}
 	if p := w.getPacker(); p != nil {
-		_ = p.Abort(ctx)
+		abortPackerBestEffort(p)
 	}
 	return err
 }
@@ -729,6 +731,24 @@ func metadataFromTrailer(t segformat.Trailer) Metadata {
 		SegmentHash:      t.SegmentHash,
 		TrailerHash:      t.TrailerHash,
 	}
+}
+
+func abortTxnBestEffort(txn Txn) {
+	if txn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_ = txn.Abort(ctx)
+}
+
+func abortPackerBestEffort(p *packer) {
+	if p == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_ = p.Abort(ctx)
 }
 
 func (b *blockBuffer) Reset() {

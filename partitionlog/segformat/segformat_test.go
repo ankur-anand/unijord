@@ -308,6 +308,59 @@ func TestDecodeRawBlockRejectsImpossibleRecordCountBeforeAllocation(t *testing.T
 	}
 }
 
+func TestBlockPreambleRejectsLSNOverflow(t *testing.T) {
+	block := BlockPreamble{
+		StoredSize:     RecordHeaderSize,
+		RawSize:        RecordHeaderSize,
+		RecordCount:    2,
+		BaseLSN:        ^uint64(0) - 1,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	if err := block.Validate(); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("BlockPreamble.Validate() error = %v, want %v", err, ErrInvalidSegment)
+	}
+}
+
+func TestDecodeRawBlockRejectsLSNOverflow(t *testing.T) {
+	raw, err := EncodeRawBlock([]RawRecord{
+		{TimestampMS: 10, Value: []byte("a")},
+		{TimestampMS: 10, Value: []byte("b")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	block := BlockPreamble{
+		StoredSize:     uint32(len(raw)),
+		RawSize:        uint32(len(raw)),
+		RecordCount:    2,
+		BaseLSN:        ^uint64(0) - 1,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	if _, err := DecodeRawBlock(raw, block); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("DecodeRawBlock() error = %v, want %v", err, ErrInvalidSegment)
+	}
+}
+
+func TestBlockIndexEntryRejectsLSNOverflow(t *testing.T) {
+	entry := BlockIndexEntry{
+		BlockOffset:    FilePreambleSize,
+		StoredSize:     RecordHeaderSize,
+		RawSize:        RecordHeaderSize,
+		RecordCount:    2,
+		BaseLSN:        ^uint64(0) - 1,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	if err := entry.Validate(); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("BlockIndexEntry.Validate() error = %v, want %v", err, ErrInvalidSegment)
+	}
+}
+
 func TestValidateIndexRejectsShiftedFirstBlockOffset(t *testing.T) {
 	entries := []BlockIndexEntry{
 		{
