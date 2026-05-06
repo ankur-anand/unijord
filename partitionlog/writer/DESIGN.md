@@ -213,6 +213,12 @@ recorded asynchronously, then return `ErrAborted`.
 for finalize or publish completion except when bounded in-flight backpressure
 blocks a cut.
 
+Post-append cut is best-effort. If the record has already been accepted and the
+post-append cut cannot reserve capacity or start the next segment, `Append`
+still returns success for the accepted record. The active segment remains in
+place, and the next `Append`, `Cut`, `Flush`, or `Close` retries the boundary
+before moving on.
+
 If `Append` fails before a new active segment is started, it returns
 `ErrSegmentStartFailed` and the writer remains usable.
 
@@ -312,7 +318,11 @@ requires committed visibility before returning.
 - cuts the active segment if needed;
 - waits until all in-flight segments drain;
 - marks the writer closed;
+- stops background workers;
 - returns the final committed snapshot.
+
+The final worker shutdown wait honors `ctx`. If shutdown work does not finish
+before the context is canceled, `Close` returns the context error.
 
 ## Abort
 
