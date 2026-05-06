@@ -179,7 +179,7 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 	w.active.rawBytes += recordSize
 
 	if w.shouldCutAfterLocked() {
-		_ = w.cutLocked(ctx)
+		w.tryCutAfterAppendLocked(ctx)
 	}
 
 	w.mu.Unlock()
@@ -266,7 +266,9 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 	w.signalAllLocked()
 	w.mu.Unlock()
 
-	w.workersWG.Wait()
+	if err := waitGroupContext(ctx, &w.workersWG); err != nil {
+		return Snapshot{}, err
+	}
 	return snapshot, nil
 }
 
@@ -462,6 +464,14 @@ func (w *Writer) cutLocked(ctx context.Context) error {
 	w.nextCutSeq++
 	w.signalFinalizeLocked()
 	return nil
+}
+
+func (w *Writer) tryCutAfterAppendLocked(ctx context.Context) {
+	if err := w.cutLocked(ctx); err != nil {
+		// The record is already accepted. Keep the active segment live; the
+		// next Append/Cut/Flush/Close will retry the boundary before moving on.
+		w.signalStateLocked()
+	}
 }
 
 func (w *Writer) detachActiveLocked(ctx context.Context) error {

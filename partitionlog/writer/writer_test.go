@@ -141,19 +141,11 @@ func TestWriterContinuesFromCatalogHead(t *testing.T) {
 	t.Parallel()
 
 	cat := catalog.NewMemoryCatalog()
-	preloadFence, err := cat.AcquireWriter(context.Background(), catalog.AcquireWriterRequest{
-		Partition: 1,
-		WriterID:  [16]byte{1},
-	})
+	preloadWriter, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
 	if err != nil {
-		t.Fatalf("AcquireWriter(preload) error = %v", err)
+		t.Fatalf("OpenWriter(preload) error = %v", err)
 	}
-	if _, err := cat.AppendSegment(context.Background(), catalog.AppendSegmentRequest{
-		Partition:       1,
-		ExpectedNextLSN: 0,
-		WriterEpoch:     preloadFence.Epoch,
-		Segment:         testCatalogSegment(1, 0, 1, preloadFence.Epoch),
-	}); err != nil {
+	if _, err := preloadWriter.AppendSegment(context.Background(), testCatalogSegment(1, 0, 1, preloadWriter.Epoch())); err != nil {
 		t.Fatalf("preload catalog error = %v", err)
 	}
 
@@ -381,6 +373,76 @@ func TestWriterCutFailureBeforeSwapKeepsWriterUsable(t *testing.T) {
 	}
 }
 
+func TestWriterRollAfterStartFailureRetriesBeforeNextAppend(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{
+			1: errors.New("start next segment failed"),
+		},
+	}
+	opts := testSessionOptions(&sessionStub{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{
+				Partition:   1,
+				WriterEpoch: 1,
+			},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{1},
+			},
+		},
+		publish: func(_ context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
+			next := current
+			next.Head.NextLSN = req.Segment.NextLSN()
+			next.Head.WriterEpoch = current.Identity.Epoch
+			next.Head.SegmentCount++
+			next.Head.LastSegment = req.Segment
+			next.Head.HasLastSegment = true
+			return next, nil
+		},
+	}, factory)
+	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.UUIDGen = newSequenceUUIDGen()
+	opts.SegmentOptions = newTestSegmentOptions(1)
+	opts.Roll.MaxSegmentRecords = 1
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")})
+	if err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if first.LSN != 0 {
+		t.Fatalf("Append(first) LSN = %d, want 0", first.LSN)
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err() = %v, want nil after roll-after start failure", w.Err())
+	}
+	if state := w.State(); state.OptimisticNextLSN != 1 || state.InflightSegments != 0 {
+		t.Fatalf("state after failed roll-after = %+v, want next_lsn=1 inflight=0", state)
+	}
+
+	second, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")})
+	if err != nil {
+		t.Fatalf("Append(second) error = %v, want retry cut before append", err)
+	}
+	if second.LSN != 1 {
+		t.Fatalf("Append(second) LSN = %d, want 1", second.LSN)
+	}
+
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 2 || snapshot.Head.SegmentCount != 2 {
+		t.Fatalf("Flush() snapshot = %+v, want 2 one-record segments", snapshot)
+	}
+}
+
 func TestWriterAppendStartFailureIsRetryable(t *testing.T) {
 	t.Parallel()
 
@@ -562,42 +624,48 @@ func TestWriterCloseEmptyIsNoop(t *testing.T) {
 	}
 }
 
+func TestWriterCloseHonorsContextWhileWaitingForWorkers(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testOptions(t, catalog.NewMemoryCatalog(), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	w.workersWG.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := w.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	w.workersWG.Done()
+}
+
 func TestWriterRejectsStaleEpochOnOpen(t *testing.T) {
 	t.Parallel()
 
 	cat := catalog.NewMemoryCatalog()
-	firstFence, err := cat.AcquireWriter(context.Background(), catalog.AcquireWriterRequest{
-		Partition: 1,
-		WriterID:  [16]byte{1},
-	})
+	firstWriter, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
 	if err != nil {
-		t.Fatalf("AcquireWriter(first) error = %v", err)
+		t.Fatalf("OpenWriter(first) error = %v", err)
 	}
-	if _, err := cat.AppendSegment(context.Background(), catalog.AppendSegmentRequest{
-		Partition:       1,
-		ExpectedNextLSN: 0,
-		WriterEpoch:     firstFence.Epoch,
-		Segment:         testCatalogSegment(1, 0, 1, firstFence.Epoch),
-	}); err != nil {
+	if _, err := firstWriter.AppendSegment(context.Background(), testCatalogSegment(1, 0, 1, firstWriter.Epoch())); err != nil {
 		t.Fatalf("preload catalog error = %v", err)
 	}
-	secondFence, err := cat.AcquireWriter(context.Background(), catalog.AcquireWriterRequest{
-		Partition: 1,
-		WriterID:  [16]byte{2},
-	})
+	secondWriter, err := cat.OpenWriter(context.Background(), 1, [16]byte{2})
 	if err != nil {
-		t.Fatalf("AcquireWriter(second) error = %v", err)
+		t.Fatalf("OpenWriter(second) error = %v", err)
 	}
-	if secondFence.Epoch <= firstFence.Epoch {
-		t.Fatalf("second fence epoch = %d, want > %d", secondFence.Epoch, firstFence.Epoch)
+	if secondWriter.Epoch() <= firstWriter.Epoch() {
+		t.Fatalf("second writer epoch = %d, want > %d", secondWriter.Epoch(), firstWriter.Epoch())
 	}
 
 	opts := DefaultOptions(newMemorySegmentFactory())
 	opts.Session = &sessionStub{
 		snapshot: Snapshot{
-			Head: secondFence.State,
+			Head: secondWriter.Head(),
 			Identity: WriterIdentity{
-				Epoch: firstFence.Epoch,
+				Epoch: firstWriter.Epoch(),
 				Tag:   [16]byte{9, 8, 7},
 			},
 		},
@@ -610,7 +678,10 @@ func TestWriterRejectsStaleEpochOnOpen(t *testing.T) {
 	}
 }
 
-func testOptions(t *testing.T, cat catalog.Catalog, factory SinkFactory) Options {
+func testOptions(t *testing.T, cat interface {
+	catalog.Reader
+	catalog.WriterManager
+}, factory SinkFactory) Options {
 	t.Helper()
 
 	opts := DefaultOptions(factory)
@@ -682,31 +753,26 @@ func (s *sessionStub) PublishSegment(ctx context.Context, req PublishRequest) (S
 	return next, nil
 }
 
-func newCatalogSession(t testing.TB, cat catalog.Catalog, partition uint32, writerTag [16]byte) Session {
+func newCatalogSession(t testing.TB, cat interface {
+	catalog.Reader
+	catalog.WriterManager
+}, partition uint32, writerTag [16]byte) Session {
 	t.Helper()
 
-	fence, err := cat.AcquireWriter(context.Background(), catalog.AcquireWriterRequest{
-		Partition: partition,
-		WriterID:  writerTag,
-	})
+	ws, err := cat.OpenWriter(context.Background(), partition, writerTag)
 	if err != nil {
-		t.Fatalf("AcquireWriter() error = %v", err)
+		t.Fatalf("OpenWriter() error = %v", err)
 	}
 	return &sessionStub{
 		snapshot: Snapshot{
-			Head: fence.State,
+			Head: ws.Head(),
 			Identity: WriterIdentity{
-				Epoch: fence.Epoch,
+				Epoch: ws.Epoch(),
 				Tag:   writerTag,
 			},
 		},
 		publish: func(ctx context.Context, req PublishRequest, current Snapshot) (Snapshot, error) {
-			state, err := cat.AppendSegment(ctx, catalog.AppendSegmentRequest{
-				Partition:       current.Head.Partition,
-				ExpectedNextLSN: req.ExpectedNextLSN,
-				WriterEpoch:     current.Identity.Epoch,
-				Segment:         req.Segment,
-			})
+			state, err := ws.AppendSegment(ctx, req.Segment)
 			if err != nil {
 				if errors.Is(err, catalog.ErrStaleWriter) {
 					return Snapshot{}, fmt.Errorf("%w: %w", ErrStaleWriter, err)
