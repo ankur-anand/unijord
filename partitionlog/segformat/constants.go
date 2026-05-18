@@ -5,19 +5,23 @@ import "fmt"
 const (
 	Version uint16 = 2
 
-	FilePreambleSize     = 64
-	BlockPreambleSize    = 64
-	IndexPreambleSize    = 64
-	BlockIndexEntrySize  = 64
-	TrailerSize          = 192
-	RecordHeaderSize     = 12
-	MaxRawBlockSize      = 16 << 20
-	MaxStoredBlockSize   = 20 << 20
-	MaxRecordValueLen    = 4 << 20
-	MaxBlockCount        = (1<<32 - 1 - IndexPreambleSize) / BlockIndexEntrySize
-	MaxRecordCount       = 1<<32 - 1
-	DefaultRecordFormat  = RecordFormatV1
-	DefaultHashAlgorithm = HashXXH64
+	FilePreambleSize        = 64
+	BlockPreambleSize       = 64
+	IndexPreambleSize       = 64
+	BlockIndexEntrySize     = 64
+	TrailerSize             = 192
+	RecordHeaderSize        = 16
+	MaxRawBlockSize         = 16 << 20
+	MaxStoredBlockSize      = 20 << 20
+	MaxRecordHeaders        = 64
+	MaxRecordHeaderBytes    = 256 << 10
+	MaxRecordHeaderKeyLen   = 1024
+	MaxRecordHeaderValueLen = 1<<16 - 1
+	MaxRecordValueLen       = 4 << 20
+	MaxBlockCount           = (1<<32 - 1 - IndexPreambleSize) / BlockIndexEntrySize
+	MaxRecordCount          = 1<<32 - 1
+	DefaultRecordFormat     = RecordFormatV1
+	DefaultHashAlgorithm    = HashXXH64
 )
 
 var (

@@ -81,6 +81,7 @@ type Options struct {
 
 type Record struct {
     TimestampMS int64
+    Headers     []segformat.Header
     Value       []byte
 }
 

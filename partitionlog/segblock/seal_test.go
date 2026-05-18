@@ -9,7 +9,8 @@ import (
 )
 
 func TestSealOpenRoundTripCodecNone(t *testing.T) {
-	raw := []byte("raw block bytes")
+	raw := singleRawBlock(t)
+	want := append([]byte(nil), raw...)
 	sealed, err := Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
 		BaseLSN:        10,
 		RecordCount:    1,
@@ -19,8 +20,8 @@ func TestSealOpenRoundTripCodecNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal() error = %v", err)
 	}
-	if !bytes.Equal(sealed.Stored, raw) {
-		t.Fatalf("stored = %q, want raw", sealed.Stored)
+	if !bytes.Equal(sealed.Stored, want) {
+		t.Fatalf("stored bytes mismatch")
 	}
 	raw[0] = 'X'
 	if bytes.Equal(sealed.Stored, raw) {
@@ -31,8 +32,8 @@ func TestSealOpenRoundTripCodecNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if !bytes.Equal(opened, []byte("raw block bytes")) {
-		t.Fatalf("opened = %q", opened)
+	if !bytes.Equal(opened, want) {
+		t.Fatal("opened raw bytes mismatch")
 	}
 	sealed.Stored[0] = 'Y'
 	if bytes.Equal(opened, sealed.Stored) {
@@ -41,7 +42,7 @@ func TestSealOpenRoundTripCodecNone(t *testing.T) {
 }
 
 func TestSealOwnedCodecNoneTransfersRawOwnership(t *testing.T) {
-	raw := []byte("raw block bytes")
+	raw := singleRawBlock(t)
 	sealed, err := SealOwned(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
 		BaseLSN:        10,
 		RecordCount:    1,
@@ -93,7 +94,7 @@ func TestSealOpenRoundTripZstd(t *testing.T) {
 }
 
 func TestOpenRejectsCorruptStoredBytes(t *testing.T) {
-	raw := []byte("raw block bytes")
+	raw := singleRawBlock(t)
 	sealed, err := Seal(segformat.CodecNone, segformat.HashCRC32C, raw, Meta{
 		BaseLSN:        10,
 		RecordCount:    1,
@@ -107,6 +108,15 @@ func TestOpenRejectsCorruptStoredBytes(t *testing.T) {
 	if _, err := Open(segformat.CodecNone, segformat.HashCRC32C, sealed.Preamble, sealed.Stored); !errors.Is(err, segformat.ErrIntegrityMismatch) {
 		t.Fatalf("Open(corrupt) error = %v, want %v", err, segformat.ErrIntegrityMismatch)
 	}
+}
+
+func singleRawBlock(t *testing.T) []byte {
+	t.Helper()
+	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{{TimestampMS: 100, Value: []byte("raw block bytes")}})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	return raw
 }
 
 func TestSealRejectsInvalidMeta(t *testing.T) {

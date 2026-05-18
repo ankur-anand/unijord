@@ -57,8 +57,8 @@ func FuzzParseIndexPreamble(f *testing.F) {
 func FuzzParseBlockIndexEntry(f *testing.F) {
 	valid, err := (BlockIndexEntry{
 		BlockOffset:    FilePreambleSize,
-		StoredSize:     1,
-		RawSize:        12,
+		StoredSize:     RecordHeaderSize,
+		RawSize:        RecordHeaderSize,
 		RecordCount:    1,
 		MinTimestampMS: 1,
 		MaxTimestampMS: 1,
@@ -85,7 +85,7 @@ func FuzzParseTrailer(f *testing.F) {
 		MaxTimestampMS:   1,
 		RecordCount:      1,
 		BlockCount:       1,
-		BlockIndexOffset: FilePreambleSize + BlockPreambleSize + 1,
+		BlockIndexOffset: FilePreambleSize + BlockPreambleSize + RecordHeaderSize,
 		BlockIndexLength: IndexPreambleSize + BlockIndexEntrySize,
 	}
 	trailer.TotalSize = trailer.BlockIndexOffset + uint64(trailer.BlockIndexLength) + TrailerSize
@@ -128,8 +128,8 @@ func FuzzParseBlockIndex(f *testing.F) {
 	entries := []BlockIndexEntry{
 		{
 			BlockOffset:    FilePreambleSize,
-			StoredSize:     1,
-			RawSize:        12,
+			StoredSize:     RecordHeaderSize,
+			RawSize:        RecordHeaderSize,
 			RecordCount:    1,
 			BaseLSN:        1,
 			MinTimestampMS: 1,
@@ -146,7 +146,7 @@ func FuzzParseBlockIndex(f *testing.F) {
 		MaxTimestampMS:   1,
 		RecordCount:      1,
 		BlockCount:       1,
-		BlockIndexOffset: FilePreambleSize + BlockPreambleSize + 1,
+		BlockIndexOffset: FilePreambleSize + BlockPreambleSize + RecordHeaderSize,
 		BlockIndexLength: IndexPreambleSize + BlockIndexEntrySize,
 	}
 	trailer.TotalSize = trailer.BlockIndexOffset + uint64(trailer.BlockIndexLength) + TrailerSize

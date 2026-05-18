@@ -41,8 +41,13 @@ Regions are contiguous. There is no padding between regions.
 | `INDEX_PREAMBLE_SIZE` | `64` |
 | `BLOCK_INDEX_ENTRY_SIZE` | `64` |
 | `TRAILER_SIZE` | `192` |
+| `RECORD_HEADER_SIZE` | `16` |
 | `MAX_RAW_BLOCK_SIZE` | `16 MiB` |
 | `MAX_STORED_BLOCK_SIZE` | `20 MiB` |
+| `MAX_RECORD_HEADERS` | `64` |
+| `MAX_RECORD_HEADER_BYTES` | `256 KiB` |
+| `MAX_RECORD_HEADER_KEY_LEN` | `1024 B` |
+| `MAX_RECORD_HEADER_VALUE_LEN` | `65535 B` |
 | `MAX_RECORD_VALUE_LEN` | `4 MiB` |
 | `MAX_BLOCK_COUNT` | `67,108,862` |
 | `MAX_RECORD_COUNT` | `2^32 - 1` |
@@ -141,8 +146,22 @@ Record format `1`:
 ```text
 record =>
   timestamp_ms: i64
+  headers_len:  u32
   value_len:    u32
+  headers:      bytes[headers_len]
   value:        bytes[value_len]
+```
+
+`headers` is empty when `headers_len == 0`. When non-empty:
+
+```text
+headers =>
+  header_count: u16
+  repeated header_count times:
+    key_len:    u16
+    value_len:  u16
+    key:        bytes[key_len]
+    value:      bytes[value_len]
 ```
 
 LSN is implicit:
@@ -155,6 +174,11 @@ Rules:
 
 - decoded bytes consumed must equal `raw_size`
 - decoded record count must equal `record_count`
+- `headers_len <= MAX_RECORD_HEADER_BYTES`
+- `header_count <= MAX_RECORD_HEADERS`
+- `key_len > 0`
+- `key_len <= MAX_RECORD_HEADER_KEY_LEN`
+- `value_len in header <= MAX_RECORD_HEADER_VALUE_LEN`
 - `value_len <= MAX_RECORD_VALUE_LEN`
 - timestamps are non-decreasing within a block
 - timestamps are inside `[min_timestamp_ms, max_timestamp_ms]`

@@ -145,7 +145,14 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		return AppendResult{}, err
 	}
 
-	recordSize := uint64(segformat.RecordHeaderSize + len(record.Value))
+	recordSizeInt, err := segformat.RecordSize(record.Headers, record.Value)
+	if err != nil {
+		active, detached := w.failLocked(err)
+		w.mu.Unlock()
+		w.abortSegmentsBestEffort(active, detached)
+		return AppendResult{}, err
+	}
+	recordSize := uint64(recordSizeInt)
 	if w.shouldCutBeforeLocked(recordSize) {
 		if err := w.cutLocked(ctx); err != nil {
 			w.mu.Unlock()
@@ -163,6 +170,7 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 	if err := w.active.writer.Append(ctx, segwriter.Record{
 		LSN:         lsn,
 		TimestampMS: record.TimestampMS,
+		Headers:     record.Headers,
 		Value:       record.Value,
 	}); err != nil {
 		err = wrapSegmentWrite(err)
