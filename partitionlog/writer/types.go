@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
+	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/ankur-anand/unijord/partitionlog/segwriter"
 )
 
@@ -68,6 +69,7 @@ type Options struct {
 
 type Record struct {
 	TimestampMS int64
+	Headers     []segformat.Header
 	Value       []byte
 }
 

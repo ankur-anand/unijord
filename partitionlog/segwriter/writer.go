@@ -3,10 +3,8 @@ package segwriter
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"runtime"
-	"slices"
 	"sync"
 	"time"
 
@@ -18,7 +16,7 @@ const (
 	DefaultTargetBlockSize   = 1 << 20
 	DefaultPartSize          = 8 << 20
 	DefaultUploadParallelism = 2
-	
+
 	cleanupTimeout = 5 * time.Second
 )
 
@@ -44,6 +42,7 @@ type Options struct {
 type Record struct {
 	LSN         uint64
 	TimestampMS int64
+	Headers     []segformat.Header
 	Value       []byte
 }
 
@@ -202,7 +201,10 @@ func (w *Writer) Append(ctx context.Context, r Record) error {
 		return w.abortWith(ctx, err, true)
 	}
 
-	recordSize := segformat.RecordHeaderSize + len(r.Value)
+	recordSize, err := segformat.RecordSize(r.Headers, r.Value)
+	if err != nil {
+		return w.abortWith(ctx, err, true)
+	}
 	if w.active.Len() > 0 && !w.active.CanAppend(recordSize, w.opts.TargetBlockSize) {
 		if err := w.enqueueActive(ctx); err != nil {
 			return w.abortWith(ctx, err, true)
@@ -311,8 +313,8 @@ func (w *Writer) Abort(ctx context.Context) error {
 }
 
 func (w *Writer) validateRecord(r Record) error {
-	if len(r.Value) > segformat.MaxRecordValueLen {
-		return fmt.Errorf("%w: value_len=%d max=%d", segformat.ErrRecordTooLarge, len(r.Value), segformat.MaxRecordValueLen)
+	if _, err := segformat.RecordSize(r.Headers, r.Value); err != nil {
+		return err
 	}
 	if !w.hasRecords {
 		return nil
@@ -779,7 +781,10 @@ func (b *blockBuffer) CanAppend(recordSize int, targetBlockSize int) bool {
 }
 
 func (b *blockBuffer) Append(r Record, targetBlockSize int) error {
-	recordSize := segformat.RecordHeaderSize + len(r.Value)
+	recordSize, err := segformat.RecordSize(r.Headers, r.Value)
+	if err != nil {
+		return err
+	}
 	if !b.CanAppend(recordSize, segformat.MaxRawBlockSize) {
 		return fmt.Errorf("%w: raw block size=%d max=%d", segformat.ErrBlockTooLarge, len(b.Raw)+recordSize, segformat.MaxRawBlockSize)
 	}
@@ -794,12 +799,14 @@ func (b *blockBuffer) Append(r Record, targetBlockSize int) error {
 	}
 	b.MaxTimestampMS = r.TimestampMS
 
-	b.Raw = slices.Grow(b.Raw, recordSize)
-	off := len(b.Raw)
-	b.Raw = b.Raw[:off+recordSize]
-	binary.BigEndian.PutUint64(b.Raw[off:off+8], uint64(r.TimestampMS))
-	binary.BigEndian.PutUint32(b.Raw[off+8:off+12], uint32(len(r.Value)))
-	copy(b.Raw[off+segformat.RecordHeaderSize:], r.Value)
+	b.Raw, err = segformat.AppendRawRecord(b.Raw, segformat.RawRecord{
+		TimestampMS: r.TimestampMS,
+		Headers:     r.Headers,
+		Value:       r.Value,
+	})
+	if err != nil {
+		return err
+	}
 	b.RecordCount++
 	return nil
 }

@@ -35,6 +35,7 @@ defer w.Abort(ctx) // no-op after successful Close
 err = w.Append(ctx, segwriter.Record{
     LSN:         1000,
     TimestampMS: ts,
+    Headers:     headers,
     Value:       payload,
 })
 if err != nil {

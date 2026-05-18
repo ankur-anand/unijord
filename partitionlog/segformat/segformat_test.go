@@ -157,7 +157,14 @@ func TestTrailerMarshalParseVerifiesHash(t *testing.T) {
 
 func TestRawBlockEncodeDecode(t *testing.T) {
 	raw, err := EncodeRawBlock([]RawRecord{
-		{TimestampMS: 10, Value: []byte("alpha")},
+		{
+			TimestampMS: 10,
+			Headers: []Header{
+				{Key: []byte("event-type"), Value: []byte("alpha.created")},
+				{Key: []byte("content-type"), Value: []byte("application/json")},
+			},
+			Value: []byte("alpha"),
+		},
 		{TimestampMS: 11, Value: []byte("beta")},
 	})
 	if err != nil {
@@ -182,6 +189,13 @@ func TestRawBlockEncodeDecode(t *testing.T) {
 	if records[0].LSN != 50 || records[0].TimestampMS != 10 || string(records[0].Value) != "alpha" {
 		t.Fatalf("record[0] = %+v", records[0])
 	}
+	if len(records[0].Headers) != 2 ||
+		string(records[0].Headers[0].Key) != "event-type" ||
+		string(records[0].Headers[0].Value) != "alpha.created" ||
+		string(records[0].Headers[1].Key) != "content-type" ||
+		string(records[0].Headers[1].Value) != "application/json" {
+		t.Fatalf("record[0].Headers = %+v", records[0].Headers)
+	}
 	if records[1].LSN != 51 || records[1].TimestampMS != 11 || string(records[1].Value) != "beta" {
 		t.Fatalf("record[1] = %+v", records[1])
 	}
@@ -192,20 +206,37 @@ func TestRawBlockEncodeDecode(t *testing.T) {
 }
 
 func TestRecordCloneDetachesValue(t *testing.T) {
-	in := Record{LSN: 7, TimestampMS: 99, Value: []byte("alpha")}
+	in := Record{
+		LSN:         7,
+		TimestampMS: 99,
+		Headers:     []Header{{Key: []byte("event-type"), Value: []byte("alpha.created")}},
+		Value:       []byte("alpha"),
+	}
 	out := in.Clone()
-	if out.LSN != in.LSN || out.TimestampMS != in.TimestampMS || !bytes.Equal(out.Value, in.Value) {
+	if out.LSN != in.LSN ||
+		out.TimestampMS != in.TimestampMS ||
+		!bytes.Equal(out.Headers[0].Key, in.Headers[0].Key) ||
+		!bytes.Equal(out.Headers[0].Value, in.Headers[0].Value) ||
+		!bytes.Equal(out.Value, in.Value) {
 		t.Fatalf("Clone() = %+v, want %+v", out, in)
 	}
 
+	in.Headers[0].Key[0] = 'z'
+	in.Headers[0].Value[0] = 'z'
 	in.Value[0] = 'z'
+	if string(out.Headers[0].Key) != "event-type" {
+		t.Fatalf("cloned header key = %q, want detached copy", out.Headers[0].Key)
+	}
+	if string(out.Headers[0].Value) != "alpha.created" {
+		t.Fatalf("cloned header value = %q, want detached copy", out.Headers[0].Value)
+	}
 	if string(out.Value) != "alpha" {
 		t.Fatalf("cloned value = %q, want detached copy", out.Value)
 	}
 
 	empty := Record{LSN: 8, TimestampMS: 100}
-	if cloned := empty.Clone(); cloned.Value != nil {
-		t.Fatalf("empty Clone().Value = %v, want nil", cloned.Value)
+	if cloned := empty.Clone(); cloned.Value != nil || cloned.Headers != nil {
+		t.Fatalf("empty Clone() = %+v, want nil slices", cloned)
 	}
 }
 

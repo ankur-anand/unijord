@@ -69,24 +69,50 @@ type Trailer struct {
 	TrailerHash      uint64
 }
 
+// Header is optional record metadata encoded with the record envelope. Key and
+// Value alias the raw block buffer until callers clone them.
+type Header struct {
+	Key   []byte
+	Value []byte
+}
+
 // RawRecord is the record shape encoded inside one uncompressed block.
 type RawRecord struct {
 	TimestampMS int64
+	Headers     []Header
 	Value       []byte
 }
 
-// Record is the logical record returned after raw-block decode. Value aliases
-// the raw block buffer until the caller copies it.
+// Record is the logical record returned after raw-block decode. Headers and
+// Value alias the raw block buffer until the caller copies them.
 type Record struct {
 	LSN         uint64
 	TimestampMS int64
+	Headers     []Header
 	Value       []byte
 }
 
 func (r Record) Clone() Record {
 	out := r
+	out.Headers = CloneHeaders(r.Headers)
 	if len(r.Value) > 0 {
 		out.Value = append([]byte(nil), r.Value...)
+	}
+	return out
+}
+
+func CloneHeaders(headers []Header) []Header {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make([]Header, len(headers))
+	for i := range headers {
+		if len(headers[i].Key) > 0 {
+			out[i].Key = append([]byte(nil), headers[i].Key...)
+		}
+		if len(headers[i].Value) > 0 {
+			out[i].Value = append([]byte(nil), headers[i].Value...)
+		}
 	}
 	return out
 }

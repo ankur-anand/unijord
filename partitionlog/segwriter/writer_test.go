@@ -18,6 +18,13 @@ func TestWriterEndToEndCodecNone(t *testing.T) {
 	t.Parallel()
 
 	records := makeWriterRecords(32, 100, 1_000, 31)
+	records[0].Headers = []segformat.Header{
+		{Key: []byte("event-type"), Value: []byte("alpha.created")},
+		{Key: []byte("content-type"), Value: []byte("application/json")},
+	}
+	records[1].Headers = []segformat.Header{
+		{Key: []byte("trace-id"), Value: []byte("trace-001")},
+	}
 	sink := NewMemorySink("memory://none")
 	opts := testWriterOptions(segformat.CodecNone)
 	opts.TargetBlockSize = 128
@@ -591,6 +598,7 @@ func decodeSegmentForTest(t *testing.T, object []byte) decodedSegment {
 			records = append(records, Record{
 				LSN:         record.LSN,
 				TimestampMS: record.TimestampMS,
+				Headers:     segformat.CloneHeaders(record.Headers),
 				Value:       append([]byte(nil), record.Value...),
 			})
 		}
@@ -625,12 +633,27 @@ func assertRecordsEqual(t *testing.T, got []Record, want []Record) {
 		t.Fatalf("len(records) = %d, want %d", len(got), len(want))
 	}
 	for i := range want {
-		if got[i].LSN != want[i].LSN || got[i].TimestampMS != want[i].TimestampMS || !bytes.Equal(got[i].Value, want[i].Value) {
-			t.Fatalf("record[%d] = {lsn:%d ts:%d value:%q}, want {lsn:%d ts:%d value:%q}",
-				i, got[i].LSN, got[i].TimestampMS, got[i].Value,
-				want[i].LSN, want[i].TimestampMS, want[i].Value)
+		if got[i].LSN != want[i].LSN ||
+			got[i].TimestampMS != want[i].TimestampMS ||
+			!headersEqual(got[i].Headers, want[i].Headers) ||
+			!bytes.Equal(got[i].Value, want[i].Value) {
+			t.Fatalf("record[%d] = {lsn:%d ts:%d headers:%v value:%q}, want {lsn:%d ts:%d headers:%v value:%q}",
+				i, got[i].LSN, got[i].TimestampMS, got[i].Headers, got[i].Value,
+				want[i].LSN, want[i].TimestampMS, want[i].Headers, want[i].Value)
 		}
 	}
+}
+
+func headersEqual(a []segformat.Header, b []segformat.Header) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i].Key, b[i].Key) || !bytes.Equal(a[i].Value, b[i].Value) {
+			return false
+		}
+	}
+	return true
 }
 
 func waitForWriterErr(t *testing.T, w *Writer) {
