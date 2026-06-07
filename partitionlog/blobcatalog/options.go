@@ -1,6 +1,11 @@
 package blobcatalog
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
+)
 
 const (
 	DefaultIndexRefLimit               = 1024
@@ -29,4 +34,39 @@ type Options struct {
 
 	// WriterAcquireMaxBackoff caps OpenWriter CAS retry sleep.
 	WriterAcquireMaxBackoff time.Duration
+}
+
+func normalizeOptions(opts Options) (Options, error) {
+	opts.Prefix = normalizePrefix(opts.Prefix)
+	switch {
+	case opts.LeafSegmentLimit <= 0:
+		opts.LeafSegmentLimit = pcatalog.DefaultSegmentPageLimit
+	case opts.LeafSegmentLimit > pcatalog.MaxSegmentPageLimit:
+		return Options{}, fmt.Errorf("%w: leaf segment limit=%d max=%d", pcatalog.ErrInvalidRequest, opts.LeafSegmentLimit, pcatalog.MaxSegmentPageLimit)
+	}
+	switch {
+	case opts.IndexRefLimit <= 0:
+		opts.IndexRefLimit = DefaultIndexRefLimit
+	case opts.IndexRefLimit > pcatalog.MaxSegmentPageLimit:
+		return Options{}, fmt.Errorf("%w: index ref limit=%d max=%d", pcatalog.ErrInvalidRequest, opts.IndexRefLimit, pcatalog.MaxSegmentPageLimit)
+	}
+	if opts.WriterAcquireMaxAttempts <= 0 {
+		opts.WriterAcquireMaxAttempts = DefaultWriterAcquireMaxAttempts
+	}
+	if opts.WriterAcquireInitialBackoff < 0 {
+		return Options{}, fmt.Errorf("%w: negative writer acquire initial backoff", pcatalog.ErrInvalidRequest)
+	}
+	if opts.WriterAcquireInitialBackoff == 0 {
+		opts.WriterAcquireInitialBackoff = DefaultWriterAcquireInitialBackoff
+	}
+	if opts.WriterAcquireMaxBackoff < 0 {
+		return Options{}, fmt.Errorf("%w: negative writer acquire max backoff", pcatalog.ErrInvalidRequest)
+	}
+	if opts.WriterAcquireMaxBackoff == 0 {
+		opts.WriterAcquireMaxBackoff = DefaultWriterAcquireMaxBackoff
+	}
+	if opts.WriterAcquireMaxBackoff < opts.WriterAcquireInitialBackoff {
+		return Options{}, fmt.Errorf("%w: writer acquire max backoff %s below initial backoff %s", pcatalog.ErrInvalidRequest, opts.WriterAcquireMaxBackoff, opts.WriterAcquireInitialBackoff)
+	}
+	return opts, nil
 }
