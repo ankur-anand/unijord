@@ -22,6 +22,13 @@ func LeafPagePath(prefix string, partition uint32, seqLo, seqHi, generation uint
 	)
 }
 
+func IndexPagePath(prefix string, partition uint32, level uint8, seqLo, seqHi, generation uint64, pageID string) string {
+	return fmt.Sprintf(
+		"%s/p%08d/pages/l%02d/index-l%02d-%020d-%020d-%020d-%s.json",
+		normalizePrefix(prefix), partition, level, level, seqLo, seqHi, generation, pageID,
+	)
+}
+
 func normalizePrefix(prefix string) string {
 	prefix = strings.Trim(prefix, "/")
 	if prefix == "" {
