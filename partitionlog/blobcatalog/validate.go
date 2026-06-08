@@ -1,6 +1,9 @@
 package blobcatalog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
@@ -94,4 +97,41 @@ func verifyIndexRef(page indexPage, ref pageRef) error {
 		return fmt.Errorf("%w: index ref mismatch", ErrCorruptCatalog)
 	}
 	return nil
+}
+
+func verifyPageID(want string, page any) error {
+	got, err := canonicalPageID(page)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("%w: page_id=%s want=%s", ErrCorruptCatalog, got, want)
+	}
+	return nil
+}
+
+func canonicalPageID(page any) (string, error) {
+	switch p := page.(type) {
+	case leafPage:
+		p.PageID = ""
+		body, err := json.Marshal(p)
+		if err != nil {
+			return "", err
+		}
+		return shortPageID(body), nil
+	case indexPage:
+		p.PageID = ""
+		body, err := json.Marshal(p)
+		if err != nil {
+			return "", err
+		}
+		return shortPageID(body), nil
+	default:
+		return "", fmt.Errorf("%w: unknown page type %T", ErrCorruptCatalog, page)
+	}
+}
+
+func shortPageID(canonical []byte) string {
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:16])
 }

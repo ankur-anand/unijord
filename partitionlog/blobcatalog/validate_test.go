@@ -233,6 +233,35 @@ func TestVerifyIndexRef(t *testing.T) {
 	}
 }
 
+func TestVerifyPageID(t *testing.T) {
+	t.Parallel()
+
+	page := leafPage{
+		Version:    pageVersion,
+		Type:       "leaf",
+		Partition:  1,
+		SeqLo:      100,
+		SeqHi:      199,
+		Generation: 2,
+		Segments:   []pcatalog.SegmentRef{testSegmentRef(1, 100, 199, 1)},
+	}
+	pageID, err := canonicalPageID(page)
+	if err != nil {
+		t.Fatalf("canonicalPageID() error = %v", err)
+	}
+	page.PageID = pageID
+
+	if err := verifyPageID(pageID, page); err != nil {
+		t.Fatalf("verifyPageID(valid) error = %v", err)
+	}
+	if err := verifyPageID("different", page); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("verifyPageID(mismatch) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+	if _, err := canonicalPageID(struct{}{}); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("canonicalPageID(unknown) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
 func testPageRef(level uint8, seqLo, seqHi, generation uint64, pageID string, count int) pageRef {
 	return pageRef{
 		Level:      level,
