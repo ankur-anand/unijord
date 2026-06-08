@@ -40,6 +40,80 @@ func TestValidatePageRef(t *testing.T) {
 	}
 }
 
+func TestValidateHeadFileEmpty(t *testing.T) {
+	t.Parallel()
+
+	head := headFile{Version: pageVersion, Partition: 1}
+	if err := validateHeadFile(head, 1); err != nil {
+		t.Fatalf("validateHeadFile(empty) error = %v", err)
+	}
+
+	head.WriterID = [16]byte{1}
+	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validateHeadFile(writer without epoch) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+
+	head = headFile{Version: pageVersion, Partition: 1, HasLastSegment: false, NextLSN: 1}
+	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validateHeadFile(empty with state) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
+func TestValidateHeadFileWithActiveLeaf(t *testing.T) {
+	t.Parallel()
+
+	head := headFile{
+		Version:        pageVersion,
+		Partition:      1,
+		NextLSN:        200,
+		OldestLSN:      100,
+		WriterEpoch:    1,
+		WriterID:       [16]byte{1},
+		SegmentCount:   1,
+		LastSegment:    testSegmentRef(1, 100, 199, 1),
+		HasLastSegment: true,
+		ActiveLeaf:     refPtr(testPageRef(0, 100, 199, 2, "leaf", 1)),
+		Generation:     2,
+	}
+	if err := validateHeadFile(head, 1); err != nil {
+		t.Fatalf("validateHeadFile(active leaf) error = %v", err)
+	}
+
+	head.ActiveLeaf.SeqHi = 198
+	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validateHeadFile(active leaf mismatch) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
+func TestValidateHeadFileWithIndexFrontier(t *testing.T) {
+	t.Parallel()
+
+	head := headFile{
+		Version:        pageVersion,
+		Partition:      1,
+		NextLSN:        500,
+		OldestLSN:      100,
+		WriterEpoch:    1,
+		WriterID:       [16]byte{1},
+		SegmentCount:   4,
+		LastSegment:    testSegmentRef(1, 400, 499, 1),
+		HasLastSegment: true,
+		ActiveLeaf:     refPtr(testPageRef(0, 400, 499, 5, "leaf", 1)),
+		IndexFrontier: []pageRef{
+			testPageRef(1, 100, 399, 4, "index", 3),
+		},
+		Generation: 5,
+	}
+	if err := validateHeadFile(head, 1); err != nil {
+		t.Fatalf("validateHeadFile(index frontier) error = %v", err)
+	}
+
+	head.IndexFrontier[0].SeqHi = 398
+	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validateHeadFile(frontier gap) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
 func TestValidateLeafPage(t *testing.T) {
 	t.Parallel()
 
@@ -233,6 +307,35 @@ func TestVerifyIndexRef(t *testing.T) {
 	}
 }
 
+func TestVerifyPageID(t *testing.T) {
+	t.Parallel()
+
+	page := leafPage{
+		Version:    pageVersion,
+		Type:       "leaf",
+		Partition:  1,
+		SeqLo:      100,
+		SeqHi:      199,
+		Generation: 2,
+		Segments:   []pcatalog.SegmentRef{testSegmentRef(1, 100, 199, 1)},
+	}
+	pageID, err := canonicalPageID(page)
+	if err != nil {
+		t.Fatalf("canonicalPageID() error = %v", err)
+	}
+	page.PageID = pageID
+
+	if err := verifyPageID(pageID, page); err != nil {
+		t.Fatalf("verifyPageID(valid) error = %v", err)
+	}
+	if err := verifyPageID("different", page); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("verifyPageID(mismatch) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+	if _, err := canonicalPageID(struct{}{}); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("canonicalPageID(unknown) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
 func testPageRef(level uint8, seqLo, seqHi, generation uint64, pageID string, count int) pageRef {
 	return pageRef{
 		Level:      level,
@@ -243,6 +346,10 @@ func testPageRef(level uint8, seqLo, seqHi, generation uint64, pageID string, co
 		Path:       fmt.Sprintf("catalog/p00000001/pages/l%02d/page-%s.json", level, pageID),
 		Count:      count,
 	}
+}
+
+func refPtr(ref pageRef) *pageRef {
+	return &ref
 }
 
 func testSegmentRef(partition uint32, base, last, epoch uint64) pcatalog.SegmentRef {

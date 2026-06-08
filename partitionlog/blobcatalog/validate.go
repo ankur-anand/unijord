@@ -1,10 +1,96 @@
 package blobcatalog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"math"
 
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
 )
+
+func validateHeadFile(head headFile, partition uint32) error {
+	if head.Version != pageVersion {
+		return fmt.Errorf("%w: head version=%d", ErrCorruptCatalog, head.Version)
+	}
+	if head.Partition != partition {
+		return fmt.Errorf("%w: head partition=%d want=%d", ErrCorruptCatalog, head.Partition, partition)
+	}
+	if head.WriterEpoch == 0 && head.WriterID != ([16]byte{}) {
+		return fmt.Errorf("%w: head has writer_id without writer_epoch", ErrCorruptCatalog)
+	}
+	if head.WriterEpoch > 0 && head.WriterID == ([16]byte{}) {
+		return fmt.Errorf("%w: head has writer_epoch without writer_id", ErrCorruptCatalog)
+	}
+	if !head.HasLastSegment {
+		if head.NextLSN != 0 || head.OldestLSN != 0 || head.SegmentCount != 0 || head.ActiveLeaf != nil || len(head.IndexFrontier) != 0 {
+			return fmt.Errorf("%w: empty head carries segment state", ErrCorruptCatalog)
+		}
+		return nil
+	}
+	if head.SegmentCount == 0 {
+		return fmt.Errorf("%w: head has last segment with zero segment_count", ErrCorruptCatalog)
+	}
+	if err := head.LastSegment.Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCorruptCatalog, err)
+	}
+	if head.LastSegment.Partition != head.Partition {
+		return fmt.Errorf("%w: head partition=%d last segment partition=%d", ErrCorruptCatalog, head.Partition, head.LastSegment.Partition)
+	}
+	if head.LastSegment.WriterEpoch > head.WriterEpoch {
+		return fmt.Errorf("%w: last segment writer_epoch=%d head writer_epoch=%d", ErrCorruptCatalog, head.LastSegment.WriterEpoch, head.WriterEpoch)
+	}
+	if head.NextLSN != head.LastSegment.NextLSN() {
+		return fmt.Errorf("%w: head next_lsn=%d last next_lsn=%d", ErrCorruptCatalog, head.NextLSN, head.LastSegment.NextLSN())
+	}
+	if head.OldestLSN > head.LastSegment.BaseLSN {
+		return fmt.Errorf("%w: head oldest_lsn=%d last base_lsn=%d", ErrCorruptCatalog, head.OldestLSN, head.LastSegment.BaseLSN)
+	}
+	if head.ActiveLeaf == nil {
+		return fmt.Errorf("%w: head missing active leaf", ErrCorruptCatalog)
+	}
+	if err := validatePageRef(*head.ActiveLeaf, 0); err != nil {
+		return err
+	}
+	if head.ActiveLeaf.SeqHi != head.LastSegment.LastLSN {
+		return fmt.Errorf("%w: active leaf seq_hi=%d last_lsn=%d", ErrCorruptCatalog, head.ActiveLeaf.SeqHi, head.LastSegment.LastLSN)
+	}
+	for i, ref := range head.IndexFrontier {
+		if ref.Path == "" {
+			continue
+		}
+		wantLevel := uint8(i + 1)
+		if err := validatePageRef(ref, wantLevel); err != nil {
+			return err
+		}
+	}
+	roots := reachableRoots(head)
+	if len(roots) == 0 {
+		return fmt.Errorf("%w: head has no reachable roots", ErrCorruptCatalog)
+	}
+	if roots[0].SeqLo != head.OldestLSN {
+		return fmt.Errorf("%w: first root seq_lo=%d oldest_lsn=%d", ErrCorruptCatalog, roots[0].SeqLo, head.OldestLSN)
+	}
+	if roots[len(roots)-1].SeqHi != head.LastSegment.LastLSN {
+		return fmt.Errorf("%w: last root seq_hi=%d last_lsn=%d", ErrCorruptCatalog, roots[len(roots)-1].SeqHi, head.LastSegment.LastLSN)
+	}
+	for i, root := range roots {
+		if root.Level > 0 {
+			if err := validatePageRef(root, root.Level); err != nil {
+				return err
+			}
+		}
+		if i == 0 {
+			continue
+		}
+		prev := roots[i-1]
+		if prev.SeqHi == math.MaxUint64 || prev.SeqHi+1 != root.SeqLo {
+			return fmt.Errorf("%w: reachable roots are not contiguous", ErrCorruptCatalog)
+		}
+	}
+	return nil
+}
 
 func validatePageRef(ref pageRef, level uint8) error {
 	if ref.Level != level {
@@ -94,4 +180,54 @@ func verifyIndexRef(page indexPage, ref pageRef) error {
 		return fmt.Errorf("%w: index ref mismatch", ErrCorruptCatalog)
 	}
 	return nil
+}
+
+func verifyPageID(want string, page any) error {
+	got, err := canonicalPageID(page)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("%w: page_id=%s want=%s", ErrCorruptCatalog, got, want)
+	}
+	return nil
+}
+
+func canonicalPageID(page any) (string, error) {
+	switch p := page.(type) {
+	case leafPage:
+		p.PageID = ""
+		body, err := json.Marshal(p)
+		if err != nil {
+			return "", err
+		}
+		return shortPageID(body), nil
+	case indexPage:
+		p.PageID = ""
+		body, err := json.Marshal(p)
+		if err != nil {
+			return "", err
+		}
+		return shortPageID(body), nil
+	default:
+		return "", fmt.Errorf("%w: unknown page type %T", ErrCorruptCatalog, page)
+	}
+}
+
+func shortPageID(canonical []byte) string {
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:16])
+}
+
+func reachableRoots(head headFile) []pageRef {
+	roots := make([]pageRef, 0, len(head.IndexFrontier)+1)
+	for i := len(head.IndexFrontier) - 1; i >= 0; i-- {
+		if head.IndexFrontier[i].Path != "" {
+			roots = append(roots, head.IndexFrontier[i])
+		}
+	}
+	if head.ActiveLeaf != nil {
+		roots = append(roots, *head.ActiveLeaf)
+	}
+	return roots
 }
