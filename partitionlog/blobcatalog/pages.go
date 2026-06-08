@@ -42,6 +42,42 @@ func (c *Catalog) writeLeaf(ctx context.Context, page leafPage) (*pageRef, leafP
 	return &ref, page, nil
 }
 
+func (c *Catalog) writeIndex(ctx context.Context, page indexPage) (*pageRef, error) {
+	if len(page.Refs) == 0 {
+		return nil, fmt.Errorf("%w: empty index", ErrCorruptCatalog)
+	}
+	page.Version = pageVersion
+	page.Type = "index"
+	page.SeqLo = page.Refs[0].SeqLo
+	page.SeqHi = page.Refs[len(page.Refs)-1].SeqHi
+	if err := validateIndexPage(page); err != nil {
+		return nil, err
+	}
+	page.PageID = ""
+	canonical, err := json.Marshal(page)
+	if err != nil {
+		return nil, err
+	}
+	page.PageID = shortPageID(canonical)
+	body, err := json.Marshal(page)
+	if err != nil {
+		return nil, err
+	}
+	ref := pageRef{
+		Level:      page.Level,
+		SeqLo:      page.SeqLo,
+		SeqHi:      page.SeqHi,
+		Generation: page.Generation,
+		PageID:     page.PageID,
+		Path:       IndexPagePath(c.opts.Prefix, page.Partition, page.Level, page.SeqLo, page.SeqHi, page.Generation, page.PageID),
+		Count:      len(page.Refs),
+	}
+	if _, err := c.backend.Put(ctx, ref.Path, body); err != nil {
+		return nil, err
+	}
+	return &ref, nil
+}
+
 func cloneRefs(refs []pageRef) []pageRef {
 	return slices.Clone(refs)
 }
