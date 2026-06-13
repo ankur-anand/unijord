@@ -31,10 +31,10 @@ func TestLiveMinIOBackendAndCatalog(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	endpoint := getenv("BLOBCATALOG_MINIO_ENDPOINT", getenv("BLOB_SINK_MINIO_ENDPOINT", "http://127.0.0.1:9000"))
+	endpoint := getenv("CATALOG_BLOB_MINIO_ENDPOINT", getenv("BLOB_SINK_MINIO_ENDPOINT", "http://127.0.0.1:9000"))
 	bucket := getenv("CATALOG_BLOB_MINIO_BUCKET", "catalog-blob-it")
-	accessKey := getenv("BLOBCATALOG_MINIO_ACCESS_KEY", getenv("MINIO_ROOT_USER", "minioadmin"))
-	secretKey := getenv("BLOBCATALOG_MINIO_SECRET_KEY", getenv("MINIO_ROOT_PASSWORD", "minioadmin"))
+	accessKey := getenv("CATALOG_BLOB_MINIO_ACCESS_KEY", getenv("MINIO_ROOT_USER", "minioadmin"))
+	secretKey := getenv("CATALOG_BLOB_MINIO_SECRET_KEY", getenv("MINIO_ROOT_PASSWORD", "minioadmin"))
 
 	client := newLiveMinIOClient(t, ctx, endpoint, accessKey, secretKey)
 	if err := ensureBucket(ctx, client, bucket); err != nil {
