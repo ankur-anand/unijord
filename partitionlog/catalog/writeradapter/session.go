@@ -21,7 +21,7 @@ var _ writer.Session = (*Session)(nil)
 
 func New(inner catalog.WriterSession) (*Session, error) {
 	if inner == nil {
-		return nil, fmt.Errorf("catalogsession/writeradapter: nil writer session")
+		return nil, fmt.Errorf("catalog/writeradapter: nil writer session")
 	}
 	snapshot := writer.Snapshot{
 		Head: inner.Head(),

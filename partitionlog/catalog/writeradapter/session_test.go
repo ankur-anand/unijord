@@ -85,7 +85,7 @@ func TestSessionRejectsNil(t *testing.T) {
 func validSegmentRef(partition uint32, base uint64, last uint64, epoch uint64, writerID [16]byte) pmeta.SegmentRef {
 	count := uint32(last - base + 1)
 	return pmeta.SegmentRef{
-		URI:              "memory://catalogsession/test",
+		URI:              "memory://catalog/test",
 		Partition:        partition,
 		WriterEpoch:      epoch,
 		SegmentUUID:      [16]byte{9, 8, 7},
