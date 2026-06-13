@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
 )
 
@@ -165,7 +166,7 @@ func TestMemoryCatalogFindSegment(t *testing.T) {
 
 	cat := NewMemoryCatalog()
 	ws := mustOpenWriter(t, cat, 1, 1)
-	for _, segment := range []SegmentRef{
+	for _, segment := range []pmeta.SegmentRef{
 		testSegment(1, 0, 4, ws.Epoch()),
 		testSegment(1, 5, 9, ws.Epoch()),
 		testSegment(1, 10, 14, ws.Epoch()),
@@ -196,7 +197,7 @@ func TestMemoryCatalogListSegmentsIsPagedAndBounded(t *testing.T) {
 
 	cat := NewMemoryCatalog()
 	ws := mustOpenWriter(t, cat, 1, 1)
-	for _, segment := range []SegmentRef{
+	for _, segment := range []pmeta.SegmentRef{
 		testSegment(1, 0, 4, ws.Epoch()),
 		testSegment(1, 5, 9, ws.Epoch()),
 		testSegment(1, 10, 14, ws.Epoch()),
@@ -230,13 +231,13 @@ func TestMemoryCatalogListSegmentsIsPagedAndBounded(t *testing.T) {
 func TestListSegmentsRequestLimitIsCapped(t *testing.T) {
 	t.Parallel()
 
-	if got := (ListSegmentsRequest{}).normalizedLimit(); got != DefaultSegmentPageLimit {
+	if got := (ListSegmentsRequest{}).NormalizedLimit(); got != DefaultSegmentPageLimit {
 		t.Fatalf("default limit = %d, want %d", got, DefaultSegmentPageLimit)
 	}
-	if got := (ListSegmentsRequest{Limit: MaxSegmentPageLimit + 1}).normalizedLimit(); got != MaxSegmentPageLimit {
+	if got := (ListSegmentsRequest{Limit: MaxSegmentPageLimit + 1}).NormalizedLimit(); got != MaxSegmentPageLimit {
 		t.Fatalf("capped limit = %d, want %d", got, MaxSegmentPageLimit)
 	}
-	if got := (ListSegmentsRequest{Limit: 7}).normalizedLimit(); got != 7 {
+	if got := (ListSegmentsRequest{Limit: 7}).NormalizedLimit(); got != 7 {
 		t.Fatalf("explicit limit = %d, want 7", got)
 	}
 }
@@ -335,7 +336,7 @@ func mustOpenWriter(t *testing.T, cat *MemoryCatalog, partition uint32, id byte)
 	return ws
 }
 
-func testSegment(partition uint32, baseLSN uint64, lastLSN uint64, epoch uint64) SegmentRef {
+func testSegment(partition uint32, baseLSN uint64, lastLSN uint64, epoch uint64) pmeta.SegmentRef {
 	var uuid [16]byte
 	uuid[0] = byte(partition)
 	uuid[1] = byte(baseLSN)
@@ -345,7 +346,7 @@ func testSegment(partition uint32, baseLSN uint64, lastLSN uint64, epoch uint64)
 		uuid[15] = 1
 	}
 	recordCount := uint32(lastLSN - baseLSN + 1)
-	return SegmentRef{
+	return pmeta.SegmentRef{
 		URI:              fmt.Sprintf("memory://p%d/%d-%d-e%d", partition, baseLSN, lastLSN, epoch),
 		Partition:        partition,
 		WriterEpoch:      epoch,

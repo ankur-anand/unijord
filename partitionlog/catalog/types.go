@@ -12,15 +12,11 @@ const (
 	MaxSegmentPageLimit     = pmeta.MaxSegmentPageLimit
 )
 
-type PartitionState = pmeta.PartitionHead
-type SegmentRef = pmeta.SegmentRef
-type SegmentPage = pmeta.SegmentPage
-
 // Reader exposes the bounded read-only catalog surface.
 type Reader interface {
-	LoadPartition(ctx context.Context, partition uint32) (PartitionState, error)
-	FindSegment(ctx context.Context, partition uint32, lsn uint64) (SegmentRef, bool, error)
-	ListSegments(ctx context.Context, req ListSegmentsRequest) (SegmentPage, error)
+	LoadPartition(ctx context.Context, partition uint32) (pmeta.PartitionHead, error)
+	FindSegment(ctx context.Context, partition uint32, lsn uint64) (pmeta.SegmentRef, bool, error)
+	ListSegments(ctx context.Context, req ListSegmentsRequest) (pmeta.SegmentPage, error)
 }
 
 // WriterManager issues one fenced writer session for one partition.
@@ -34,10 +30,10 @@ type WriterManager interface {
 // A WriterSession is not safe for concurrent use. Higher layers should publish
 // segments through one ordered commit loop.
 type WriterSession interface {
-	Head() PartitionState
+	Head() pmeta.PartitionHead
 	Epoch() uint64
 	WriterID() [16]byte
-	AppendSegment(ctx context.Context, segment SegmentRef) (PartitionState, error)
+	AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error)
 }
 
 type ListSegmentsRequest struct {
@@ -61,14 +57,14 @@ func (r ListSegmentsRequest) normalizedLimit() int {
 	}
 }
 
-func validateWriterID(writerID [16]byte) error {
+func ValidateWriterID(writerID [16]byte) error {
 	if writerID == ([16]byte{}) {
 		return fmt.Errorf("%w: empty writer_id", ErrInvalidRequest)
 	}
 	return nil
 }
 
-func validateAppendSegment(partition uint32, expectedNextLSN uint64, writerEpoch uint64, segment SegmentRef) error {
+func ValidateAppendSegment(partition uint32, expectedNextLSN uint64, writerEpoch uint64, segment pmeta.SegmentRef) error {
 	if partition != segment.Partition {
 		return fmt.Errorf("%w: request partition=%d segment partition=%d", ErrInvalidRequest, partition, segment.Partition)
 	}
