@@ -3,7 +3,6 @@ package azure
 import (
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,130 +17,40 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/ankur-anand/unijord/partitionlog/blobcatalog"
+	"github.com/ankur-anand/unijord/partitionlog/blobcatalog/internal/backendtest"
 )
 
-func TestBackendPutGetAndImmutableReplayWithFakeAzure(t *testing.T) {
+func TestBackendConformanceWithFakeAzure(t *testing.T) {
+	t.Parallel()
+
+	backendtest.Run(t, backendtest.Config{
+		NewBackend: func(t testing.TB) blobcatalog.Backend {
+			t.Helper()
+			backend, _, _ := newFakeBackend(t)
+			return backend
+		},
+	})
+}
+
+func TestBackendContentTypeWithFakeAzure(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	backend, client, server := newFakeBackend(t)
-
-	first, err := backend.Put(ctx, "catalog/p00000001/pages/l00/leaf.json", []byte(`{"one":1}`))
+	obj, err := backend.Put(ctx, "catalog/p00000001/pages/l00/leaf.json", []byte(`{"one":1}`))
 	if err != nil {
-		t.Fatalf("Put(first) error = %v", err)
-	}
-	if first.Token == "" || string(first.Body) != `{"one":1}` {
-		t.Fatalf("first object = %+v", first)
+		t.Fatalf("Put() error = %v", err)
 	}
 
-	replay, err := backend.Put(ctx, first.Key, []byte(`{"one":1}`))
-	if err != nil {
-		t.Fatalf("Put(replay) error = %v", err)
-	}
-	if replay.Token != first.Token || string(replay.Body) != string(first.Body) {
-		t.Fatalf("replay = %+v, want %+v", replay, first)
-	}
-
-	if _, err := backend.Put(ctx, first.Key, []byte(`{"two":2}`)); !errors.Is(err, blobcatalog.ErrImmutableConflict) {
-		t.Fatalf("Put(conflict) error = %v, want %v", err, blobcatalog.ErrImmutableConflict)
-	}
-
-	got, err := backend.Get(ctx, first.Key)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if got.Token != first.Token || string(got.Body) != string(first.Body) {
-		t.Fatalf("Get() = %+v, want %+v", got, first)
-	}
-
-	props, err := client.NewBlobClient(first.Key).GetProperties(ctx, nil)
+	props, err := client.NewBlobClient(obj.Key).GetProperties(ctx, nil)
 	if err != nil {
 		t.Fatalf("GetProperties() error = %v", err)
 	}
 	if props.ContentType == nil || *props.ContentType != blobcatalog.ObjectContentType {
 		t.Fatalf("ContentType = %v, want %q", props.ContentType, blobcatalog.ObjectContentType)
 	}
-	if server.object(first.Key).etag != first.Token {
-		t.Fatalf("server token = %q, want %q", server.object(first.Key).etag, first.Token)
-	}
-}
-
-func TestBackendCompareAndSwapWithFakeAzure(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	backend, _, _ := newFakeBackend(t)
-	const key = "catalog/p00000001/head.json"
-
-	created, swapped, err := backend.CompareAndSwap(ctx, key, "", []byte(`{"generation":1}`))
-	if err != nil {
-		t.Fatalf("CompareAndSwap(create) error = %v", err)
-	}
-	if !swapped || created.Token == "" {
-		t.Fatalf("create swapped=%v object=%+v", swapped, created)
-	}
-
-	current, swapped, err := backend.CompareAndSwap(ctx, key, "wrong", []byte(`{"generation":2}`))
-	if err != nil {
-		t.Fatalf("CompareAndSwap(wrong token) error = %v", err)
-	}
-	if swapped {
-		t.Fatal("CompareAndSwap(wrong token) swapped=true, want false")
-	}
-	if current.Token != created.Token || string(current.Body) != string(created.Body) {
-		t.Fatalf("current = %+v, want created %+v", current, created)
-	}
-
-	updated, swapped, err := backend.CompareAndSwap(ctx, key, created.Token, []byte(`{"generation":2}`))
-	if err != nil {
-		t.Fatalf("CompareAndSwap(update) error = %v", err)
-	}
-	if !swapped || updated.Token == "" || updated.Token == created.Token || string(updated.Body) != `{"generation":2}` {
-		t.Fatalf("update swapped=%v object=%+v previous=%+v", swapped, updated, created)
-	}
-}
-
-func TestBackendListAndDeleteWithFakeAzure(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	backend, _, _ := newFakeBackend(t)
-	keys := []string{
-		"catalog/p00000001/pages/l00/a.json",
-		"catalog/p00000001/pages/l00/b.json",
-		"catalog/p00000001/pages/l00/c.json",
-		"catalog/p00000002/pages/l00/d.json",
-	}
-	for _, key := range keys {
-		if _, err := backend.Put(ctx, key, []byte(key)); err != nil {
-			t.Fatalf("Put(%s) error = %v", key, err)
-		}
-	}
-
-	page, err := backend.List(ctx, blobcatalog.ListOptions{Prefix: "catalog/p00000001/", Limit: 2})
-	if err != nil {
-		t.Fatalf("List(first) error = %v", err)
-	}
-	if len(page.Objects) != 2 || !page.HasMore || page.NextCursor == "" {
-		t.Fatalf("first page = %+v, want 2 objects with cursor", page)
-	}
-
-	next, err := backend.List(ctx, blobcatalog.ListOptions{Prefix: "catalog/p00000001/", Cursor: page.NextCursor, Limit: 2})
-	if err != nil {
-		t.Fatalf("List(next) error = %v", err)
-	}
-	if len(next.Objects) != 1 || next.HasMore {
-		t.Fatalf("next page = %+v, want final single object", next)
-	}
-
-	if err := backend.Delete(ctx, page.Objects[0].Key); err != nil {
-		t.Fatalf("Delete() error = %v", err)
-	}
-	if err := backend.Delete(ctx, page.Objects[0].Key); err != nil {
-		t.Fatalf("Delete(missing) error = %v", err)
-	}
-	if _, err := backend.Get(ctx, page.Objects[0].Key); !errors.Is(err, blobcatalog.ErrObjectNotFound) {
-		t.Fatalf("Get(deleted) error = %v, want %v", err, blobcatalog.ErrObjectNotFound)
+	if server.object(obj.Key).etag != obj.Token {
+		t.Fatalf("server token = %q, want %q", server.object(obj.Key).etag, obj.Token)
 	}
 }
 
@@ -151,13 +60,9 @@ func TestBackendRejectsBadInputs(t *testing.T) {
 	if _, err := NewBackend(nil); err == nil {
 		t.Fatal("NewBackend(nil) error = nil, want error")
 	}
-	backend, _, _ := newFakeBackend(t)
-	if _, err := backend.Get(context.Background(), ""); !errors.Is(err, blobcatalog.ErrCorruptCatalog) {
-		t.Fatalf("Get(empty key) error = %v, want %v", err, blobcatalog.ErrCorruptCatalog)
-	}
 }
 
-func newFakeBackend(t *testing.T) (*Backend, *container.Client, *fakeAzureBlobServer) {
+func newFakeBackend(t testing.TB) (*Backend, *container.Client, *fakeAzureBlobServer) {
 	t.Helper()
 	server := newFakeAzureBlobServer(t)
 	client := newFakeAzureContainerClient(t, server.URL, "container")
@@ -168,7 +73,7 @@ func newFakeBackend(t *testing.T) (*Backend, *container.Client, *fakeAzureBlobSe
 	return backend, client, server
 }
 
-func newFakeAzureContainerClient(t *testing.T, serverURL string, containerName string) *container.Client {
+func newFakeAzureContainerClient(t testing.TB, serverURL string, containerName string) *container.Client {
 	t.Helper()
 	client, err := container.NewClientWithNoCredential(serverURL+"/"+containerName, nil)
 	if err != nil {
@@ -191,7 +96,7 @@ type fakeAzureBlobServer struct {
 	seq     int
 }
 
-func newFakeAzureBlobServer(t *testing.T) *fakeAzureBlobServer {
+func newFakeAzureBlobServer(t testing.TB) *fakeAzureBlobServer {
 	t.Helper()
 	f := &fakeAzureBlobServer{
 		objects: make(map[string]fakeAzureObject),
