@@ -31,7 +31,7 @@ func TestLiveAzuriteBackendAndCatalog(t *testing.T) {
 	defer cancel()
 
 	containerName := getenv("CATALOG_BLOB_AZURITE_CONTAINER", "catalog-blob-it")
-	connString := getenv("BLOBCATALOG_AZURITE_CONNECTION_STRING", getenv("BLOB_SINK_AZURITE_CONNECTION_STRING", defaultAzuriteConnectionString))
+	connString := getenv("CATALOG_BLOB_AZURITE_CONNECTION_STRING", getenv("BLOB_SINK_AZURITE_CONNECTION_STRING", defaultAzuriteConnectionString))
 	client, err := container.NewClientFromConnectionString(connString, containerName, nil)
 	if err != nil {
 		t.Fatalf("NewClientFromConnectionString() error = %v", err)
