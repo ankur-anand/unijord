@@ -28,7 +28,7 @@ The test creates the bucket if needed and writes under a unique
 Defaults:
 
 - `BLOBCATALOG_MINIO_ENDPOINT=http://127.0.0.1:9000`
-- `BLOBCATALOG_MINIO_BUCKET=blobcatalog-it`
+- `CATALOG_BLOB_MINIO_BUCKET=catalog-blob-it`
 - `BLOBCATALOG_MINIO_ACCESS_KEY` falls back to `MINIO_ROOT_USER`, then `minioadmin`
 - `BLOBCATALOG_MINIO_SECRET_KEY` falls back to `MINIO_ROOT_PASSWORD`, then `minioadmin`
 
@@ -60,7 +60,7 @@ The test creates the container if needed and writes under a unique
 
 Defaults:
 
-- `BLOBCATALOG_AZURITE_CONTAINER=blobcatalog-it`
+- `CATALOG_BLOB_AZURITE_CONTAINER=catalog-blob-it`
 - `BLOBCATALOG_AZURITE_CONNECTION_STRING` falls back to
   `BLOBSINK_AZURITE_CONNECTION_STRING`, then the Azurite development account
   connection string for `http://127.0.0.1:10000/devstoreaccount1`.

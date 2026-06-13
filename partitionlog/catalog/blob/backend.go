@@ -7,10 +7,10 @@ import (
 )
 
 var (
-	ErrObjectNotFound    = errors.New("blobcatalog: object not found")
-	ErrImmutableConflict = errors.New("blobcatalog: immutable object conflict")
-	ErrIndexFull         = errors.New("blobcatalog: index full")
-	ErrCorruptCatalog    = errors.New("blobcatalog: corrupt catalog")
+	ErrObjectNotFound    = errors.New("catalog/blob: object not found")
+	ErrImmutableConflict = errors.New("catalog/blob: immutable object conflict")
+	ErrIndexFull         = errors.New("catalog/blob: index full")
+	ErrCorruptCatalog    = errors.New("catalog/blob: corrupt catalog")
 )
 
 const (

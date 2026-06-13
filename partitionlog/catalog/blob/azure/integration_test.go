@@ -13,7 +13,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
 )
@@ -30,7 +30,7 @@ func TestLiveAzuriteBackendAndCatalog(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	containerName := getenv("BLOBCATALOG_AZURITE_CONTAINER", "blobcatalog-it")
+	containerName := getenv("CATALOG_BLOB_AZURITE_CONTAINER", "catalog-blob-it")
 	connString := getenv("BLOBCATALOG_AZURITE_CONNECTION_STRING", getenv("BLOBSINK_AZURITE_CONNECTION_STRING", defaultAzuriteConnectionString))
 	client, err := container.NewClientFromConnectionString(connString, containerName, nil)
 	if err != nil {
@@ -67,8 +67,8 @@ func runLiveBackendCAS(t *testing.T, ctx context.Context, backend *Backend, pref
 	if replay.Token != first.Token {
 		t.Fatalf("replay token = %q, want %q", replay.Token, first.Token)
 	}
-	if _, err := backend.Put(ctx, immutableKey, []byte(`{"leaf":2}`)); !errors.Is(err, blobcatalog.ErrImmutableConflict) {
-		t.Fatalf("Put(immutable conflict) error = %v, want %v", err, blobcatalog.ErrImmutableConflict)
+	if _, err := backend.Put(ctx, immutableKey, []byte(`{"leaf":2}`)); !errors.Is(err, blob.ErrImmutableConflict) {
+		t.Fatalf("Put(immutable conflict) error = %v, want %v", err, blob.ErrImmutableConflict)
 	}
 
 	headKey := prefix + "/head.json"
@@ -98,13 +98,13 @@ func runLiveBackendCAS(t *testing.T, ctx context.Context, backend *Backend, pref
 func runLiveCatalogFlow(t *testing.T, ctx context.Context, backend *Backend, prefix string) {
 	t.Helper()
 
-	cat, err := blobcatalog.New(backend, blobcatalog.Options{
+	cat, err := blob.New(backend, blob.Options{
 		Prefix:           prefix + "/catalog",
 		LeafSegmentLimit: 2,
 		IndexRefLimit:    2,
 	})
 	if err != nil {
-		t.Fatalf("blobcatalog.New() error = %v", err)
+		t.Fatalf("blob.New() error = %v", err)
 	}
 	ws, err := cat.OpenWriter(ctx, 1, [16]byte{1})
 	if err != nil {
@@ -144,13 +144,13 @@ func runLiveCatalogFlow(t *testing.T, ctx context.Context, backend *Backend, pre
 		t.Fatalf("ListSegments() = %+v, want 3 segments has_more next_lsn=30", page)
 	}
 
-	reopened, err := blobcatalog.New(backend, blobcatalog.Options{
+	reopened, err := blob.New(backend, blob.Options{
 		Prefix:           prefix + "/catalog",
 		LeafSegmentLimit: 2,
 		IndexRefLimit:    2,
 	})
 	if err != nil {
-		t.Fatalf("blobcatalog.New(reopen) error = %v", err)
+		t.Fatalf("blob.New(reopen) error = %v", err)
 	}
 	reopenedHead, err := reopened.LoadPartition(ctx, 1)
 	if err != nil {
@@ -176,7 +176,7 @@ func getenv(key string, fallback string) string {
 
 func liveSegmentRef(partition uint32, base uint64, last uint64, epoch uint64) pmeta.SegmentRef {
 	return pmeta.SegmentRef{
-		URI:              fmt.Sprintf("azure://blobcatalog-it/p%08d/%020d-%020d", partition, base, last),
+		URI:              fmt.Sprintf("azure://catalog-blob-it/p%08d/%020d-%020d", partition, base, last),
 		Partition:        partition,
 		WriterEpoch:      epoch,
 		SegmentUUID:      [16]byte{byte(partition), byte(base + 1), byte(last + 1), byte(epoch + 1)},

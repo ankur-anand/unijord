@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	"cloud.google.com/go/storage"
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 )
@@ -20,34 +20,34 @@ type Backend struct {
 	bucket string
 }
 
-var _ blobcatalog.Backend = (*Backend)(nil)
+var _ blob.Backend = (*Backend)(nil)
 
 func NewBackend(client *storage.Client, bucket string) (*Backend, error) {
 	if client == nil {
-		return nil, fmt.Errorf("blobcatalog/gcs: nil client")
+		return nil, fmt.Errorf("catalog/blob/gcs: nil client")
 	}
 	if bucket == "" {
-		return nil, fmt.Errorf("blobcatalog/gcs: empty bucket")
+		return nil, fmt.Errorf("catalog/blob/gcs: empty bucket")
 	}
 	return &Backend{client: client, bucket: bucket}, nil
 }
 
-func (b *Backend) Get(ctx context.Context, key string) (blobcatalog.Object, error) {
+func (b *Backend) Get(ctx context.Context, key string) (blob.Object, error) {
 	if key == "" {
-		return blobcatalog.Object{}, fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return blob.Object{}, fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 	r, err := b.client.Bucket(b.bucket).Object(key).NewReader(ctx)
 	if err != nil {
-		return blobcatalog.Object{}, mapError(err)
+		return blob.Object{}, mapError(err)
 	}
 	defer r.Close()
 
 	body, err := io.ReadAll(r)
 	if err != nil {
-		return blobcatalog.Object{}, err
+		return blob.Object{}, err
 	}
 	attrs := r.Attrs
-	return blobcatalog.Object{
+	return blob.Object{
 		Key:       key,
 		Body:      body,
 		Token:     generationToken(attrs.Generation),
@@ -55,38 +55,38 @@ func (b *Backend) Get(ctx context.Context, key string) (blobcatalog.Object, erro
 	}, nil
 }
 
-func (b *Backend) Put(ctx context.Context, key string, body []byte) (blobcatalog.Object, error) {
+func (b *Backend) Put(ctx context.Context, key string, body []byte) (blob.Object, error) {
 	if key == "" {
-		return blobcatalog.Object{}, fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return blob.Object{}, fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 	obj, err := b.upload(ctx, key, body, storage.Conditions{DoesNotExist: true})
 	if err == nil {
 		return obj, nil
 	}
 	if !isPreconditionError(err) {
-		return blobcatalog.Object{}, err
+		return blob.Object{}, err
 	}
 
 	current, getErr := b.Get(ctx, key)
 	if getErr != nil {
-		return blobcatalog.Object{}, getErr
+		return blob.Object{}, getErr
 	}
 	if !bytes.Equal(current.Body, body) {
-		return blobcatalog.Object{}, fmt.Errorf("%w: %s", blobcatalog.ErrImmutableConflict, key)
+		return blob.Object{}, fmt.Errorf("%w: %s", blob.ErrImmutableConflict, key)
 	}
 	return current, nil
 }
 
-func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken string, body []byte) (blobcatalog.Object, bool, error) {
+func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken string, body []byte) (blob.Object, bool, error) {
 	if key == "" {
-		return blobcatalog.Object{}, false, fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return blob.Object{}, false, fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 
 	conds := storage.Conditions{DoesNotExist: true}
 	if expectedToken != "" {
 		generation, err := parseGeneration(expectedToken)
 		if err != nil {
-			return blobcatalog.Object{}, false, err
+			return blob.Object{}, false, err
 		}
 		conds = storage.Conditions{GenerationMatch: generation}
 	}
@@ -96,19 +96,19 @@ func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken 
 		return obj, true, nil
 	}
 	if !isPreconditionError(err) {
-		return blobcatalog.Object{}, false, err
+		return blob.Object{}, false, err
 	}
 	current, getErr := b.Get(ctx, key)
-	if errors.Is(getErr, blobcatalog.ErrObjectNotFound) {
-		return blobcatalog.Object{}, false, nil
+	if errors.Is(getErr, blob.ErrObjectNotFound) {
+		return blob.Object{}, false, nil
 	}
 	if getErr != nil {
-		return blobcatalog.Object{}, false, getErr
+		return blob.Object{}, false, getErr
 	}
 	return current, false, nil
 }
 
-func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobcatalog.ObjectPage, error) {
+func (b *Backend) List(ctx context.Context, opts blob.ListOptions) (blob.ObjectPage, error) {
 	limit := opts.NormalizedLimit()
 	it := b.client.Bucket(b.bucket).Objects(ctx, &storage.Query{
 		Prefix:     opts.Prefix,
@@ -119,29 +119,29 @@ func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobc
 	var attrs []*storage.ObjectAttrs
 	nextToken, err := pager.NextPage(&attrs)
 	if err != nil {
-		return blobcatalog.ObjectPage{}, mapError(err)
+		return blob.ObjectPage{}, mapError(err)
 	}
 
-	objects := make([]blobcatalog.ObjectInfo, 0, len(attrs))
+	objects := make([]blob.ObjectInfo, 0, len(attrs))
 	for _, attr := range attrs {
 		if attr == nil || attr.Name == "" {
 			continue
 		}
 		if attr.Size > int64(math.MaxInt) {
-			return blobcatalog.ObjectPage{}, fmt.Errorf("%w: object %s size=%d exceeds int", blobcatalog.ErrCorruptCatalog, attr.Name, attr.Size)
+			return blob.ObjectPage{}, fmt.Errorf("%w: object %s size=%d exceeds int", blob.ErrCorruptCatalog, attr.Name, attr.Size)
 		}
 		size := 0
 		if attr.Size > 0 {
 			size = int(attr.Size)
 		}
-		objects = append(objects, blobcatalog.ObjectInfo{
+		objects = append(objects, blob.ObjectInfo{
 			Key:       attr.Name,
 			Token:     generationToken(attr.Generation),
 			SizeBytes: size,
 			CreatedAt: attr.Created,
 		})
 	}
-	return blobcatalog.ObjectPage{
+	return blob.ObjectPage{
 		Objects:    objects,
 		NextCursor: nextToken,
 		HasMore:    nextToken != "",
@@ -150,7 +150,7 @@ func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobc
 
 func (b *Backend) Delete(ctx context.Context, key string) error {
 	if key == "" {
-		return fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 	err := b.client.Bucket(b.bucket).Object(key).Delete(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {
@@ -159,24 +159,24 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 	return mapError(err)
 }
 
-func (b *Backend) upload(ctx context.Context, key string, body []byte, conds storage.Conditions) (blobcatalog.Object, error) {
+func (b *Backend) upload(ctx context.Context, key string, body []byte, conds storage.Conditions) (blob.Object, error) {
 	w := b.client.Bucket(b.bucket).Object(key).If(conds).NewWriter(ctx)
-	w.ContentType = blobcatalog.ObjectContentType
+	w.ContentType = blob.ObjectContentType
 	if _, err := bytes.NewReader(body).WriteTo(w); err != nil {
 		_ = w.Close()
-		return blobcatalog.Object{}, mapError(err)
+		return blob.Object{}, mapError(err)
 	}
 	if err := w.Close(); err != nil {
-		return blobcatalog.Object{}, mapError(err)
+		return blob.Object{}, mapError(err)
 	}
 	attrs := w.Attrs()
 	if attrs == nil {
-		return blobcatalog.Object{
+		return blob.Object{
 			Key:  key,
 			Body: bytes.Clone(body),
 		}, nil
 	}
-	return blobcatalog.Object{
+	return blob.Object{
 		Key:       key,
 		Body:      bytes.Clone(body),
 		Token:     generationToken(attrs.Generation),
@@ -189,16 +189,16 @@ func mapError(err error) error {
 		return nil
 	}
 	if errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("%w: %w", blobcatalog.ErrObjectNotFound, err)
+		return fmt.Errorf("%w: %w", blob.ErrObjectNotFound, err)
 	}
 	if isPreconditionAPIError(err) {
-		return fmt.Errorf("%w: %w", blobcatalog.ErrImmutableConflict, err)
+		return fmt.Errorf("%w: %w", blob.ErrImmutableConflict, err)
 	}
 	return err
 }
 
 func isPreconditionError(err error) bool {
-	return errors.Is(err, blobcatalog.ErrImmutableConflict) || isPreconditionAPIError(err)
+	return errors.Is(err, blob.ErrImmutableConflict) || isPreconditionAPIError(err)
 }
 
 func isPreconditionAPIError(err error) bool {
@@ -209,7 +209,7 @@ func isPreconditionAPIError(err error) bool {
 func parseGeneration(token string) (int64, error) {
 	generation, err := strconv.ParseInt(token, 10, 64)
 	if err != nil || generation <= 0 {
-		return 0, fmt.Errorf("%w: invalid gcs generation token %q", blobcatalog.ErrCorruptCatalog, token)
+		return 0, fmt.Errorf("%w: invalid gcs generation token %q", blob.ErrCorruptCatalog, token)
 	}
 	return generation, nil
 }

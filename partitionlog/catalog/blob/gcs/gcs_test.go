@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 )
@@ -15,7 +15,7 @@ func TestBackendConformanceWithFakeGCS(t *testing.T) {
 	t.Parallel()
 
 	backendtest.Run(t, backendtest.Config{
-		NewBackend: func(t testing.TB) blobcatalog.Backend {
+		NewBackend: func(t testing.TB) blob.Backend {
 			t.Helper()
 			backend, _ := newFakeBackend(t, "catalog")
 			return backend
@@ -42,8 +42,8 @@ func TestBackendContentTypeWithFakeGCS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Attrs() error = %v", err)
 	}
-	if attrs.ContentType != blobcatalog.ObjectContentType {
-		t.Fatalf("ContentType = %q, want %q", attrs.ContentType, blobcatalog.ObjectContentType)
+	if attrs.ContentType != blob.ObjectContentType {
+		t.Fatalf("ContentType = %q, want %q", attrs.ContentType, blob.ObjectContentType)
 	}
 }
 
@@ -61,8 +61,8 @@ func TestBackendRejectsBadInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBackend() error = %v", err)
 	}
-	if _, _, err := backend.CompareAndSwap(context.Background(), "x", "not-a-generation", []byte("x")); !errors.Is(err, blobcatalog.ErrCorruptCatalog) {
-		t.Fatalf("CompareAndSwap(bad token) error = %v, want %v", err, blobcatalog.ErrCorruptCatalog)
+	if _, _, err := backend.CompareAndSwap(context.Background(), "x", "not-a-generation", []byte("x")); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("CompareAndSwap(bad token) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
 }
 

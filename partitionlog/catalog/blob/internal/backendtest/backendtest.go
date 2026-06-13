@@ -6,11 +6,11 @@ import (
 	"errors"
 	"testing"
 
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 )
 
 type Config struct {
-	NewBackend func(t testing.TB) blobcatalog.Backend
+	NewBackend func(t testing.TB) blob.Backend
 	WrongToken func(valid string) string
 }
 
@@ -33,7 +33,7 @@ func Run(t *testing.T, cfg Config) {
 	})
 }
 
-func (c Config) newBackend(t testing.TB) blobcatalog.Backend {
+func (c Config) newBackend(t testing.TB) blob.Backend {
 	t.Helper()
 	backend := c.NewBackend(t)
 	if backend == nil {
@@ -49,7 +49,7 @@ func (c Config) wrongToken(valid string) string {
 	return valid + "-wrong"
 }
 
-func runPutGetImmutableReplay(t *testing.T, backend blobcatalog.Backend) {
+func runPutGetImmutableReplay(t *testing.T, backend blob.Backend) {
 	t.Helper()
 	ctx := context.Background()
 	const key = "catalog/p00000001/pages/l00/leaf.json"
@@ -70,8 +70,8 @@ func runPutGetImmutableReplay(t *testing.T, backend blobcatalog.Backend) {
 		t.Fatalf("replay = %+v, want token/body from first %+v", replay, first)
 	}
 
-	if _, err := backend.Put(ctx, key, []byte(`{"two":2}`)); !errors.Is(err, blobcatalog.ErrImmutableConflict) {
-		t.Fatalf("Put(conflict) error = %v, want %v", err, blobcatalog.ErrImmutableConflict)
+	if _, err := backend.Put(ctx, key, []byte(`{"two":2}`)); !errors.Is(err, blob.ErrImmutableConflict) {
+		t.Fatalf("Put(conflict) error = %v, want %v", err, blob.ErrImmutableConflict)
 	}
 
 	got, err := backend.Get(ctx, key)
@@ -92,7 +92,7 @@ func runPutGetImmutableReplay(t *testing.T, backend blobcatalog.Backend) {
 	}
 }
 
-func runCompareAndSwap(t *testing.T, backend blobcatalog.Backend, wrongToken func(string) string) {
+func runCompareAndSwap(t *testing.T, backend blob.Backend, wrongToken func(string) string) {
 	t.Helper()
 	ctx := context.Background()
 	const key = "catalog/p00000001/head.json"
@@ -149,7 +149,7 @@ func runCompareAndSwap(t *testing.T, backend blobcatalog.Backend, wrongToken fun
 	}
 }
 
-func runListAndDelete(t *testing.T, backend blobcatalog.Backend) {
+func runListAndDelete(t *testing.T, backend blob.Backend) {
 	t.Helper()
 	ctx := context.Background()
 	keys := []string{
@@ -164,7 +164,7 @@ func runListAndDelete(t *testing.T, backend blobcatalog.Backend) {
 		}
 	}
 
-	first, err := backend.List(ctx, blobcatalog.ListOptions{Prefix: "catalog/p00000001/", Limit: 2})
+	first, err := backend.List(ctx, blob.ListOptions{Prefix: "catalog/p00000001/", Limit: 2})
 	if err != nil {
 		t.Fatalf("List(first) error = %v", err)
 	}
@@ -180,7 +180,7 @@ func runListAndDelete(t *testing.T, backend blobcatalog.Backend) {
 		}
 	}
 
-	second, err := backend.List(ctx, blobcatalog.ListOptions{Prefix: "catalog/p00000001/", Cursor: first.NextCursor, Limit: 2})
+	second, err := backend.List(ctx, blob.ListOptions{Prefix: "catalog/p00000001/", Cursor: first.NextCursor, Limit: 2})
 	if err != nil {
 		t.Fatalf("List(second) error = %v", err)
 	}
@@ -194,11 +194,11 @@ func runListAndDelete(t *testing.T, backend blobcatalog.Backend) {
 	if err := backend.Delete(ctx, first.Objects[0].Key); err != nil {
 		t.Fatalf("Delete(missing) error = %v", err)
 	}
-	if _, err := backend.Get(ctx, first.Objects[0].Key); !errors.Is(err, blobcatalog.ErrObjectNotFound) {
-		t.Fatalf("Get(deleted) error = %v, want %v", err, blobcatalog.ErrObjectNotFound)
+	if _, err := backend.Get(ctx, first.Objects[0].Key); !errors.Is(err, blob.ErrObjectNotFound) {
+		t.Fatalf("Get(deleted) error = %v, want %v", err, blob.ErrObjectNotFound)
 	}
 
-	empty, err := backend.List(ctx, blobcatalog.ListOptions{Prefix: "catalog/absent/", Limit: 2})
+	empty, err := backend.List(ctx, blob.ListOptions{Prefix: "catalog/absent/", Limit: 2})
 	if err != nil {
 		t.Fatalf("List(empty prefix) error = %v", err)
 	}
@@ -207,20 +207,20 @@ func runListAndDelete(t *testing.T, backend blobcatalog.Backend) {
 	}
 }
 
-func runBadInputs(t *testing.T, backend blobcatalog.Backend) {
+func runBadInputs(t *testing.T, backend blob.Backend) {
 	t.Helper()
 	ctx := context.Background()
 
-	if _, err := backend.Get(ctx, ""); !errors.Is(err, blobcatalog.ErrCorruptCatalog) {
-		t.Fatalf("Get(empty key) error = %v, want %v", err, blobcatalog.ErrCorruptCatalog)
+	if _, err := backend.Get(ctx, ""); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("Get(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
-	if _, err := backend.Put(ctx, "", []byte("x")); !errors.Is(err, blobcatalog.ErrCorruptCatalog) {
-		t.Fatalf("Put(empty key) error = %v, want %v", err, blobcatalog.ErrCorruptCatalog)
+	if _, err := backend.Put(ctx, "", []byte("x")); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("Put(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
-	if _, _, err := backend.CompareAndSwap(ctx, "", "", []byte("x")); !errors.Is(err, blobcatalog.ErrCorruptCatalog) {
-		t.Fatalf("CompareAndSwap(empty key) error = %v, want %v", err, blobcatalog.ErrCorruptCatalog)
+	if _, _, err := backend.CompareAndSwap(ctx, "", "", []byte("x")); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("CompareAndSwap(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
-	if err := backend.Delete(ctx, ""); !errors.Is(err, blobcatalog.ErrCorruptCatalog) {
-		t.Fatalf("Delete(empty key) error = %v, want %v", err, blobcatalog.ErrCorruptCatalog)
+	if err := backend.Delete(ctx, ""); !errors.Is(err, blob.ErrCorruptCatalog) {
+		t.Fatalf("Delete(empty key) error = %v, want %v", err, blob.ErrCorruptCatalog)
 	}
 }

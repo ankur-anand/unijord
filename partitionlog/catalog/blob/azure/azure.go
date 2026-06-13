@@ -13,40 +13,40 @@ import (
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 )
 
 const maxListResults = 5000
 
-// Backend stores blobcatalog JSON objects in one Azure Blob container.
+// Backend stores catalog/blob JSON objects in one Azure Blob container.
 type Backend struct {
 	container *container.Client
 }
 
-var _ blobcatalog.Backend = (*Backend)(nil)
+var _ blob.Backend = (*Backend)(nil)
 
 func NewBackend(container *container.Client) (*Backend, error) {
 	if container == nil {
-		return nil, fmt.Errorf("blobcatalog/azure: nil container client")
+		return nil, fmt.Errorf("catalog/blob/azure: nil container client")
 	}
 	return &Backend{container: container}, nil
 }
 
-func (b *Backend) Get(ctx context.Context, key string) (blobcatalog.Object, error) {
+func (b *Backend) Get(ctx context.Context, key string) (blob.Object, error) {
 	if key == "" {
-		return blobcatalog.Object{}, fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return blob.Object{}, fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 	out, err := b.container.NewBlobClient(key).DownloadStream(ctx, nil)
 	if err != nil {
-		return blobcatalog.Object{}, mapError(err)
+		return blob.Object{}, mapError(err)
 	}
 	defer out.Body.Close()
 
 	body, err := io.ReadAll(out.Body)
 	if err != nil {
-		return blobcatalog.Object{}, err
+		return blob.Object{}, err
 	}
-	return blobcatalog.Object{
+	return blob.Object{
 		Key:       key,
 		Body:      body,
 		Token:     etagString(out.ETag),
@@ -54,9 +54,9 @@ func (b *Backend) Get(ctx context.Context, key string) (blobcatalog.Object, erro
 	}, nil
 }
 
-func (b *Backend) Put(ctx context.Context, key string, body []byte) (blobcatalog.Object, error) {
+func (b *Backend) Put(ctx context.Context, key string, body []byte) (blob.Object, error) {
 	if key == "" {
-		return blobcatalog.Object{}, fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return blob.Object{}, fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 	none := azcore.ETag("*")
 	obj, err := b.upload(ctx, key, body, &none, nil)
@@ -64,22 +64,22 @@ func (b *Backend) Put(ctx context.Context, key string, body []byte) (blobcatalog
 		return obj, nil
 	}
 	if !isPreconditionError(err) {
-		return blobcatalog.Object{}, err
+		return blob.Object{}, err
 	}
 
 	current, getErr := b.Get(ctx, key)
 	if getErr != nil {
-		return blobcatalog.Object{}, getErr
+		return blob.Object{}, getErr
 	}
 	if !bytes.Equal(current.Body, body) {
-		return blobcatalog.Object{}, fmt.Errorf("%w: %s", blobcatalog.ErrImmutableConflict, key)
+		return blob.Object{}, fmt.Errorf("%w: %s", blob.ErrImmutableConflict, key)
 	}
 	return current, nil
 }
 
-func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken string, body []byte) (blobcatalog.Object, bool, error) {
+func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken string, body []byte) (blob.Object, bool, error) {
 	if key == "" {
-		return blobcatalog.Object{}, false, fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return blob.Object{}, false, fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 
 	var ifNoneMatch *azcore.ETag
@@ -97,19 +97,19 @@ func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken 
 		return obj, true, nil
 	}
 	if !isPreconditionError(err) {
-		return blobcatalog.Object{}, false, err
+		return blob.Object{}, false, err
 	}
 	current, getErr := b.Get(ctx, key)
-	if errors.Is(getErr, blobcatalog.ErrObjectNotFound) {
-		return blobcatalog.Object{}, false, nil
+	if errors.Is(getErr, blob.ErrObjectNotFound) {
+		return blob.Object{}, false, nil
 	}
 	if getErr != nil {
-		return blobcatalog.Object{}, false, getErr
+		return blob.Object{}, false, getErr
 	}
 	return current, false, nil
 }
 
-func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobcatalog.ObjectPage, error) {
+func (b *Backend) List(ctx context.Context, opts blob.ListOptions) (blob.ObjectPage, error) {
 	limit := opts.NormalizedLimit()
 	if limit > maxListResults {
 		limit = maxListResults
@@ -121,28 +121,28 @@ func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobc
 		Prefix:     stringPtr(opts.Prefix),
 	})
 	if !pager.More() {
-		return blobcatalog.ObjectPage{}, nil
+		return blob.ObjectPage{}, nil
 	}
 	page, err := pager.NextPage(ctx)
 	if err != nil {
-		return blobcatalog.ObjectPage{}, mapError(err)
+		return blob.ObjectPage{}, mapError(err)
 	}
 
 	items := page.ListBlobsFlatSegmentResponse.Segment
-	objects := make([]blobcatalog.ObjectInfo, 0)
+	objects := make([]blob.ObjectInfo, 0)
 	if items != nil {
-		objects = make([]blobcatalog.ObjectInfo, 0, len(items.BlobItems))
+		objects = make([]blob.ObjectInfo, 0, len(items.BlobItems))
 		for _, item := range items.BlobItems {
 			if item == nil || item.Name == nil || *item.Name == "" {
 				continue
 			}
-			info := blobcatalog.ObjectInfo{Key: *item.Name}
+			info := blob.ObjectInfo{Key: *item.Name}
 			if props := item.Properties; props != nil {
 				info.Token = etagString(props.ETag)
 				info.CreatedAt = timeValue(props.LastModified)
 				if props.ContentLength != nil {
 					if *props.ContentLength > int64(math.MaxInt) {
-						return blobcatalog.ObjectPage{}, fmt.Errorf("%w: object %s size=%d exceeds int", blobcatalog.ErrCorruptCatalog, info.Key, *props.ContentLength)
+						return blob.ObjectPage{}, fmt.Errorf("%w: object %s size=%d exceeds int", blob.ErrCorruptCatalog, info.Key, *props.ContentLength)
 					}
 					if *props.ContentLength > 0 {
 						info.SizeBytes = int(*props.ContentLength)
@@ -157,7 +157,7 @@ func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobc
 	if page.NextMarker != nil {
 		nextCursor = *page.NextMarker
 	}
-	return blobcatalog.ObjectPage{
+	return blob.ObjectPage{
 		Objects:    objects,
 		NextCursor: nextCursor,
 		HasMore:    nextCursor != "",
@@ -166,7 +166,7 @@ func (b *Backend) List(ctx context.Context, opts blobcatalog.ListOptions) (blobc
 
 func (b *Backend) Delete(ctx context.Context, key string) error {
 	if key == "" {
-		return fmt.Errorf("%w: empty key", blobcatalog.ErrCorruptCatalog)
+		return fmt.Errorf("%w: empty key", blob.ErrCorruptCatalog)
 	}
 	_, err := b.container.NewBlobClient(key).Delete(ctx, nil)
 	if isNotFoundError(err) {
@@ -175,10 +175,10 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 	return mapError(err)
 }
 
-func (b *Backend) upload(ctx context.Context, key string, body []byte, ifNoneMatch *azcore.ETag, ifMatch *azcore.ETag) (blobcatalog.Object, error) {
+func (b *Backend) upload(ctx context.Context, key string, body []byte, ifNoneMatch *azcore.ETag, ifMatch *azcore.ETag) (blob.Object, error) {
 	out, err := b.container.NewBlockBlobClient(key).Upload(ctx, readSeekCloser{Reader: bytes.NewReader(body)}, &blockblob.UploadOptions{
 		HTTPHeaders: &azblobblob.HTTPHeaders{
-			BlobContentType: stringPtr(blobcatalog.ObjectContentType),
+			BlobContentType: stringPtr(blob.ObjectContentType),
 		},
 		AccessConditions: &azblobblob.AccessConditions{
 			ModifiedAccessConditions: &azblobblob.ModifiedAccessConditions{
@@ -188,9 +188,9 @@ func (b *Backend) upload(ctx context.Context, key string, body []byte, ifNoneMat
 		},
 	})
 	if err != nil {
-		return blobcatalog.Object{}, mapError(err)
+		return blob.Object{}, mapError(err)
 	}
-	return blobcatalog.Object{
+	return blob.Object{
 		Key:       key,
 		Body:      bytes.Clone(body),
 		Token:     etagString(out.ETag),
@@ -213,16 +213,16 @@ func mapError(err error) error {
 		return nil
 	}
 	if isNotFoundError(err) {
-		return fmt.Errorf("%w: %w", blobcatalog.ErrObjectNotFound, err)
+		return fmt.Errorf("%w: %w", blob.ErrObjectNotFound, err)
 	}
 	if isPreconditionAPIError(err) {
-		return fmt.Errorf("%w: %w", blobcatalog.ErrImmutableConflict, err)
+		return fmt.Errorf("%w: %w", blob.ErrImmutableConflict, err)
 	}
 	return err
 }
 
 func isPreconditionError(err error) bool {
-	return errors.Is(err, blobcatalog.ErrImmutableConflict) || isPreconditionAPIError(err)
+	return errors.Is(err, blob.ErrImmutableConflict) || isPreconditionAPIError(err)
 }
 
 func isPreconditionAPIError(err error) bool {
