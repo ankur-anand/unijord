@@ -71,10 +71,13 @@ This will become the unbounded manifest problems.
 
 Instead we do:
 head.JSON
--> active_leaf
 -> index_frontier
+-> leaf_frontier
+-> active_segments
 
 An OLD history is summarized through Index Pages.
+The newest sealed leaf stays in leaf_frontier. New SegmentRefs are buffered in
+active_segments until that buffer is large enough to seal one l00 leaf page.
 
 pages/
 	l00/   all leaf pages

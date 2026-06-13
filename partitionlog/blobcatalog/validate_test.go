@@ -59,7 +59,34 @@ func TestValidateHeadFileEmpty(t *testing.T) {
 	}
 }
 
-func TestValidateHeadFileWithActiveLeaf(t *testing.T) {
+func TestValidateHeadFileWithActiveSegments(t *testing.T) {
+	t.Parallel()
+
+	segment := testSegmentRef(1, 100, 199, 1)
+	head := headFile{
+		Version:        pageVersion,
+		Partition:      1,
+		NextLSN:        200,
+		OldestLSN:      100,
+		WriterEpoch:    1,
+		WriterID:       [16]byte{1},
+		SegmentCount:   1,
+		LastSegment:    segment,
+		HasLastSegment: true,
+		ActiveSegments: []pcatalog.SegmentRef{segment},
+		Generation:     2,
+	}
+	if err := validateHeadFile(head, 1); err != nil {
+		t.Fatalf("validateHeadFile(active segments) error = %v", err)
+	}
+
+	head.ActiveSegments[0].LastLSN = 198
+	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validateHeadFile(active segment mismatch) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
+func TestValidateHeadFileWithLeafFrontier(t *testing.T) {
 	t.Parallel()
 
 	head := headFile{
@@ -72,16 +99,16 @@ func TestValidateHeadFileWithActiveLeaf(t *testing.T) {
 		SegmentCount:   1,
 		LastSegment:    testSegmentRef(1, 100, 199, 1),
 		HasLastSegment: true,
-		ActiveLeaf:     refPtr(testPageRef(0, 100, 199, 2, "leaf", 1)),
+		LeafFrontier:   refPtr(testPageRef(0, 100, 199, 2, "leaf", 1)),
 		Generation:     2,
 	}
 	if err := validateHeadFile(head, 1); err != nil {
-		t.Fatalf("validateHeadFile(active leaf) error = %v", err)
+		t.Fatalf("validateHeadFile(leaf frontier) error = %v", err)
 	}
 
-	head.ActiveLeaf.SeqHi = 198
+	head.LeafFrontier.SeqHi = 198
 	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
-		t.Fatalf("validateHeadFile(active leaf mismatch) error = %v, want %v", err, ErrCorruptCatalog)
+		t.Fatalf("validateHeadFile(leaf frontier mismatch) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }
 
@@ -98,7 +125,7 @@ func TestValidateHeadFileWithIndexFrontier(t *testing.T) {
 		SegmentCount:   4,
 		LastSegment:    testSegmentRef(1, 400, 499, 1),
 		HasLastSegment: true,
-		ActiveLeaf:     refPtr(testPageRef(0, 400, 499, 5, "leaf", 1)),
+		LeafFrontier:   refPtr(testPageRef(0, 400, 499, 5, "leaf", 1)),
 		IndexFrontier: []pageRef{
 			testPageRef(1, 100, 399, 4, "index", 3),
 		},
