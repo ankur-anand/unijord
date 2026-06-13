@@ -32,25 +32,25 @@ func NewMemory(opts Options) (*Catalog, error) {
 type writerSession struct {
 	cat *Catalog
 
-	mu         sync.Mutex
-	head       headFile
-	token      string
-	activeLeaf *leafPage
+	mu    sync.Mutex
+	head  headFile
+	token string
 }
 
 type headFile struct {
-	Version        int                 `json:"version"`
-	Partition      uint32              `json:"partition"`
-	NextLSN        uint64              `json:"next_lsn"`
-	OldestLSN      uint64              `json:"oldest_lsn"`
-	WriterEpoch    uint64              `json:"writer_epoch"`
-	WriterID       [16]byte            `json:"writer_id,omitempty"`
-	SegmentCount   uint64              `json:"segment_count"`
-	LastSegment    pcatalog.SegmentRef `json:"last_segment,omitempty"`
-	HasLastSegment bool                `json:"has_last_segment,omitempty"`
-	ActiveLeaf     *pageRef            `json:"active_leaf,omitempty"`
-	IndexFrontier  []pageRef           `json:"index_frontier,omitempty"`
-	Generation     uint64              `json:"generation"`
+	Version        int                   `json:"version"`
+	Partition      uint32                `json:"partition"`
+	NextLSN        uint64                `json:"next_lsn"`
+	OldestLSN      uint64                `json:"oldest_lsn"`
+	WriterEpoch    uint64                `json:"writer_epoch"`
+	WriterID       [16]byte              `json:"writer_id,omitempty"`
+	SegmentCount   uint64                `json:"segment_count"`
+	LastSegment    pcatalog.SegmentRef   `json:"last_segment,omitempty"`
+	HasLastSegment bool                  `json:"has_last_segment,omitempty"`
+	IndexFrontier  []pageRef             `json:"index_frontier,omitempty"`
+	LeafFrontier   *pageRef              `json:"leaf_frontier,omitempty"`
+	ActiveSegments []pcatalog.SegmentRef `json:"active_segments,omitempty"`
+	Generation     uint64                `json:"generation"`
 }
 
 type pageRef struct {

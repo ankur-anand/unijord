@@ -24,7 +24,7 @@ func validateHeadFile(head headFile, partition uint32) error {
 		return fmt.Errorf("%w: head has writer_epoch without writer_id", ErrCorruptCatalog)
 	}
 	if !head.HasLastSegment {
-		if head.NextLSN != 0 || head.OldestLSN != 0 || head.SegmentCount != 0 || head.ActiveLeaf != nil || len(head.IndexFrontier) != 0 {
+		if head.NextLSN != 0 || head.OldestLSN != 0 || head.SegmentCount != 0 || head.LeafFrontier != nil || len(head.IndexFrontier) != 0 || len(head.ActiveSegments) != 0 {
 			return fmt.Errorf("%w: empty head carries segment state", ErrCorruptCatalog)
 		}
 		return nil
@@ -47,15 +47,6 @@ func validateHeadFile(head headFile, partition uint32) error {
 	if head.OldestLSN > head.LastSegment.BaseLSN {
 		return fmt.Errorf("%w: head oldest_lsn=%d last base_lsn=%d", ErrCorruptCatalog, head.OldestLSN, head.LastSegment.BaseLSN)
 	}
-	if head.ActiveLeaf == nil {
-		return fmt.Errorf("%w: head missing active leaf", ErrCorruptCatalog)
-	}
-	if err := validatePageRef(*head.ActiveLeaf, 0); err != nil {
-		return err
-	}
-	if head.ActiveLeaf.SeqHi != head.LastSegment.LastLSN {
-		return fmt.Errorf("%w: active leaf seq_hi=%d last_lsn=%d", ErrCorruptCatalog, head.ActiveLeaf.SeqHi, head.LastSegment.LastLSN)
-	}
 	for i, ref := range head.IndexFrontier {
 		if ref.Path == "" {
 			continue
@@ -65,15 +56,21 @@ func validateHeadFile(head headFile, partition uint32) error {
 			return err
 		}
 	}
+	if head.LeafFrontier != nil {
+		if err := validatePageRef(*head.LeafFrontier, 0); err != nil {
+			return err
+		}
+	}
+	if err := validateActiveSegments(head.Partition, head.ActiveSegments); err != nil {
+		return err
+	}
+	if len(head.ActiveSegments) > int(pcatalog.MaxSegmentPageLimit) {
+		return fmt.Errorf("%w: active segment count=%d", ErrCorruptCatalog, len(head.ActiveSegments))
+	}
+
 	roots := reachableRoots(head)
-	if len(roots) == 0 {
-		return fmt.Errorf("%w: head has no reachable roots", ErrCorruptCatalog)
-	}
-	if roots[0].SeqLo != head.OldestLSN {
-		return fmt.Errorf("%w: first root seq_lo=%d oldest_lsn=%d", ErrCorruptCatalog, roots[0].SeqLo, head.OldestLSN)
-	}
-	if roots[len(roots)-1].SeqHi != head.LastSegment.LastLSN {
-		return fmt.Errorf("%w: last root seq_hi=%d last_lsn=%d", ErrCorruptCatalog, roots[len(roots)-1].SeqHi, head.LastSegment.LastLSN)
+	if len(roots) == 0 && len(head.ActiveSegments) == 0 {
+		return fmt.Errorf("%w: head has no reachable history", ErrCorruptCatalog)
 	}
 	for i, root := range roots {
 		if root.Level > 0 {
@@ -87,6 +84,54 @@ func validateHeadFile(head headFile, partition uint32) error {
 		prev := roots[i-1]
 		if prev.SeqHi == math.MaxUint64 || prev.SeqHi+1 != root.SeqLo {
 			return fmt.Errorf("%w: reachable roots are not contiguous", ErrCorruptCatalog)
+		}
+	}
+	var firstLSN uint64
+	var lastLSN uint64
+	switch {
+	case len(roots) > 0:
+		firstLSN = roots[0].SeqLo
+		lastLSN = roots[len(roots)-1].SeqHi
+		if len(head.ActiveSegments) > 0 {
+			firstActive := head.ActiveSegments[0]
+			if lastLSN == math.MaxUint64 || lastLSN+1 != firstActive.BaseLSN {
+				return fmt.Errorf("%w: active segments are not contiguous with sealed roots", ErrCorruptCatalog)
+			}
+			lastLSN = head.ActiveSegments[len(head.ActiveSegments)-1].LastLSN
+		}
+	case len(head.ActiveSegments) > 0:
+		firstLSN = head.ActiveSegments[0].BaseLSN
+		lastLSN = head.ActiveSegments[len(head.ActiveSegments)-1].LastLSN
+	}
+	if firstLSN != head.OldestLSN {
+		return fmt.Errorf("%w: first reachable lsn=%d oldest_lsn=%d", ErrCorruptCatalog, firstLSN, head.OldestLSN)
+	}
+	if lastLSN != head.LastSegment.LastLSN {
+		return fmt.Errorf("%w: last reachable lsn=%d last_lsn=%d", ErrCorruptCatalog, lastLSN, head.LastSegment.LastLSN)
+	}
+	if len(head.ActiveSegments) > 0 && head.ActiveSegments[len(head.ActiveSegments)-1] != head.LastSegment {
+		return fmt.Errorf("%w: last active segment does not match head last segment", ErrCorruptCatalog)
+	}
+	return nil
+}
+
+func validateActiveSegments(partition uint32, segments []pcatalog.SegmentRef) error {
+	for i, segment := range segments {
+		if err := segment.Validate(); err != nil {
+			return fmt.Errorf("%w: %w", ErrCorruptCatalog, err)
+		}
+		if segment.Partition != partition {
+			return fmt.Errorf("%w: active segment partition=%d head partition=%d", ErrCorruptCatalog, segment.Partition, partition)
+		}
+		if i == 0 {
+			continue
+		}
+		prev := segments[i-1]
+		if segment.BaseLSN != prev.NextLSN() {
+			return fmt.Errorf("%w: non-contiguous active segments", ErrCorruptCatalog)
+		}
+		if segment.MinTimestampMS < prev.MaxTimestampMS {
+			return fmt.Errorf("%w: %w", ErrCorruptCatalog, pcatalog.ErrTimestampOrder)
 		}
 	}
 	return nil
@@ -226,8 +271,8 @@ func reachableRoots(head headFile) []pageRef {
 			roots = append(roots, head.IndexFrontier[i])
 		}
 	}
-	if head.ActiveLeaf != nil {
-		roots = append(roots, *head.ActiveLeaf)
+	if head.LeafFrontier != nil {
+		roots = append(roots, *head.LeafFrontier)
 	}
 	return roots
 }
