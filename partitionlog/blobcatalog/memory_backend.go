@@ -38,6 +38,9 @@ func (s *MemoryBackend) Get(ctx context.Context, key string) (Object, error) {
 	if err := ctx.Err(); err != nil {
 		return Object{}, err
 	}
+	if key == "" {
+		return Object{}, fmt.Errorf("%w: empty key", ErrCorruptCatalog)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	obj, ok := s.objects[key]
@@ -147,6 +150,9 @@ func (s *MemoryBackend) List(ctx context.Context, opts ListOptions) (ObjectPage,
 func (s *MemoryBackend) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if key == "" {
+		return fmt.Errorf("%w: empty key", ErrCorruptCatalog)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
