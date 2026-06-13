@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
 )
 
@@ -12,9 +12,9 @@ func TestMemoryBackendConformance(t *testing.T) {
 	t.Parallel()
 
 	backendtest.Run(t, backendtest.Config{
-		NewBackend: func(t testing.TB) blobcatalog.Backend {
+		NewBackend: func(t testing.TB) blob.Backend {
 			t.Helper()
-			return blobcatalog.NewMemoryBackend()
+			return blob.NewMemoryBackend()
 		},
 	})
 }
@@ -22,7 +22,7 @@ func TestMemoryBackendConformance(t *testing.T) {
 func TestMemoryBackendPutGetAndDefensiveCopy(t *testing.T) {
 	t.Parallel()
 
-	backend := blobcatalog.NewMemoryBackend()
+	backend := blob.NewMemoryBackend()
 	body := []byte("one")
 	created, err := backend.Put(context.Background(), "pages/a.json", body)
 	if err != nil {

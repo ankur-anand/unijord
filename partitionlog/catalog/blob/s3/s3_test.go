@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -19,7 +19,7 @@ func TestBackendConformanceWithFakeS3(t *testing.T) {
 	t.Parallel()
 
 	backendtest.Run(t, backendtest.Config{
-		NewBackend: func(t testing.TB) blobcatalog.Backend {
+		NewBackend: func(t testing.TB) blob.Backend {
 			t.Helper()
 			backend, _ := newFakeBackend(t, "catalog")
 			return backend
@@ -44,8 +44,8 @@ func TestBackendContentTypeWithFakeS3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HeadObject() error = %v", err)
 	}
-	if aws.ToString(head.ContentType) != blobcatalog.ObjectContentType {
-		t.Fatalf("ContentType = %q, want %q", aws.ToString(head.ContentType), blobcatalog.ObjectContentType)
+	if aws.ToString(head.ContentType) != blob.ObjectContentType {
+		t.Fatalf("ContentType = %q, want %q", aws.ToString(head.ContentType), blob.ObjectContentType)
 	}
 }
 

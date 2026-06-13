@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	blobcatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/backendtest"
 )
 
@@ -24,7 +24,7 @@ func TestBackendConformanceWithFakeAzure(t *testing.T) {
 	t.Parallel()
 
 	backendtest.Run(t, backendtest.Config{
-		NewBackend: func(t testing.TB) blobcatalog.Backend {
+		NewBackend: func(t testing.TB) blob.Backend {
 			t.Helper()
 			backend, _, _ := newFakeBackend(t)
 			return backend
@@ -46,8 +46,8 @@ func TestBackendContentTypeWithFakeAzure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProperties() error = %v", err)
 	}
-	if props.ContentType == nil || *props.ContentType != blobcatalog.ObjectContentType {
-		t.Fatalf("ContentType = %v, want %q", props.ContentType, blobcatalog.ObjectContentType)
+	if props.ContentType == nil || *props.ContentType != blob.ObjectContentType {
+		t.Fatalf("ContentType = %v, want %q", props.ContentType, blob.ObjectContentType)
 	}
 	if server.object(obj.Key).etag != obj.Token {
 		t.Fatalf("server token = %q, want %q", server.object(obj.Key).etag, obj.Token)
