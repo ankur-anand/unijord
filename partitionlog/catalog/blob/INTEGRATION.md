@@ -32,7 +32,7 @@ Defaults:
 - `BLOBCATALOG_MINIO_ACCESS_KEY` falls back to `MINIO_ROOT_USER`, then `minioadmin`
 - `BLOBCATALOG_MINIO_SECRET_KEY` falls back to `MINIO_ROOT_PASSWORD`, then `minioadmin`
 
-The endpoint also falls back to `BLOBSINK_MINIO_ENDPOINT` so local blobsink and
+The endpoint also falls back to `BLOB_SINK_MINIO_ENDPOINT` so local blob/sink and
 blob catalog tests can share the same MinIO process.
 
 ## Azurite
@@ -62,7 +62,7 @@ Defaults:
 
 - `CATALOG_BLOB_AZURITE_CONTAINER=catalog-blob-it`
 - `BLOBCATALOG_AZURITE_CONNECTION_STRING` falls back to
-  `BLOBSINK_AZURITE_CONNECTION_STRING`, then the Azurite development account
+  `BLOB_SINK_AZURITE_CONNECTION_STRING`, then the Azurite development account
   connection string for `http://127.0.0.1:10000/devstoreaccount1`.
 
 ## Fake GCS
