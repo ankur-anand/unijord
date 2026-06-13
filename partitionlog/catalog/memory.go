@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 )
 
 // MemoryCatalog is an in-process catalog implementation. It is intended for
@@ -16,10 +18,10 @@ type MemoryCatalog struct {
 }
 
 type memoryPartition struct {
-	state       PartitionState
+	state       pmeta.PartitionHead
 	writerID    [16]byte
 	headVersion uint64
-	segments    []SegmentRef
+	segments    []pmeta.SegmentRef
 }
 
 type memoryWriterSession struct {
@@ -30,7 +32,7 @@ type memoryWriterSession struct {
 	mu          sync.Mutex
 	writerEpoch uint64
 	headVersion uint64
-	state       PartitionState
+	state       pmeta.PartitionHead
 }
 
 func NewMemoryCatalog() *MemoryCatalog {
@@ -52,12 +54,12 @@ func (c *MemoryCatalog) OpenWriter(ctx context.Context, partition uint32, writer
 	}, nil
 }
 
-func (c *MemoryCatalog) acquireWriter(ctx context.Context, partition uint32, writerID [16]byte) (PartitionState, uint64, uint64, error) {
+func (c *MemoryCatalog) acquireWriter(ctx context.Context, partition uint32, writerID [16]byte) (pmeta.PartitionHead, uint64, uint64, error) {
 	if err := ctx.Err(); err != nil {
-		return PartitionState{}, 0, 0, err
+		return pmeta.PartitionHead{}, 0, 0, err
 	}
-	if err := validateWriterID(writerID); err != nil {
-		return PartitionState{}, 0, 0, err
+	if err := ValidateWriterID(writerID); err != nil {
+		return pmeta.PartitionHead{}, 0, 0, err
 	}
 
 	c.mu.Lock()
@@ -72,26 +74,26 @@ func (c *MemoryCatalog) acquireWriter(ctx context.Context, partition uint32, wri
 	return data.state, data.state.WriterEpoch, data.headVersion, nil
 }
 
-func (c *MemoryCatalog) LoadPartition(ctx context.Context, partition uint32) (PartitionState, error) {
+func (c *MemoryCatalog) LoadPartition(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
 	if err := ctx.Err(); err != nil {
-		return PartitionState{}, err
+		return pmeta.PartitionHead{}, err
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	data, ok := c.partitions[partition]
 	if !ok {
-		return PartitionState{Partition: partition}, nil
+		return pmeta.PartitionHead{Partition: partition}, nil
 	}
 	return data.state, nil
 }
 
-func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, writerID [16]byte, writerEpoch uint64, expectedNextLSN uint64, segment SegmentRef) (PartitionState, uint64, error) {
+func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, writerID [16]byte, writerEpoch uint64, expectedNextLSN uint64, segment pmeta.SegmentRef) (pmeta.PartitionHead, uint64, error) {
 	if err := ctx.Err(); err != nil {
-		return PartitionState{}, 0, err
+		return pmeta.PartitionHead{}, 0, err
 	}
-	if err := validateAppendSegment(partition, expectedNextLSN, writerEpoch, segment); err != nil {
-		return PartitionState{}, 0, err
+	if err := ValidateAppendSegment(partition, expectedNextLSN, writerEpoch, segment); err != nil {
+		return pmeta.PartitionHead{}, 0, err
 	}
 
 	c.mu.Lock()
@@ -106,30 +108,30 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 		return retry, data.headVersion, nil
 	}
 	if state.WriterEpoch == 0 {
-		return PartitionState{}, 0, fmt.Errorf("%w: writer fence not acquired", ErrStaleWriter)
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer fence not acquired", ErrStaleWriter)
 	}
 	if writerEpoch < state.WriterEpoch {
-		return PartitionState{}, 0, fmt.Errorf("%w: writer_epoch=%d current=%d", ErrStaleWriter, writerEpoch, state.WriterEpoch)
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer_epoch=%d current=%d", ErrStaleWriter, writerEpoch, state.WriterEpoch)
 	}
 	if writerEpoch > state.WriterEpoch {
-		return PartitionState{}, 0, fmt.Errorf("%w: writer_epoch=%d current=%d", ErrStaleWriter, writerEpoch, state.WriterEpoch)
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer_epoch=%d current=%d", ErrStaleWriter, writerEpoch, state.WriterEpoch)
 	}
 	if writerID != data.writerID {
-		return PartitionState{}, 0, fmt.Errorf("%w: writer_id mismatch", ErrStaleWriter)
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer_id mismatch", ErrStaleWriter)
 	}
 	if expectedNextLSN != state.NextLSN {
-		return PartitionState{}, 0, fmt.Errorf("%w: expected_next_lsn=%d current=%d", ErrConflict, expectedNextLSN, state.NextLSN)
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: expected_next_lsn=%d current=%d", ErrConflict, expectedNextLSN, state.NextLSN)
 	}
 	if segment.BaseLSN != state.NextLSN {
-		return PartitionState{}, 0, fmt.Errorf("%w: segment base_lsn=%d current=%d", ErrConflict, segment.BaseLSN, state.NextLSN)
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: segment base_lsn=%d current=%d", ErrConflict, segment.BaseLSN, state.NextLSN)
 	}
 	if last, ok := state.Last(); ok {
 		if segment.MinTimestampMS < last.MaxTimestampMS {
-			return PartitionState{}, 0, fmt.Errorf("%w: segment min_ts=%d previous max_ts=%d", ErrTimestampOrder, segment.MinTimestampMS, last.MaxTimestampMS)
+			return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: segment min_ts=%d previous max_ts=%d", ErrTimestampOrder, segment.MinTimestampMS, last.MaxTimestampMS)
 		}
 	}
 	if err := ensureUniqueSegment(data.segments, segment); err != nil {
-		return PartitionState{}, 0, err
+		return pmeta.PartitionHead{}, 0, err
 	}
 
 	state.NextLSN = segment.NextLSN()
@@ -146,50 +148,50 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	return state, data.headVersion, nil
 }
 
-func (c *MemoryCatalog) FindSegment(ctx context.Context, partition uint32, lsn uint64) (SegmentRef, bool, error) {
+func (c *MemoryCatalog) FindSegment(ctx context.Context, partition uint32, lsn uint64) (pmeta.SegmentRef, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return SegmentRef{}, false, err
+		return pmeta.SegmentRef{}, false, err
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	data, ok := c.partitions[partition]
 	if !ok {
-		return SegmentRef{}, false, nil
+		return pmeta.SegmentRef{}, false, nil
 	}
 	i := firstSegmentAtOrAfter(data.segments, lsn)
 	if i == len(data.segments) {
-		return SegmentRef{}, false, nil
+		return pmeta.SegmentRef{}, false, nil
 	}
 	segment := data.segments[i]
 	if lsn < segment.BaseLSN || lsn > segment.LastLSN {
-		return SegmentRef{}, false, nil
+		return pmeta.SegmentRef{}, false, nil
 	}
 	return segment, true, nil
 }
 
-func (c *MemoryCatalog) ListSegments(ctx context.Context, req ListSegmentsRequest) (SegmentPage, error) {
+func (c *MemoryCatalog) ListSegments(ctx context.Context, req ListSegmentsRequest) (pmeta.SegmentPage, error) {
 	if err := ctx.Err(); err != nil {
-		return SegmentPage{}, err
+		return pmeta.SegmentPage{}, err
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	data, ok := c.partitions[req.Partition]
 	if !ok {
-		return SegmentPage{}, nil
+		return pmeta.SegmentPage{}, nil
 	}
-	limit := req.normalizedLimit()
+	limit := req.NormalizedLimit()
 	start := firstSegmentAtOrAfter(data.segments, req.FromLSN)
 	if start == len(data.segments) {
-		return SegmentPage{}, nil
+		return pmeta.SegmentPage{}, nil
 	}
 	end := start + limit
 	if end > len(data.segments) {
 		end = len(data.segments)
 	}
-	page := SegmentPage{
-		Segments: append([]SegmentRef(nil), data.segments[start:end]...),
+	page := pmeta.SegmentPage{
+		Segments: append([]pmeta.SegmentRef(nil), data.segments[start:end]...),
 		HasMore:  end < len(data.segments),
 	}
 	if page.HasMore {
@@ -203,32 +205,32 @@ func (c *MemoryCatalog) getOrCreateLocked(partition uint32) *memoryPartition {
 	if ok {
 		return data
 	}
-	data = &memoryPartition{state: PartitionState{Partition: partition}}
+	data = &memoryPartition{state: pmeta.PartitionHead{Partition: partition}}
 	c.partitions[partition] = data
 	return data
 }
 
-func firstSegmentAtOrAfter(segments []SegmentRef, lsn uint64) int {
+func firstSegmentAtOrAfter(segments []pmeta.SegmentRef, lsn uint64) int {
 	return sort.Search(len(segments), func(i int) bool {
 		return segments[i].LastLSN >= lsn
 	})
 }
 
-func idempotentRetry(data *memoryPartition, expectedNextLSN uint64, segment SegmentRef) (PartitionState, bool) {
+func idempotentRetry(data *memoryPartition, expectedNextLSN uint64, segment pmeta.SegmentRef) (pmeta.PartitionHead, bool) {
 	last, ok := data.state.Last()
 	if !ok {
-		return PartitionState{}, false
+		return pmeta.PartitionHead{}, false
 	}
 	if expectedNextLSN != last.BaseLSN {
-		return PartitionState{}, false
+		return pmeta.PartitionHead{}, false
 	}
 	if last != segment {
-		return PartitionState{}, false
+		return pmeta.PartitionHead{}, false
 	}
 	return data.state, true
 }
 
-func ensureUniqueSegment(segments []SegmentRef, segment SegmentRef) error {
+func ensureUniqueSegment(segments []pmeta.SegmentRef, segment pmeta.SegmentRef) error {
 	for _, existing := range segments {
 		if existing.SegmentUUID == segment.SegmentUUID {
 			return fmt.Errorf("%w: duplicate segment_uuid", ErrConflict)
@@ -240,7 +242,7 @@ func ensureUniqueSegment(segments []SegmentRef, segment SegmentRef) error {
 	return nil
 }
 
-func (s *memoryWriterSession) Head() PartitionState {
+func (s *memoryWriterSession) Head() pmeta.PartitionHead {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state
@@ -256,7 +258,7 @@ func (s *memoryWriterSession) WriterID() [16]byte {
 	return s.writerID
 }
 
-func (s *memoryWriterSession) AppendSegment(ctx context.Context, segment SegmentRef) (PartitionState, error) {
+func (s *memoryWriterSession) AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error) {
 	s.mu.Lock()
 	partition := s.partition
 	writerID := s.writerID
@@ -269,7 +271,7 @@ func (s *memoryWriterSession) AppendSegment(ctx context.Context, segment Segment
 
 	state, headVersion, err := s.cat.appendSegment(ctx, partition, writerID, writerEpoch, expectedNextLSN, segment)
 	if err != nil {
-		return PartitionState{}, err
+		return pmeta.PartitionHead{}, err
 	}
 
 	s.mu.Lock()
