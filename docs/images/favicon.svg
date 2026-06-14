@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Unijord icon</title>
+  <desc id="desc">A local event stream entering a durable journal basin.</desc>
+
+  <style>
+    .ink { stroke: #111827; }
+    .dot { fill: #111827; }
+    @media (prefers-color-scheme: dark) {
+      .ink { stroke: #e7eef6; }
+      .dot { fill: #e7eef6; }
+    }
+  </style>
+
+  <defs>
+    <linearGradient id="merge" x1="31.5" y1="8" x2="46" y2="43" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="0.5" stop-color="#0891b2"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+
+  <path
+    d="M12 9 V38.5 C12 50 20 55.5 31 55.5 H35 C46 55.5 52 50 52 38.5 V9"
+    fill="none"
+    class="ink"
+    stroke-width="4.75"
+    stroke-linecap="round"/>
+
+  <path
+    d="M32 8 V24 C32 33.5 38.5 38.25 46 41"
+    fill="none"
+    stroke="url(#merge)"
+    stroke-width="3.75"
+    stroke-linecap="round"/>
+
+  <circle cx="32" cy="8" r="3" class="dot"/>
+</svg>
