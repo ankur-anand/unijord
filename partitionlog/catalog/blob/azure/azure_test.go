@@ -57,8 +57,28 @@ func TestBackendContentTypeWithFakeAzure(t *testing.T) {
 func TestBackendRejectsBadInputs(t *testing.T) {
 	t.Parallel()
 
+	if _, err := New(nil, Options{}); err == nil {
+		t.Fatal("New(nil) error = nil, want error")
+	}
 	if _, err := NewBackend(nil); err == nil {
 		t.Fatal("NewBackend(nil) error = nil, want error")
+	}
+}
+
+func TestNewCatalogWithFakeAzure(t *testing.T) {
+	t.Parallel()
+
+	_, client, _ := newFakeBackend(t)
+	cat, err := New(client, Options{Prefix: "catalog-test"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	head, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if head.Partition != 1 || head.NextLSN != 0 {
+		t.Fatalf("head = %+v, want empty partition 1", head)
 	}
 }
 

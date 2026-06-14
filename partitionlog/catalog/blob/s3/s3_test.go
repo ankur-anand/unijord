@@ -53,11 +53,33 @@ func TestBackendRejectsBadInputs(t *testing.T) {
 	t.Parallel()
 
 	client := newFakeS3Client(t, "catalog")
+	if _, err := New(nil, "catalog", Options{}); err == nil {
+		t.Fatal("New(nil) error = nil, want error")
+	}
+	if _, err := New(client, "", Options{}); err == nil {
+		t.Fatal("New(empty bucket) error = nil, want error")
+	}
 	if _, err := NewBackend(nil, "catalog"); err == nil {
 		t.Fatal("NewBackend(nil) error = nil, want error")
 	}
 	if _, err := NewBackend(client, ""); err == nil {
 		t.Fatal("NewBackend(empty bucket) error = nil, want error")
+	}
+}
+
+func TestNewCatalogWithFakeS3(t *testing.T) {
+	t.Parallel()
+
+	cat, err := New(newFakeS3Client(t, "catalog"), "catalog", Options{Prefix: "catalog-test"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	head, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if head.Partition != 1 || head.NextLSN != 0 {
+		t.Fatalf("head = %+v, want empty partition 1", head)
 	}
 }
 
