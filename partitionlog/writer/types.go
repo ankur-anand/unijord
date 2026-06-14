@@ -63,6 +63,7 @@ type Options struct {
 	SegmentOptions segwriter.Options
 	Roll           RollPolicy
 	Queue          QueuePolicy
+	Observer       Observer
 
 	Clock   func() time.Time
 	UUIDGen UUIDGen
@@ -76,6 +77,32 @@ type Record struct {
 
 type AppendResult struct {
 	LSN uint64
+}
+
+type MetricName string
+
+const (
+	MetricSegmentFinalize MetricName = "writer.segment_finalize"
+	MetricSegmentPublish  MetricName = "writer.segment_publish"
+)
+
+type MetricEvent struct {
+	Name      MetricName
+	Partition uint32
+
+	StartLSN uint64
+	NextLSN  uint64
+
+	Records int
+	Bytes   uint64
+
+	SegmentURI string
+	Duration   time.Duration
+	Err        error
+}
+
+type Observer interface {
+	Observe(MetricEvent)
 }
 
 type SegmentInfo struct {

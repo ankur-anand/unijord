@@ -3,16 +3,19 @@ package partitionlog
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ankur-anand/unijord/partitionlog/reader"
 	plruntime "github.com/ankur-anand/unijord/partitionlog/runtime"
+	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/ankur-anand/unijord/partitionlog/segwriter"
 	lowwriter "github.com/ankur-anand/unijord/partitionlog/writer"
 )
 
 type Options struct {
-	Store  Store
-	Reader ReaderOptions
+	Store   Store
+	Reader  ReaderOptions
+	Metrics Metrics
 }
 
 // ReaderOptions configures the default reader created by Open.
@@ -42,8 +45,9 @@ type WriterOptions struct {
 
 // Log is one partitionlog client over one configured store.
 type Log struct {
-	store  Store
-	reader *Reader
+	store   Store
+	metrics Metrics
+	reader  *Reader
 }
 
 // Open validates a complete Store and prepares the default reader runtime.
@@ -51,11 +55,11 @@ func Open(opts Options) (*Log, error) {
 	if opts.Store == nil {
 		return nil, fmt.Errorf("partitionlog: nil store")
 	}
-	r, err := newReader(opts.Store, opts.Reader)
+	r, err := newReader(opts.Store, opts.Reader, opts.Metrics)
 	if err != nil {
 		return nil, err
 	}
-	return &Log{store: opts.Store, reader: r}, nil
+	return &Log{store: opts.Store, metrics: opts.Metrics, reader: r}, nil
 }
 
 // Reader returns the default reader runtime for this log.
@@ -68,7 +72,7 @@ func (l *Log) NewReader(opts ReaderOptions) (*Reader, error) {
 	if l == nil || l.store == nil {
 		return nil, fmt.Errorf("partitionlog: nil log")
 	}
-	return newReader(l.store, opts)
+	return newReader(l.store, opts, l.metrics)
 }
 
 // OpenWriter opens one fenced writer for one partition.
@@ -100,6 +104,9 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 	if err := applyWriterPipelineOptions(&wopts, opts.Partition, opts.Pipeline); err != nil {
 		return nil, err
 	}
+	if l.metrics != nil {
+		wopts.Observer = writerMetricsAdapter{metrics: l.metrics}
+	}
 
 	inner, err := plruntime.NewWriter(ctx, plruntime.WriterConfig{
 		Partition:   opts.Partition,
@@ -111,17 +118,36 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{inner: inner}, nil
+	return &Writer{inner: inner, partition: opts.Partition, metrics: l.metrics}, nil
 }
 
 // Writer appends records to one fenced partition.
 type Writer struct {
-	inner *lowwriter.Writer
+	inner     *lowwriter.Writer
+	partition uint32
+	metrics   Metrics
 }
 
 // Append assigns the next LSN and appends record to this writer's partition.
-func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error) {
-	result, err := w.inner.Append(ctx, lowwriter.Record{
+func (w *Writer) Append(ctx context.Context, record Record) (result AppendResult, err error) {
+	start := time.Now()
+	recordSize, _ := segformat.RecordSize(record.Headers, record.Value)
+	recordBytes := uint64(0)
+	if recordSize > 0 {
+		recordBytes = uint64(recordSize)
+	}
+	defer func() {
+		w.observe(Metric{
+			Name:      MetricWriterAppend,
+			Partition: w.partition,
+			LSN:       result.LSN,
+			Records:   1,
+			Bytes:     recordBytes,
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	innerResult, err := w.inner.Append(ctx, lowwriter.Record{
 		TimestampMS: record.TimestampMS,
 		Headers:     record.Headers,
 		Value:       record.Value,
@@ -129,16 +155,25 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 	if err != nil {
 		return AppendResult{}, err
 	}
-	return AppendResult{LSN: result.LSN}, nil
+	result = AppendResult{LSN: innerResult.LSN}
+	return result, nil
 }
 
 // Cut rotates the current active segment if it contains records.
-func (w *Writer) Cut(ctx context.Context) error {
+func (w *Writer) Cut(ctx context.Context) (err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterOperation(MetricWriterCut, time.Since(start), err)
+	}()
 	return w.inner.Cut(ctx)
 }
 
 // Flush publishes all records accepted before Flush returns.
-func (w *Writer) Flush(ctx context.Context) (Snapshot, error) {
+func (w *Writer) Flush(ctx context.Context) (result Snapshot, err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterSnapshotOperation(MetricWriterFlush, result, time.Since(start), err)
+	}()
 	snapshot, err := w.inner.Flush(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -147,7 +182,11 @@ func (w *Writer) Flush(ctx context.Context) (Snapshot, error) {
 }
 
 // Close flushes and closes the writer.
-func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
+func (w *Writer) Close(ctx context.Context) (result Snapshot, err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterSnapshotOperation(MetricWriterClose, result, time.Since(start), err)
+	}()
 	snapshot, err := w.inner.Close(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -155,7 +194,11 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 	return snapshotFromWriter(snapshot), nil
 }
 
-func (w *Writer) Abort(ctx context.Context) error {
+func (w *Writer) Abort(ctx context.Context) (err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterOperation(MetricWriterAbort, time.Since(start), err)
+	}()
 	return w.inner.Abort(ctx)
 }
 
@@ -167,7 +210,35 @@ func (w *Writer) Err() error {
 	return w.inner.Err()
 }
 
-func newReader(store Store, opts ReaderOptions) (*Reader, error) {
+func (w *Writer) observeWriterOperation(name MetricName, duration time.Duration, err error) {
+	w.observeWriterSnapshotOperation(name, Snapshot{}, duration, err)
+}
+
+func (w *Writer) observeWriterSnapshotOperation(name MetricName, snapshot Snapshot, duration time.Duration, err error) {
+	metric := Metric{
+		Name:      name,
+		Partition: w.partition,
+		Duration:  duration,
+		Err:       err,
+	}
+	if snapshot.Head.Partition != 0 || snapshot.Head.NextLSN != 0 || snapshot.Head.SegmentCount != 0 {
+		metric.NextLSN = snapshot.Head.NextLSN
+		metric.SegmentCount = snapshot.Head.SegmentCount
+	}
+	w.observe(metric)
+}
+
+func (w *Writer) observe(metric Metric) {
+	if w.metrics == nil {
+		return
+	}
+	state := w.inner.State()
+	metric.InflightSegments = state.InflightSegments
+	metric.InflightBytes = state.InflightBytes
+	w.metrics.Observe(metric)
+}
+
+func newReader(store Store, opts ReaderOptions, metrics Metrics) (*Reader, error) {
 	cfg := plruntime.ReaderConfig{
 		Catalog:      store.ReaderCatalog(),
 		SegmentStore: store.SegmentStore(),
@@ -175,6 +246,9 @@ func newReader(store Store, opts ReaderOptions) (*Reader, error) {
 			MaxRecordsPerBatch: opts.MaxRecordsPerBatch,
 			Refresh:            opts.Refresh,
 		},
+	}
+	if metrics != nil {
+		cfg.Options.Observer = readerMetricsAdapter{metrics: metrics}
 	}
 	if opts.RangeCacheBytes > 0 {
 		cfg.BlobCache = &plruntime.BlobCacheConfig{MaxBytes: opts.RangeCacheBytes}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
@@ -27,7 +28,7 @@ func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) 
 		catalog: cat,
 		store:   store,
 		opts:    normalized,
-		refresh: newRefreshCoordinator(cat, normalized.Refresh),
+		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.Observer),
 	}, nil
 }
 
@@ -46,15 +47,33 @@ func (r *Reader) ConsumeAfter(ctx context.Context, req ConsumeAfterRequest) (Con
 	})
 }
 
-func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (FetchResult, error) {
-	if err := ctx.Err(); err != nil {
+func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResult, err error) {
+	start := time.Now()
+	defer func() {
+		records := 0
+		if result.Found {
+			records = 1
+		}
+		r.observe(MetricEvent{
+			Name:      MetricFetch,
+			Partition: req.Partition,
+			StartLSN:  req.LSN,
+			NextLSN:   result.Head.NextLSN,
+			Limit:     1,
+			Records:   records,
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
 		return FetchResult{}, err
 	}
 	head, err := r.catalog.LoadPartition(ctx, req.Partition)
 	if err != nil {
 		return FetchResult{}, err
 	}
-	result := FetchResult{Head: head}
+	result = FetchResult{Head: head}
 	if !head.HasLastSegment {
 		return result, nil
 	}
@@ -99,18 +118,36 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (FetchResult, erro
 }
 
 func (r *Reader) Consume(ctx context.Context, req ConsumeRequest) (ConsumeResult, error) {
-	if err := ctx.Err(); err != nil {
+	start := time.Now()
+	var result ConsumeResult
+	var err error
+	defer func() {
+		r.observe(MetricEvent{
+			Name:      MetricRead,
+			Partition: req.Partition,
+			StartLSN:  req.StartLSN,
+			NextLSN:   result.NextLSN,
+			Limit:     req.Limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
 		return ConsumeResult{}, err
 	}
 	if req.Limit < 0 {
-		return ConsumeResult{}, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
+		err = fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
+		return ConsumeResult{}, err
 	}
 	limit := r.normalizedLimit(req.Limit)
 	head, err := r.refresh.headForRead(ctx, req.Partition, req.StartLSN, FreshnessOnTail)
 	if err != nil {
 		return ConsumeResult{}, err
 	}
-	return r.consumeFromHead(ctx, head, req.Partition, req.StartLSN, limit)
+	result, err = r.consumeFromHead(ctx, head, req.Partition, req.StartLSN, limit)
+	return result, err
 }
 
 func (r *Reader) consumeWithHead(ctx context.Context, head pmeta.PartitionHead, req ConsumeRequest) (ConsumeResult, error) {
@@ -127,8 +164,21 @@ func (r *Reader) consumeWithHead(ctx context.Context, head pmeta.PartitionHead, 
 	return r.consumeFromHead(ctx, head, req.Partition, req.StartLSN, limit)
 }
 
-func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimestampRequest) (ConsumeResult, error) {
-	if err := ctx.Err(); err != nil {
+func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimestampRequest) (result ConsumeResult, err error) {
+	start := time.Now()
+	defer func() {
+		r.observe(MetricEvent{
+			Name:      MetricTimestampRead,
+			Partition: req.Partition,
+			NextLSN:   result.NextLSN,
+			Limit:     req.Limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
 		return ConsumeResult{}, err
 	}
 	if req.Limit < 0 {
@@ -139,7 +189,7 @@ func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimest
 	if err != nil {
 		return ConsumeResult{}, err
 	}
-	result := ConsumeResult{
+	result = ConsumeResult{
 		Head:    head,
 		NextLSN: head.NextLSN,
 	}
@@ -288,15 +338,32 @@ func (r *Reader) findTimestampStart(ctx context.Context, segment pmeta.SegmentRe
 }
 
 func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, fromLSN uint64, limit int, headNextLSN uint64) ([]Record, error) {
+	start := time.Now()
+	var out []Record
+	var err error
+	defer func() {
+		r.observe(MetricEvent{
+			Name:       MetricSegmentRead,
+			Partition:  segment.Partition,
+			StartLSN:   fromLSN,
+			Limit:      limit,
+			Records:    len(out),
+			SegmentURI: segment.URI,
+			Duration:   time.Since(start),
+			Err:        err,
+		})
+	}()
 	sr, err := r.openSegment(ctx, segment)
 	if err != nil {
-		return nil, mapSegmentError(err)
+		err = mapSegmentError(err)
+		return nil, err
 	}
 	segmentRecords, err := sr.Read(ctx, fromLSN, limit)
 	if err != nil {
-		return nil, mapSegmentError(err)
+		err = mapSegmentError(err)
+		return nil, err
 	}
-	out := make([]Record, 0, len(segmentRecords))
+	out = make([]Record, 0, len(segmentRecords))
 	for _, record := range segmentRecords {
 		if record.LSN >= headNextLSN {
 			break
@@ -341,6 +408,13 @@ func (r *Reader) normalizedLimit(limit int) int {
 	default:
 		return limit
 	}
+}
+
+func (r *Reader) observe(event MetricEvent) {
+	if r.opts.Observer == nil {
+		return
+	}
+	r.opts.Observer.Observe(event)
 }
 
 func mapSegmentError(err error) error {

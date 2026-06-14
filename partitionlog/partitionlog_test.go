@@ -3,6 +3,7 @@ package partitionlog
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -335,6 +336,74 @@ func TestLogWriterPipelineOptionsAreAccepted(t *testing.T) {
 	}
 }
 
+func TestLogMetricsObserverReceivesPublicAndBackgroundEvents(t *testing.T) {
+	ctx := context.Background()
+	metrics := &recordingMetrics{}
+	log, err := Open(Options{
+		Store:   newTestStore(t),
+		Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	w, err := log.OpenWriter(ctx, WriterOptions{
+		Partition: 1,
+		WriterID:  [16]byte{1},
+		Batch:     BatchPolicy{MaxRecords: 1},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	if _, err := w.Append(ctx, Record{TimestampMS: 1, Value: []byte("x")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	got, err := log.Reader().Partition(1).Read(ctx, ReadRequest{
+		StartLSN:  0,
+		Limit:     10,
+		Freshness: FreshnessLatest,
+	})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(got.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(got.Records))
+	}
+
+	events := metrics.events()
+	for _, name := range []MetricName{
+		MetricWriterAppend,
+		MetricWriterFlush,
+		MetricWriterSegmentFinalize,
+		MetricWriterSegmentPublish,
+		MetricReaderCatalogRefresh,
+		MetricReaderSegmentRead,
+		MetricReaderRead,
+	} {
+		if !hasMetric(events, name) {
+			t.Fatalf("missing metric %s in events %+v", name, events)
+		}
+	}
+	appendMetric, ok := findMetric(events, MetricWriterAppend)
+	if !ok {
+		t.Fatal("missing append metric")
+	}
+	if appendMetric.Partition != 1 || appendMetric.LSN != 0 || appendMetric.Records != 1 || appendMetric.Bytes == 0 || appendMetric.Err != nil {
+		t.Fatalf("append metric = %+v, want partition=1 lsn=0 records=1 bytes>0 err=nil", appendMetric)
+	}
+	readMetric, ok := findMetric(events, MetricReaderRead)
+	if !ok {
+		t.Fatal("missing read metric")
+	}
+	if readMetric.Partition != 1 || readMetric.StartLSN != 0 || readMetric.NextLSN != 1 || readMetric.Records != 1 || readMetric.Err != nil {
+		t.Fatalf("read metric = %+v, want partition=1 start=0 next=1 records=1 err=nil", readMetric)
+	}
+}
+
 func waitForVisibleRecords(t *testing.T, r *Reader, partition uint32, req ReadRequest, want int) ReadResult {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -351,6 +420,37 @@ func waitForVisibleRecords(t *testing.T, r *Reader, partition uint32, req ReadRe
 		case <-ticker.C:
 		}
 	}
+}
+
+type recordingMetrics struct {
+	mu    sync.Mutex
+	items []Metric
+}
+
+func (m *recordingMetrics) Observe(event Metric) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items = append(m.items, event)
+}
+
+func (m *recordingMetrics) events() []Metric {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Metric(nil), m.items...)
+}
+
+func hasMetric(events []Metric, name MetricName) bool {
+	_, ok := findMetric(events, name)
+	return ok
+}
+
+func findMetric(events []Metric, name MetricName) (Metric, bool) {
+	for _, event := range events {
+		if event.Name == name {
+			return event, true
+		}
+	}
+	return Metric{}, false
 }
 
 type testStore struct {
