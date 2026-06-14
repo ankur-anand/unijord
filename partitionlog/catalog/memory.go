@@ -35,8 +35,14 @@ type memoryWriterSession struct {
 	state       pmeta.PartitionHead
 }
 
+// NewMemoryCatalog returns an in-process catalog for tests and local tools.
 func NewMemoryCatalog() *MemoryCatalog {
 	return &MemoryCatalog{partitions: make(map[uint32]*memoryPartition)}
+}
+
+// NewMemory is the short constructor for the in-process catalog.
+func NewMemory() *MemoryCatalog {
+	return NewMemoryCatalog()
 }
 
 func (c *MemoryCatalog) OpenWriter(ctx context.Context, partition uint32, writerID [16]byte) (WriterSession, error) {
