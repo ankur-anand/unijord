@@ -23,6 +23,20 @@ const maxListKeys = 1000
 
 var _ blob.Backend = (*Backend)(nil)
 
+// Options configures the object-store catalog built by New.
+type Options = blob.Options
+
+// New builds a complete blob catalog backed by an S3-compatible bucket.
+func New(client *awss3.Client, bucket string, opts Options) (*blob.Catalog, error) {
+	backend, err := NewBackend(client, bucket)
+	if err != nil {
+		return nil, err
+	}
+	return blob.New(backend, opts)
+}
+
+// NewBackend builds only the S3 object backend. Use New for the normal catalog
+// construction path.
 func NewBackend(client *awss3.Client, bucket string) (*Backend, error) {
 	if client == nil {
 		return nil, fmt.Errorf("catalog/blob/s3: nil client")

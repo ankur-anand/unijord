@@ -51,6 +51,12 @@ func TestBackendRejectsBadInputs(t *testing.T) {
 	t.Parallel()
 
 	client := newFakeGCSClient(t, "catalog")
+	if _, err := New(nil, "catalog", Options{}); err == nil {
+		t.Fatal("New(nil) error = nil, want error")
+	}
+	if _, err := New(client, "", Options{}); err == nil {
+		t.Fatal("New(empty bucket) error = nil, want error")
+	}
 	if _, err := NewBackend(nil, "catalog"); err == nil {
 		t.Fatal("NewBackend(nil) error = nil, want error")
 	}
@@ -63,6 +69,22 @@ func TestBackendRejectsBadInputs(t *testing.T) {
 	}
 	if _, _, err := backend.CompareAndSwap(context.Background(), "x", "not-a-generation", []byte("x")); !errors.Is(err, blob.ErrCorruptCatalog) {
 		t.Fatalf("CompareAndSwap(bad token) error = %v, want %v", err, blob.ErrCorruptCatalog)
+	}
+}
+
+func TestNewCatalogWithFakeGCS(t *testing.T) {
+	t.Parallel()
+
+	cat, err := New(newFakeGCSClient(t, "catalog"), "catalog", Options{Prefix: "catalog-test"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	head, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if head.Partition != 1 || head.NextLSN != 0 {
+		t.Fatalf("head = %+v, want empty partition 1", head)
 	}
 }
 

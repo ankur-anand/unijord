@@ -22,6 +22,20 @@ type Backend struct {
 
 var _ blob.Backend = (*Backend)(nil)
 
+// Options configures the object-store catalog built by New.
+type Options = blob.Options
+
+// New builds a complete blob catalog backed by a Google Cloud Storage bucket.
+func New(client *storage.Client, bucket string, opts Options) (*blob.Catalog, error) {
+	backend, err := NewBackend(client, bucket)
+	if err != nil {
+		return nil, err
+	}
+	return blob.New(backend, opts)
+}
+
+// NewBackend builds only the GCS object backend. Use New for the normal catalog
+// construction path.
 func NewBackend(client *storage.Client, bucket string) (*Backend, error) {
 	if client == nil {
 		return nil, fmt.Errorf("catalog/blob/gcs: nil client")

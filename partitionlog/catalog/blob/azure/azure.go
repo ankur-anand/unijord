@@ -25,6 +25,20 @@ type Backend struct {
 
 var _ blob.Backend = (*Backend)(nil)
 
+// Options configures the object-store catalog built by New.
+type Options = blob.Options
+
+// New builds a complete blob catalog backed by an Azure Blob container.
+func New(container *container.Client, opts Options) (*blob.Catalog, error) {
+	backend, err := NewBackend(container)
+	if err != nil {
+		return nil, err
+	}
+	return blob.New(backend, opts)
+}
+
+// NewBackend builds only the Azure object backend. Use New for the normal
+// catalog construction path.
 func NewBackend(container *container.Client) (*Backend, error) {
 	if container == nil {
 		return nil, fmt.Errorf("catalog/blob/azure: nil container client")
