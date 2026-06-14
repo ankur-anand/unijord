@@ -62,6 +62,7 @@ type Session interface {
 type RollPolicy struct {
     MaxSegmentRecords  uint32
     MaxSegmentRawBytes uint64
+    MaxSegmentAge      time.Duration
 }
 
 type QueuePolicy struct {
@@ -222,6 +223,24 @@ before moving on.
 
 If `Append` fails before a new active segment is started, it returns
 `ErrSegmentStartFailed` and the writer remains usable.
+
+## Roll Policy
+
+Segments can be cut by:
+
+- `MaxSegmentRecords`
+- `MaxSegmentRawBytes`
+- `MaxSegmentAge`
+- explicit `Cut`, `Flush`, or `Close`
+
+`MaxSegmentAge` is disabled when zero. When set, the age starts when the first
+record is accepted into a segment, not when an empty segment object is created.
+The writer owns a small background age loop that cuts a non-empty active
+segment after the configured age even if no more appends arrive.
+
+Age cuts still obey in-flight backpressure. If the writer cannot reserve
+in-flight capacity, the age loop waits until capacity is available or the
+writer is closed/aborted.
 
 ## Cut
 
