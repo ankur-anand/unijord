@@ -137,6 +137,79 @@ func TestWriterRollsByMaxSegmentRecords(t *testing.T) {
 	assertRange(t, page.Segments[2], 4, 4)
 }
 
+func TestWriterCutsByMaxSegmentAge(t *testing.T) {
+	cat := catalog.NewMemoryCatalog()
+	factory := newMemorySegmentFactory()
+	opts := testOptions(t, cat, factory)
+	opts.Roll.MaxSegmentAge = 10 * time.Millisecond
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	waitForWriterSegmentCount(t, w, 1)
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+	snapshot, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if snapshot.Head.SegmentCount != 2 {
+		t.Fatalf("SegmentCount = %d, want 2", snapshot.Head.SegmentCount)
+	}
+}
+
+func TestWriterMaxSegmentAgeStartsAtFirstRecordAfterPolicyCut(t *testing.T) {
+	cat := catalog.NewMemoryCatalog()
+	opts := testOptions(t, cat, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 2
+	opts.Roll.MaxSegmentAge = time.Hour
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+
+	w.mu.Lock()
+	if w.active == nil {
+		w.mu.Unlock()
+		t.Fatal("active segment is nil after policy cut")
+	}
+	if w.active.records != 0 {
+		t.Fatalf("active records after policy cut = %d, want 0", w.active.records)
+	}
+	if !w.active.firstRecordAt.IsZero() {
+		t.Fatalf("firstRecordAt after empty active segment = %s, want zero", w.active.firstRecordAt)
+	}
+	w.mu.Unlock()
+
+	beforeThird := time.Now()
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 3, Value: []byte("c")}); err != nil {
+		t.Fatalf("Append(third) error = %v", err)
+	}
+
+	w.mu.Lock()
+	got := w.active.firstRecordAt
+	w.mu.Unlock()
+	if got.IsZero() {
+		t.Fatal("firstRecordAt after third append is zero")
+	}
+	if got.Before(beforeThird) {
+		t.Fatalf("firstRecordAt = %s before third append start %s", got, beforeThird)
+	}
+}
+
 func TestWriterContinuesFromCatalogHead(t *testing.T) {
 	t.Parallel()
 
@@ -694,6 +767,23 @@ func testOptions(t *testing.T, cat interface {
 		MaxInflightBytes:    1 << 20,
 	}
 	return opts
+}
+
+func waitForWriterSegmentCount(t *testing.T, w *Writer, want uint64) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if got := w.State().Snapshot.Head.SegmentCount; got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for segment_count >= %d; state=%+v", want, w.State())
+		case <-ticker.C:
+		}
+	}
 }
 
 func testSessionOptions(session Session, factory SinkFactory) Options {

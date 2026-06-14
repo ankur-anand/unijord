@@ -48,6 +48,7 @@ type Session interface {
 type RollPolicy struct {
 	MaxSegmentRecords  uint32
 	MaxSegmentRawBytes uint64
+	MaxSegmentAge      time.Duration
 }
 
 type QueuePolicy struct {

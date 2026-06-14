@@ -47,6 +47,7 @@ type Writer struct {
 	stateWake    chan struct{}
 	finalizeWake chan struct{}
 	publishWake  chan struct{}
+	ageWake      chan struct{}
 
 	workerCtx    context.Context
 	workerCancel context.CancelFunc
@@ -54,10 +55,11 @@ type Writer struct {
 }
 
 type activeSegment struct {
-	writer   *segwriter.Writer
-	baseLSN  uint64
-	records  uint32
-	rawBytes uint64
+	writer        *segwriter.Writer
+	baseLSN       uint64
+	records       uint32
+	rawBytes      uint64
+	firstRecordAt time.Time
 }
 
 type detachedSegment struct {
@@ -111,6 +113,7 @@ func New(opts Options) (*Writer, error) {
 		stateWake:         make(chan struct{}, 1),
 		finalizeWake:      make(chan struct{}, 1),
 		publishWake:       make(chan struct{}, 1),
+		ageWake:           make(chan struct{}, 1),
 		workerCtx:         workerCtx,
 		workerCancel:      workerCancel,
 	}
@@ -121,6 +124,10 @@ func New(opts Options) (*Writer, error) {
 	w.workersWG.Add(2)
 	go w.finalizeLoop()
 	go w.publishLoop()
+	if normalized.Roll.MaxSegmentAge > 0 {
+		w.workersWG.Add(1)
+		go w.ageLoop()
+	}
 	return w, nil
 }
 
@@ -180,11 +187,16 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		return AppendResult{}, err
 	}
 
+	firstRecordInSegment := w.active.records == 0
 	w.optimisticNextLSN++
 	w.hasTimestamp = true
 	w.lastTimestamp = record.TimestampMS
 	w.active.records++
 	w.active.rawBytes += recordSize
+	if firstRecordInSegment {
+		w.active.firstRecordAt = time.Now()
+		w.signalAgeLocked()
+	}
 
 	if w.shouldCutAfterLocked() {
 		w.tryCutAfterAppendLocked(ctx)
@@ -449,6 +461,52 @@ func (w *Writer) publishLoop() {
 	}
 }
 
+func (w *Writer) ageLoop() {
+	defer w.workersWG.Done()
+
+	for {
+		w.mu.Lock()
+		for (w.active == nil || w.active.records == 0) && w.workerCtx.Err() == nil {
+			w.mu.Unlock()
+			select {
+			case <-w.ageWake:
+			case <-w.workerCtx.Done():
+				return
+			}
+			w.mu.Lock()
+		}
+		if w.workerCtx.Err() != nil {
+			w.mu.Unlock()
+			return
+		}
+
+		wait := time.Until(w.active.firstRecordAt.Add(w.opts.Roll.MaxSegmentAge))
+		if wait > 0 {
+			w.mu.Unlock()
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-w.ageWake:
+				stopTimer(timer)
+			case <-w.workerCtx.Done():
+				stopTimer(timer)
+				return
+			}
+			continue
+		}
+
+		err := w.cutLocked(w.workerCtx)
+		w.mu.Unlock()
+		if err != nil {
+			if w.workerCtx.Err() != nil {
+				return
+			}
+			w.noteAsyncErr(err)
+			return
+		}
+	}
+}
+
 func (w *Writer) cutLocked(ctx context.Context) error {
 	if w.active == nil || w.active.records == 0 {
 		return nil
@@ -546,6 +604,9 @@ func (w *Writer) shouldCutBeforeLocked(nextRecordSize uint64) bool {
 	if w.opts.Roll.MaxSegmentRecords > 0 && w.active.records >= w.opts.Roll.MaxSegmentRecords {
 		return true
 	}
+	if w.opts.Roll.MaxSegmentAge > 0 && !w.active.firstRecordAt.IsZero() && time.Since(w.active.firstRecordAt) >= w.opts.Roll.MaxSegmentAge {
+		return true
+	}
 	if w.opts.Roll.MaxSegmentRawBytes > 0 {
 		if w.active.rawBytes >= w.opts.Roll.MaxSegmentRawBytes {
 			return true
@@ -563,6 +624,9 @@ func (w *Writer) shouldCutAfterLocked() bool {
 		return true
 	}
 	if w.opts.Roll.MaxSegmentRawBytes > 0 && w.active.rawBytes >= w.opts.Roll.MaxSegmentRawBytes {
+		return true
+	}
+	if w.opts.Roll.MaxSegmentAge > 0 && w.active.records > 0 && !w.active.firstRecordAt.IsZero() && time.Since(w.active.firstRecordAt) >= w.opts.Roll.MaxSegmentAge {
 		return true
 	}
 	return false
@@ -712,10 +776,18 @@ func (w *Writer) signalPublishLocked() {
 	}
 }
 
+func (w *Writer) signalAgeLocked() {
+	select {
+	case w.ageWake <- struct{}{}:
+	default:
+	}
+}
+
 func (w *Writer) signalAllLocked() {
 	w.signalStateLocked()
 	w.signalFinalizeLocked()
 	w.signalPublishLocked()
+	w.signalAgeLocked()
 }
 
 func segmentRefFromResult(result segwriter.Result, identity WriterIdentity) pmeta.SegmentRef {
@@ -864,6 +936,9 @@ func normalizeOptions(opts Options, snapshot Snapshot) (Options, error) {
 	if opts.Roll.MaxSegmentRawBytes == 0 {
 		opts.Roll.MaxSegmentRawBytes = DefaultMaxSegmentRawBytes
 	}
+	if opts.Roll.MaxSegmentAge < 0 {
+		return Options{}, fmt.Errorf("%w: negative max segment age %s", ErrInvalidOptions, opts.Roll.MaxSegmentAge)
+	}
 	if opts.Queue.MaxInflightSegments == 0 {
 		opts.Queue.MaxInflightSegments = DefaultMaxInflightSegments
 	}
@@ -911,6 +986,15 @@ func satMul(a, b uint64) uint64 {
 		return math.MaxUint64
 	}
 	return a * b
+}
+
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
 }
 
 func isZeroSegmentOptions(opts segwriter.Options) bool {
