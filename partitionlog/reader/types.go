@@ -20,6 +20,7 @@ type Options struct {
 	SegmentOptions     segreader.Options
 	SegmentCache       *SegmentReaderCache
 	Refresh            RefreshPolicy
+	Observer           Observer
 }
 
 type Reader struct {
@@ -35,6 +36,36 @@ type Record struct {
 	TimestampMS int64
 	Headers     []segformat.Header
 	Value       []byte
+}
+
+type MetricName string
+
+const (
+	MetricHead           MetricName = "reader.head"
+	MetricRead           MetricName = "reader.read"
+	MetricFetch          MetricName = "reader.fetch"
+	MetricTimestampRead  MetricName = "reader.timestamp_read"
+	MetricTailNext       MetricName = "reader.tail_next"
+	MetricCatalogRefresh MetricName = "reader.catalog_refresh"
+	MetricSegmentRead    MetricName = "reader.segment_read"
+)
+
+type MetricEvent struct {
+	Name      MetricName
+	Partition uint32
+
+	StartLSN uint64
+	NextLSN  uint64
+	Limit    int
+	Records  int
+
+	SegmentURI string
+	Duration   time.Duration
+	Err        error
+}
+
+type Observer interface {
+	Observe(MetricEvent)
 }
 
 func (r Record) Clone() Record {

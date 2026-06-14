@@ -65,6 +65,8 @@ type activeSegment struct {
 type detachedSegment struct {
 	seq      uint64
 	baseLSN  uint64
+	records  uint32
+	rawBytes uint64
 	estBytes uint64
 	writer   *segwriter.Writer
 }
@@ -361,19 +363,48 @@ func (w *Writer) finalizeLoop() {
 		w.detached = w.detached[1:]
 		w.mu.Unlock()
 
+		start := time.Now()
 		result, err := item.writer.Close(w.workerCtx)
 		if err != nil {
 			if w.workerCtx.Err() != nil {
 				return
 			}
+			w.observe(MetricEvent{
+				Name:      MetricSegmentFinalize,
+				Partition: w.partition,
+				StartLSN:  item.baseLSN,
+				Records:   int(item.records),
+				Bytes:     item.rawBytes,
+				Duration:  time.Since(start),
+				Err:       err,
+			})
 			w.noteAsyncErr(wrapSegmentWrite(err))
 			return
 		}
 		segment := segmentRefFromResult(result, w.identity)
 		if err := segment.Validate(); err != nil {
+			w.observe(MetricEvent{
+				Name:      MetricSegmentFinalize,
+				Partition: w.partition,
+				StartLSN:  item.baseLSN,
+				Records:   int(item.records),
+				Bytes:     result.Object.SizeBytes,
+				Duration:  time.Since(start),
+				Err:       err,
+			})
 			w.noteAsyncErr(fmt.Errorf("%w: %w", ErrSegmentWriteFailed, err))
 			return
 		}
+		w.observe(MetricEvent{
+			Name:       MetricSegmentFinalize,
+			Partition:  w.partition,
+			StartLSN:   segment.BaseLSN,
+			NextLSN:    segment.NextLSN(),
+			Records:    int(segment.RecordCount),
+			Bytes:      result.Object.SizeBytes,
+			SegmentURI: segment.URI,
+			Duration:   time.Since(start),
+		})
 
 		w.mu.Lock()
 		switch {
@@ -426,18 +457,51 @@ func (w *Writer) publishLoop() {
 		current := w.committed
 		w.mu.Unlock()
 
+		start := time.Now()
 		next, err := w.opts.Session.PublishSegment(w.workerCtx, PublishRequest{
 			ExpectedNextLSN: item.expectedNextLSN,
 			Segment:         item.segment,
 		})
 		if err != nil {
+			w.observe(MetricEvent{
+				Name:       MetricSegmentPublish,
+				Partition:  w.partition,
+				StartLSN:   item.segment.BaseLSN,
+				NextLSN:    item.segment.NextLSN(),
+				Records:    int(item.segment.RecordCount),
+				Bytes:      item.sizeBytes,
+				SegmentURI: item.segment.URI,
+				Duration:   time.Since(start),
+				Err:        err,
+			})
 			w.noteAsyncErr(normalizePublishErr(err))
 			return
 		}
 		if err := validatePublishedSnapshot(current, next, item.segment); err != nil {
+			w.observe(MetricEvent{
+				Name:       MetricSegmentPublish,
+				Partition:  w.partition,
+				StartLSN:   item.segment.BaseLSN,
+				NextLSN:    item.segment.NextLSN(),
+				Records:    int(item.segment.RecordCount),
+				Bytes:      item.sizeBytes,
+				SegmentURI: item.segment.URI,
+				Duration:   time.Since(start),
+				Err:        err,
+			})
 			w.noteAsyncErr(err)
 			return
 		}
+		w.observe(MetricEvent{
+			Name:       MetricSegmentPublish,
+			Partition:  w.partition,
+			StartLSN:   item.segment.BaseLSN,
+			NextLSN:    item.segment.NextLSN(),
+			Records:    int(item.segment.RecordCount),
+			Bytes:      item.sizeBytes,
+			SegmentURI: item.segment.URI,
+			Duration:   time.Since(start),
+		})
 
 		w.mu.Lock()
 		if len(w.ready) > 0 && w.ready[0].seq == item.seq {
@@ -524,6 +588,8 @@ func (w *Writer) cutLocked(ctx context.Context) error {
 	w.detached = append(w.detached, detachedSegment{
 		seq:      w.nextCutSeq,
 		baseLSN:  old.baseLSN,
+		records:  old.records,
+		rawBytes: old.rawBytes,
 		estBytes: estBytes,
 		writer:   old.writer,
 	})
@@ -554,6 +620,8 @@ func (w *Writer) detachActiveLocked(ctx context.Context) error {
 	w.detached = append(w.detached, detachedSegment{
 		seq:      w.nextCutSeq,
 		baseLSN:  old.baseLSN,
+		records:  old.records,
+		rawBytes: old.rawBytes,
 		estBytes: estBytes,
 		writer:   old.writer,
 	})
@@ -753,6 +821,13 @@ func (w *Writer) noteAsyncErr(err error) {
 	w.mu.Unlock()
 
 	w.abortSegmentsBestEffort(active, detached)
+}
+
+func (w *Writer) observe(event MetricEvent) {
+	if w.opts.Observer == nil {
+		return
+	}
+	w.opts.Observer.Observe(event)
 }
 
 func (w *Writer) signalStateLocked() {

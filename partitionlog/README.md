@@ -207,6 +207,31 @@ OpenSegmentReaders
 Number of parsed/open segment readers to keep in memory. This avoids repeatedly
 opening hot segments and parsing their trailer/index metadata.
 
+## Metrics
+
+Attach a metrics sink at `Open`. The sink receives public API events and
+background segment events. It must be safe for concurrent use.
+
+```go
+type metricsSink struct{}
+
+func (metricsSink) Observe(m partitionlog.Metric) {
+    switch m.Name {
+    case partitionlog.MetricWriterAppend:
+        // record append latency, bytes, errors
+    case partitionlog.MetricWriterSegmentPublish:
+        // record catalog publish latency
+    case partitionlog.MetricReaderRead:
+        // record read latency and batch size
+    }
+}
+
+log, err := partitionlog.Open(partitionlog.Options{
+    Store:   store,
+    Metrics: metricsSink{},
+})
+```
+
 ## Visibility
 
 Readers only see committed segments published through the catalog. An `Append`

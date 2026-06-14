@@ -62,23 +62,48 @@ type PartitionReader struct {
 
 // Head returns the cached head if available, otherwise it loads the partition
 // head once.
-func (p *PartitionReader) Head(ctx context.Context) (pmeta.PartitionHead, error) {
-	return p.reader.refresh.head(ctx, p.partition)
+func (p *PartitionReader) Head(ctx context.Context) (head pmeta.PartitionHead, err error) {
+	start := time.Now()
+	defer func() {
+		p.reader.observe(MetricEvent{
+			Name:      MetricHead,
+			Partition: p.partition,
+			NextLSN:   head.NextLSN,
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
+	head, err = p.reader.refresh.head(ctx, p.partition)
+	return head, err
 }
 
 // Read returns a bounded non-blocking batch from committed data. It may refresh
 // the catalog according to req.Freshness, but it never starts background
 // polling and it never waits for future data.
-func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (ReadResult, error) {
+func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (result ReadResult, err error) {
+	start := time.Now()
+	defer func() {
+		p.reader.observe(MetricEvent{
+			Name:      MetricRead,
+			Partition: p.partition,
+			StartLSN:  req.StartLSN,
+			NextLSN:   result.NextLSN,
+			Limit:     req.Limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
 	head, err := p.reader.refresh.headForRead(ctx, p.partition, req.StartLSN, req.Freshness)
 	if err != nil {
 		return ReadResult{}, err
 	}
-	return p.reader.consumeWithHead(ctx, head, ConsumeRequest{
+	result, err = p.reader.consumeWithHead(ctx, head, ConsumeRequest{
 		Partition: p.partition,
 		StartLSN:  req.StartLSN,
 		Limit:     req.Limit,
 	})
+	return result, err
 }
 
 // Cursor returns a passive replay cursor over this partition.
@@ -245,7 +270,21 @@ type Tailer struct {
 // Next returns available records immediately. If the tailer is at the
 // committed tail, it waits until the Watch observes the partition head advance
 // or ctx is cancelled.
-func (t *Tailer) Next(ctx context.Context) (ReadResult, error) {
+func (t *Tailer) Next(ctx context.Context) (result ReadResult, err error) {
+	start := time.Now()
+	startLSN := t.nextLSN
+	defer func() {
+		t.watch.reader.observe(MetricEvent{
+			Name:      MetricTailNext,
+			Partition: t.partition,
+			StartLSN:  startLSN,
+			NextLSN:   result.NextLSN,
+			Limit:     t.limit,
+			Records:   len(result.Records),
+			Duration:  time.Since(start),
+			Err:       err,
+		})
+	}()
 	if t.closed {
 		return ReadResult{}, fmt.Errorf("%w: tailer closed", ErrInvalidRequest)
 	}
@@ -301,9 +340,10 @@ func (w *Watch) waitForAdvance(ctx context.Context, partition uint32, generation
 }
 
 type refreshCoordinator struct {
-	catalog catalog.Reader
-	policy  RefreshPolicy
-	group   singleflight.Group
+	catalog  catalog.Reader
+	policy   RefreshPolicy
+	observer Observer
+	group    singleflight.Group
 
 	mu         sync.Mutex
 	partitions map[uint32]*partitionState
@@ -324,10 +364,11 @@ type headSnapshot struct {
 	generation uint64
 }
 
-func newRefreshCoordinator(cat catalog.Reader, policy RefreshPolicy) *refreshCoordinator {
+func newRefreshCoordinator(cat catalog.Reader, policy RefreshPolicy, observer Observer) *refreshCoordinator {
 	return &refreshCoordinator{
 		catalog:    cat,
 		policy:     normalizeRefreshPolicy(policy, RefreshPolicy{}),
+		observer:   observer,
 		partitions: make(map[uint32]*partitionState),
 		watched:    make(map[uint32]int),
 	}
@@ -389,11 +430,25 @@ func (c *refreshCoordinator) headForRead(ctx context.Context, partition uint32, 
 
 func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
 	v, err, _ := c.group.Do(fmt.Sprintf("%d", partition), func() (any, error) {
+		start := time.Now()
+		var head pmeta.PartitionHead
+		var refreshErr error
+		defer func() {
+			c.observe(MetricEvent{
+				Name:      MetricCatalogRefresh,
+				Partition: partition,
+				NextLSN:   head.NextLSN,
+				Duration:  time.Since(start),
+				Err:       refreshErr,
+			})
+		}()
 		if err := ctx.Err(); err != nil {
+			refreshErr = err
 			return headSnapshot{}, err
 		}
 		head, err := c.catalog.LoadPartition(ctx, partition)
 		if err != nil {
+			refreshErr = err
 			return headSnapshot{}, err
 		}
 		generation := c.updateHead(partition, head)
@@ -404,6 +459,13 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 	}
 	snapshot := v.(headSnapshot)
 	return snapshot.head, nil
+}
+
+func (c *refreshCoordinator) observe(event MetricEvent) {
+	if c.observer == nil {
+		return
+	}
+	c.observer.Observe(event)
 }
 
 func (c *refreshCoordinator) watchPartition(partition uint32) {
