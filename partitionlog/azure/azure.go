@@ -2,6 +2,7 @@
 package azure
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -24,6 +25,9 @@ type Options struct {
 	// <prefix>/catalog and segment objects default to <prefix>/segments.
 	Prefix string
 
+	// StreamID scopes catalog metadata and segment object keys to one stream.
+	StreamID string
+
 	// CatalogPrefix overrides the catalog metadata prefix.
 	CatalogPrefix string
 
@@ -45,9 +49,14 @@ type Store struct {
 // New builds a complete Azure-backed partitionlog store.
 func New(opts Options) (*Store, error) {
 	root := rootPrefix(opts.Prefix)
+	streamID, err := normalizeStreamID(opts.StreamID)
+	if err != nil {
+		return nil, err
+	}
 
 	cat, err := azurecatalog.New(opts.Container, azurecatalog.Options{
-		Prefix: catalogPrefix(root, opts.CatalogPrefix),
+		Prefix:   catalogPrefix(root, opts.CatalogPrefix),
+		StreamID: streamID,
 	})
 	if err != nil {
 		return nil, err
@@ -71,6 +80,14 @@ func New(opts Options) (*Store, error) {
 	}
 
 	return &Store{catalog: cat, sink: sinkFactory, source: source}, nil
+}
+
+func normalizeStreamID(streamID string) (string, error) {
+	streamID = strings.Trim(streamID, "/")
+	if streamID == "" {
+		return "", fmt.Errorf("partitionlog/azure: empty stream_id")
+	}
+	return streamID, nil
 }
 
 func (s *Store) WriterManager() catalog.WriterManager {

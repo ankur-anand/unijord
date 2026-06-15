@@ -35,9 +35,10 @@ func publicAPIStoreCases() []publicAPIStoreCase {
 				t.Helper()
 				const bucket = "segments"
 				store, err := pls3.New(pls3.Options{
-					Client: newFakeS3Client(t, bucket),
-					Bucket: bucket,
-					Prefix: prefix,
+					Client:   newFakeS3Client(t, bucket),
+					Bucket:   bucket,
+					Prefix:   prefix,
+					StreamID: "hosts/test/events",
 				})
 				if err != nil {
 					t.Fatalf("s3.New() error = %v", err)
@@ -51,9 +52,10 @@ func publicAPIStoreCases() []publicAPIStoreCase {
 				t.Helper()
 				const bucket = "segments"
 				store, err := plgcs.New(plgcs.Options{
-					Client: newFakeGCSClient(t, bucket),
-					Bucket: bucket,
-					Prefix: prefix,
+					Client:   newFakeGCSClient(t, bucket),
+					Bucket:   bucket,
+					Prefix:   prefix,
+					StreamID: "hosts/test/events",
 				})
 				if err != nil {
 					t.Fatalf("gcs.New() error = %v", err)
@@ -69,6 +71,7 @@ func publicAPIStoreCases() []publicAPIStoreCase {
 				store, err := plazure.New(plazure.Options{
 					Container: newFakeAzureContainerClient(t, server.URL, "container"),
 					Prefix:    prefix,
+					StreamID:  "hosts/test/events",
 				})
 				if err != nil {
 					t.Fatalf("azure.New() error = %v", err)

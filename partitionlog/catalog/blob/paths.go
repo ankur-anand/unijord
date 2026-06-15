@@ -3,6 +3,8 @@ package blob
 import (
 	"fmt"
 	"strings"
+
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 )
 
 const DefaultPrefix = "catalog"
@@ -11,32 +13,35 @@ const DefaultPrefix = "catalog"
 Our Catalog History is like book:
 
 catalog/
-    p00000001/
-      head.json
+    <bucket>/
+      streams/
+        hosts/host-a/events/
+          p00000001/
+        head.json
 
-      pages/
-        l00/
-          leaf-00000000000000000000-00000000000000000299-g01-A.json
-          leaf-00000000000000000300-00000000000000000599-g02-B.json
-          leaf-00000000000000000600-00000000000000000899-g03-C.json
+        pages/
+          l00/
+            leaf-00000000000000000000-00000000000000000299-g01-A.json
+            leaf-00000000000000000300-00000000000000000599-g02-B.json
+            leaf-00000000000000000600-00000000000000000899-g03-C.json
 
-          leaf-00000000000000000900-00000000000000001199-g04-D.json
-          leaf-00000000000000001200-00000000000000001499-g05-E.json
-          leaf-00000000000000001500-00000000000000001799-g06-F.json
+            leaf-00000000000000000900-00000000000000001199-g04-D.json
+            leaf-00000000000000001200-00000000000000001499-g05-E.json
+            leaf-00000000000000001500-00000000000000001799-g06-F.json
 
-          leaf-00000000000000001800-00000000000000002099-g07-G.json
-          leaf-00000000000000002100-00000000000000002399-g08-H.json
-          leaf-00000000000000002400-00000000000000002699-g09-I.json
+            leaf-00000000000000001800-00000000000000002099-g07-G.json
+            leaf-00000000000000002100-00000000000000002399-g08-H.json
+            leaf-00000000000000002400-00000000000000002699-g09-I.json
 
-          leaf-00000000000000002700-00000000000000002999-g10-J.json
+            leaf-00000000000000002700-00000000000000002999-g10-J.json
 
-        l01/
-          index-l01-00000000000000000000-00000000000000000899-g03-X.json
-          index-l01-00000000000000000900-00000000000000001799-g06-Y.json
-          index-l01-00000000000000001800-00000000000000002699-g09-Z.json
+          l01/
+            index-l01-00000000000000000000-00000000000000000899-g03-X.json
+            index-l01-00000000000000000900-00000000000000001799-g06-Y.json
+            index-l01-00000000000000001800-00000000000000002699-g09-Z.json
 
-        l02/
-          index-l02-00000000000000000000-00000000000000002699-g09-R.json
+          l02/
+            index-l02-00000000000000000000-00000000000000002699-g09-R.json
 
 Leaf Page: is where the real segment history lives. It Contains actual SegmentRf entries:
 leaf page 100:
@@ -107,7 +112,7 @@ LeafPagePath:
 - A leaf page is level l00
 - Leaf pages contain actual SegmentRef entries
 
-catalog/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc123.jso
+catalog/<bucket>/streams/hosts/host-a/events/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc123.json
 seqLo      = 100
 seqHi      = 199
 generation = 18
@@ -118,7 +123,7 @@ Builds the object key for an index page
 Index pages start at l01
 They do not store SegmentRef directly
 They store pageRefs to lower-level pages
-catalog/p00000007/pages/l01/index-l01-00000000000000000100-00000000000000000999-00000000000000000022-def456.json
+catalog/<bucket>/streams/hosts/host-a/events/p00000007/pages/l01/index-l01-00000000000000000100-00000000000000000999-00000000000000000022-def456.json
 
 - l01: index level 1
   - index-l01: index page at level 1
@@ -133,26 +138,35 @@ l01 index -> stores refs to l00 leaves
 l02 index -> stores refs to l01 indexes
 */
 
-func HeadPath(prefix string, partition uint32) string {
-	return fmt.Sprintf("%s/p%08d/head.json", normalizePrefix(prefix), partition)
+func HeadPath(prefix string, streamID string, partition uint32) string {
+	return fmt.Sprintf("%s/head.json", partitionPrefix(prefix, streamID, partition))
 }
 
-func PagePrefix(prefix string, partition uint32) string {
-	return fmt.Sprintf("%s/p%08d/pages/", normalizePrefix(prefix), partition)
+func PagePrefix(prefix string, streamID string, partition uint32) string {
+	return fmt.Sprintf("%s/pages/", partitionPrefix(prefix, streamID, partition))
 }
 
-func LeafPagePath(prefix string, partition uint32, seqLo, seqHi, generation uint64, pageID string) string {
+func LeafPagePath(prefix string, streamID string, partition uint32, seqLo, seqHi, generation uint64, pageID string) string {
 	return fmt.Sprintf(
-		"%s/p%08d/pages/l00/leaf-%020d-%020d-%020d-%s.json",
-		normalizePrefix(prefix), partition, seqLo, seqHi, generation, pageID,
+		"%s/pages/l00/leaf-%020d-%020d-%020d-%s.json",
+		partitionPrefix(prefix, streamID, partition), seqLo, seqHi, generation, pageID,
 	)
 }
 
-func IndexPagePath(prefix string, partition uint32, level uint8, seqLo, seqHi, generation uint64, pageID string) string {
+func IndexPagePath(prefix string, streamID string, partition uint32, level uint8, seqLo, seqHi, generation uint64, pageID string) string {
 	return fmt.Sprintf(
-		"%s/p%08d/pages/l%02d/index-l%02d-%020d-%020d-%020d-%s.json",
-		normalizePrefix(prefix), partition, level, level, seqLo, seqHi, generation, pageID,
+		"%s/pages/l%02d/index-l%02d-%020d-%020d-%020d-%s.json",
+		partitionPrefix(prefix, streamID, partition), level, level, seqLo, seqHi, generation, pageID,
 	)
+}
+
+func partitionPrefix(prefix string, streamID string, partition uint32) string {
+	streamID = normalizeStreamID(streamID)
+	bucket := keylayout.Bucket(streamID, partition)
+	if streamID == "" {
+		return fmt.Sprintf("%s/%s/p%08d", normalizePrefix(prefix), bucket, partition)
+	}
+	return fmt.Sprintf("%s/%s/streams/%s/p%08d", normalizePrefix(prefix), bucket, streamID, partition)
 }
 
 func normalizePrefix(prefix string) string {
@@ -161,4 +175,8 @@ func normalizePrefix(prefix string) string {
 		return DefaultPrefix
 	}
 	return prefix
+}
+
+func normalizeStreamID(streamID string) string {
+	return strings.Trim(streamID, "/")
 }

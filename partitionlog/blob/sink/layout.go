@@ -3,9 +3,9 @@ package sink
 import (
 	"encoding/hex"
 	"fmt"
-	"path"
 	"strings"
 
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
 )
 
@@ -28,21 +28,31 @@ func (l Layout) Prefix() string {
 }
 
 func (l Layout) SegmentKey(info plwriter.SegmentInfo) string {
-	return path.Join(
+	streamID := normalizeStreamID(info.StreamID)
+	parts := []string{
 		l.root(),
 		"segments",
+		keylayout.Bucket(streamID, info.Partition),
+	}
+	parts = appendStreamParts(parts, streamID)
+	parts = append(parts,
 		fmt.Sprintf("p%08d", info.Partition),
-		fmt.Sprintf("seg-%020d-e%020d-%s%s", info.BaseLSN, info.WriterEpoch, hex.EncodeToString(info.SegmentUUID[:]), segmentFileSuffix),
-	)
+		fmt.Sprintf("seg-%020d-e%020d-%s%s", info.BaseLSN, info.WriterEpoch, hex.EncodeToString(info.SegmentUUID[:]), segmentFileSuffix))
+	return strings.Join(parts, "/")
 }
 
 func (l Layout) StagingPrefix(info plwriter.SegmentInfo) string {
-	return path.Join(
+	streamID := normalizeStreamID(info.StreamID)
+	parts := []string{
 		l.root(),
 		"staging",
+		keylayout.Bucket(streamID, info.Partition),
+	}
+	parts = appendStreamParts(parts, streamID)
+	parts = append(parts,
 		fmt.Sprintf("p%08d", info.Partition),
-		fmt.Sprintf("seg-%020d-e%020d-%s", info.BaseLSN, info.WriterEpoch, hex.EncodeToString(info.SegmentUUID[:])),
-	)
+		fmt.Sprintf("seg-%020d-e%020d-%s", info.BaseLSN, info.WriterEpoch, hex.EncodeToString(info.SegmentUUID[:])))
+	return strings.Join(parts, "/")
 }
 
 func (l Layout) root() string {
@@ -50,4 +60,15 @@ func (l Layout) root() string {
 		return DefaultPrefix
 	}
 	return l.prefix
+}
+
+func appendStreamParts(parts []string, streamID string) []string {
+	if streamID == "" {
+		return parts
+	}
+	return append(parts, "streams", streamID)
+}
+
+func normalizeStreamID(streamID string) string {
+	return strings.Trim(streamID, "/")
 }

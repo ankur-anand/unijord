@@ -40,6 +40,7 @@ type writerSession struct {
 
 type headFile struct {
 	Version        int                `json:"version"`
+	StreamID       string             `json:"stream_id,omitempty"`
 	Partition      uint32             `json:"partition"`
 	NextLSN        uint64             `json:"next_lsn"`
 	OldestLSN      uint64             `json:"oldest_lsn"`
@@ -67,6 +68,7 @@ type pageRef struct {
 type leafPage struct {
 	Version    int                `json:"version"`
 	Type       string             `json:"type"`
+	StreamID   string             `json:"stream_id,omitempty"`
 	Partition  uint32             `json:"partition"`
 	SeqLo      uint64             `json:"seq_lo"`
 	SeqHi      uint64             `json:"seq_hi"`
@@ -79,6 +81,7 @@ type indexPage struct {
 	Version    int       `json:"version"`
 	Type       string    `json:"type"`
 	Level      uint8     `json:"level"`
+	StreamID   string    `json:"stream_id,omitempty"`
 	Partition  uint32    `json:"partition"`
 	SeqLo      uint64    `json:"seq_lo"`
 	SeqHi      uint64    `json:"seq_hi"`

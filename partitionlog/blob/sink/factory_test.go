@@ -206,6 +206,7 @@ func TestLayoutUsesNormalizedPrefix(t *testing.T) {
 	t.Parallel()
 
 	info := plwriter.SegmentInfo{
+		StreamID:    "hosts/host-a/events",
 		Partition:   7,
 		BaseLSN:     100,
 		WriterEpoch: 3,
@@ -215,10 +216,10 @@ func TestLayoutUsesNormalizedPrefix(t *testing.T) {
 	if layout.Prefix() != "root" {
 		t.Fatalf("Prefix() = %q, want %q", layout.Prefix(), "root")
 	}
-	if got := layout.SegmentKey(info); got != "root/segments/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000.plseg" {
+	if got := layout.SegmentKey(info); got != "root/segments/b78/streams/hosts/host-a/events/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000.plseg" {
 		t.Fatalf("SegmentKey() = %q", got)
 	}
-	if got := layout.StagingPrefix(info); got != "root/staging/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000" {
+	if got := layout.StagingPrefix(info); got != "root/staging/b78/streams/hosts/host-a/events/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000" {
 		t.Fatalf("StagingPrefix() = %q", got)
 	}
 }

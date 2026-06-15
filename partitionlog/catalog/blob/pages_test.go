@@ -30,7 +30,7 @@ func TestBuildNextPageSetBuffersActiveSegmentInHead(t *testing.T) {
 	if len(next.ActiveSegments) != 1 || next.ActiveSegments[0] != segment {
 		t.Fatalf("ActiveSegments = %+v, want segment", next.ActiveSegments)
 	}
-	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix("catalog", 1)})
+	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix("catalog", "", 1)})
 	if err != nil {
 		t.Fatalf("List(pages) error = %v", err)
 	}
@@ -220,7 +220,7 @@ func TestWriteLeaf(t *testing.T) {
 	if ref.Level != 0 || ref.SeqLo != 100 || ref.SeqHi != 299 || ref.Generation != 2 || ref.PageID == "" || ref.Count != 2 {
 		t.Fatalf("ref = %+v", ref)
 	}
-	if ref.Path != LeafPagePath("test-catalog", 1, 100, 299, 2, ref.PageID) {
+	if ref.Path != LeafPagePath("test-catalog", "", 1, 100, 299, 2, ref.PageID) {
 		t.Fatalf("ref path = %q", ref.Path)
 	}
 	if stored.PageID != ref.PageID || stored.SeqLo != 100 || stored.SeqHi != 299 {
@@ -308,7 +308,7 @@ func TestWriteIndex(t *testing.T) {
 	if ref.Level != 1 || ref.SeqLo != 100 || ref.SeqHi != 299 || ref.Generation != 3 || ref.PageID == "" || ref.Count != 2 {
 		t.Fatalf("ref = %+v", ref)
 	}
-	if ref.Path != IndexPagePath("test-catalog", 1, 1, 100, 299, 3, ref.PageID) {
+	if ref.Path != IndexPagePath("test-catalog", "", 1, 1, 100, 299, 3, ref.PageID) {
 		t.Fatalf("ref path = %q", ref.Path)
 	}
 

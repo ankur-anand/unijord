@@ -12,9 +12,10 @@ const (
 	MaxSegmentPageLimit     = 1024
 )
 
-// PartitionHead is the bounded hot metadata for one partition. Full history is
-// read through paged segment refs, not embedded here.
+// PartitionHead is the bounded hot metadata for one stream partition. Full
+// history is read through paged segment refs, not embedded here.
 type PartitionHead struct {
+	StreamID       string
 	Partition      uint32
 	NextLSN        uint64
 	OldestLSN      uint64
@@ -34,6 +35,7 @@ func (h PartitionHead) Last() (SegmentRef, bool) {
 // SegmentRef is the durable metadata for one committed segment object.
 type SegmentRef struct {
 	URI              string
+	StreamID         string
 	Partition        uint32
 	WriterEpoch      uint64
 	SegmentUUID      [16]byte

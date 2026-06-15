@@ -39,7 +39,7 @@ func TestBlobCatalogWriterBuffersSegmentsInHeadBeforeLeafSeal(t *testing.T) {
 	if head.LeafFrontier != nil || len(head.IndexFrontier) != 0 {
 		t.Fatalf("leaf_frontier=%+v index_frontier=%+v, want no sealed pages", head.LeafFrontier, head.IndexFrontier)
 	}
-	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix(cat.opts.Prefix, 1)})
+	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix(cat.opts.Prefix, cat.opts.StreamID, 1)})
 	if err != nil {
 		t.Fatalf("List(pages) error = %v", err)
 	}
