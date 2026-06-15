@@ -106,6 +106,7 @@ type Observer interface {
 }
 
 type SegmentInfo struct {
+	StreamID      string
 	Partition     uint32
 	BaseLSN       uint64
 	WriterEpoch   uint64

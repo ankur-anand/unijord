@@ -11,19 +11,22 @@ import (
 func TestPathsAreSelfDescribing(t *testing.T) {
 	t.Parallel()
 
-	if got := HeadPath("", 7); got != "catalog/p00000007/head.json" {
+	if got := HeadPath("", "", 7); got != "catalog/661/p00000007/head.json" {
 		t.Fatalf("HeadPath() = %q", got)
 	}
-	if got := HeadPath("/prod/catalog/", 7); got != "prod/catalog/p00000007/head.json" {
+	if got := HeadPath("/prod/catalog/", "", 7); got != "prod/catalog/661/p00000007/head.json" {
 		t.Fatalf("HeadPath(custom) = %q", got)
 	}
-	if got := PagePrefix("", 7); got != "catalog/p00000007/pages/" {
+	if got := HeadPath("/prod/catalog/", "hosts/host-a/events", 7); got != "prod/catalog/b78/streams/hosts/host-a/events/p00000007/head.json" {
+		t.Fatalf("HeadPath(stream) = %q", got)
+	}
+	if got := PagePrefix("", "", 7); got != "catalog/661/p00000007/pages/" {
 		t.Fatalf("PagePrefix() = %q", got)
 	}
-	if got := LeafPagePath("", 7, 100, 199, 18, "abc"); got != "catalog/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc.json" {
+	if got := LeafPagePath("", "", 7, 100, 199, 18, "abc"); got != "catalog/661/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc.json" {
 		t.Fatalf("LeafPagePath() = %q", got)
 	}
-	if got := IndexPagePath("", 7, 2, 100, 999, 22, "def"); got != "catalog/p00000007/pages/l02/index-l02-00000000000000000100-00000000000000000999-00000000000000000022-def.json" {
+	if got := IndexPagePath("", "", 7, 2, 100, 999, 22, "def"); got != "catalog/661/p00000007/pages/l02/index-l02-00000000000000000100-00000000000000000999-00000000000000000022-def.json" {
 		t.Fatalf("IndexPagePath() = %q", got)
 	}
 }

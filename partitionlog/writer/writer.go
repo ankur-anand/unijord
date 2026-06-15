@@ -21,6 +21,7 @@ type Writer struct {
 	mu   sync.Mutex
 	opts Options
 
+	streamID  string
 	partition uint32
 	identity  WriterIdentity
 
@@ -108,6 +109,7 @@ func New(opts Options) (*Writer, error) {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	w := &Writer{
 		opts:              normalized,
+		streamID:          snapshot.Head.StreamID,
 		partition:         snapshot.Head.Partition,
 		identity:          snapshot.Identity,
 		committed:         snapshot,
@@ -381,7 +383,7 @@ func (w *Writer) finalizeLoop() {
 			w.noteAsyncErr(wrapSegmentWrite(err))
 			return
 		}
-		segment := segmentRefFromResult(result, w.identity)
+		segment := segmentRefFromResult(result, w.streamID, w.identity)
 		if err := segment.Validate(); err != nil {
 			w.observe(MetricEvent{
 				Name:      MetricSegmentFinalize,
@@ -637,6 +639,7 @@ func (w *Writer) startSegmentLocked(ctx context.Context) error {
 	}
 	createdUnixMS := w.opts.Clock().UnixMilli()
 	info := SegmentInfo{
+		StreamID:      w.streamID,
 		Partition:     w.partition,
 		BaseLSN:       w.optimisticNextLSN,
 		WriterEpoch:   w.identity.Epoch,
@@ -865,10 +868,11 @@ func (w *Writer) signalAllLocked() {
 	w.signalAgeLocked()
 }
 
-func segmentRefFromResult(result segwriter.Result, identity WriterIdentity) pmeta.SegmentRef {
+func segmentRefFromResult(result segwriter.Result, streamID string, identity WriterIdentity) pmeta.SegmentRef {
 	m := result.Metadata
 	return pmeta.SegmentRef{
 		URI:              result.Object.URI,
+		StreamID:         streamID,
 		Partition:        m.Partition,
 		WriterEpoch:      identity.Epoch,
 		SegmentUUID:      m.SegmentUUID,
@@ -925,6 +929,9 @@ func validateHead(head pmeta.PartitionHead) error {
 	if err := head.LastSegment.Validate(); err != nil {
 		return fmt.Errorf("%w: last segment: %w", ErrInvalidSession, err)
 	}
+	if head.LastSegment.StreamID != head.StreamID {
+		return fmt.Errorf("%w: head stream_id=%q last segment stream_id=%q", ErrInvalidSession, head.StreamID, head.LastSegment.StreamID)
+	}
 	if head.LastSegment.Partition != head.Partition {
 		return fmt.Errorf("%w: head partition=%d last segment partition=%d", ErrInvalidSession, head.Partition, head.LastSegment.Partition)
 	}
@@ -940,6 +947,9 @@ func validatePublishedSnapshot(current Snapshot, next Snapshot, segment pmeta.Se
 	}
 	if next.Head.Partition != current.Head.Partition {
 		return fmt.Errorf("%w: partition=%d current_partition=%d", ErrInvalidPublishResult, next.Head.Partition, current.Head.Partition)
+	}
+	if next.Head.StreamID != current.Head.StreamID {
+		return fmt.Errorf("%w: stream_id=%q current_stream_id=%q", ErrInvalidPublishResult, next.Head.StreamID, current.Head.StreamID)
 	}
 	if next.Identity != current.Identity {
 		return fmt.Errorf("%w: identity changed from %+v to %+v", ErrInvalidPublishResult, current.Identity, next.Identity)

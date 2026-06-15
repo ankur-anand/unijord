@@ -30,7 +30,7 @@ func TestBuildNextPageSetBuffersActiveSegmentInHead(t *testing.T) {
 	if len(next.ActiveSegments) != 1 || next.ActiveSegments[0] != segment {
 		t.Fatalf("ActiveSegments = %+v, want segment", next.ActiveSegments)
 	}
-	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix("catalog", 1)})
+	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix("catalog", "", 1)})
 	if err != nil {
 		t.Fatalf("List(pages) error = %v", err)
 	}
@@ -64,7 +64,7 @@ func TestBuildNextPageSetSealsFullActiveSegmentsIntoLeafFrontier(t *testing.T) {
 	if len(next.ActiveSegments) != 0 {
 		t.Fatalf("ActiveSegments = %+v, want empty after seal", next.ActiveSegments)
 	}
-	leaf, err := cat.loadLeaf(context.Background(), *next.LeafFrontier)
+	leaf, err := cat.loadLeaf(context.Background(), *next.LeafFrontier, cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadLeaf(leaf frontier) error = %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuildNextPageSetCarriesOldLeafFrontierWhenSealingNewLeaf(t *testing.T) 
 	if len(next.IndexFrontier) != 1 || next.IndexFrontier[0].Level != 1 || next.IndexFrontier[0].SeqLo != 100 || next.IndexFrontier[0].SeqHi != 199 {
 		t.Fatalf("IndexFrontier = %+v, want l01 for old leaf frontier", next.IndexFrontier)
 	}
-	index, err := cat.loadIndex(context.Background(), next.IndexFrontier[0])
+	index, err := cat.loadIndex(context.Background(), next.IndexFrontier[0], cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadIndex(frontier[0]) error = %v", err)
 	}
@@ -132,7 +132,7 @@ func TestCarryPageRefCreatesIndex(t *testing.T) {
 	if len(frontier) != 1 || frontier[0].Level != 1 || frontier[0].SeqLo != 100 || frontier[0].SeqHi != 199 || frontier[0].Count != 1 {
 		t.Fatalf("frontier = %+v", frontier)
 	}
-	page, err := cat.loadIndex(context.Background(), frontier[0])
+	page, err := cat.loadIndex(context.Background(), frontier[0], cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadIndex(frontier[0]) error = %v", err)
 	}
@@ -161,7 +161,7 @@ func TestCarryPageRefAppendsToExistingIndex(t *testing.T) {
 	if len(frontier) != 1 || frontier[0].SeqLo != 100 || frontier[0].SeqHi != 299 || frontier[0].Count != 2 {
 		t.Fatalf("frontier = %+v", frontier)
 	}
-	page, err := cat.loadIndex(context.Background(), frontier[0])
+	page, err := cat.loadIndex(context.Background(), frontier[0], cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadIndex(frontier[0]) error = %v", err)
 	}
@@ -220,7 +220,7 @@ func TestWriteLeaf(t *testing.T) {
 	if ref.Level != 0 || ref.SeqLo != 100 || ref.SeqHi != 299 || ref.Generation != 2 || ref.PageID == "" || ref.Count != 2 {
 		t.Fatalf("ref = %+v", ref)
 	}
-	if ref.Path != LeafPagePath("test-catalog", 1, 100, 299, 2, ref.PageID) {
+	if ref.Path != LeafPagePath("test-catalog", "", 1, 100, 299, 2, ref.PageID) {
 		t.Fatalf("ref path = %q", ref.Path)
 	}
 	if stored.PageID != ref.PageID || stored.SeqLo != 100 || stored.SeqHi != 299 {
@@ -308,7 +308,7 @@ func TestWriteIndex(t *testing.T) {
 	if ref.Level != 1 || ref.SeqLo != 100 || ref.SeqHi != 299 || ref.Generation != 3 || ref.PageID == "" || ref.Count != 2 {
 		t.Fatalf("ref = %+v", ref)
 	}
-	if ref.Path != IndexPagePath("test-catalog", 1, 1, 100, 299, 3, ref.PageID) {
+	if ref.Path != IndexPagePath("test-catalog", "", 1, 1, 100, 299, 3, ref.PageID) {
 		t.Fatalf("ref path = %q", ref.Path)
 	}
 
@@ -384,7 +384,7 @@ func TestLoadLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeLeaf() error = %v", err)
 	}
-	got, err := cat.loadLeaf(context.Background(), *ref)
+	got, err := cat.loadLeaf(context.Background(), *ref, cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadLeaf() error = %v", err)
 	}
@@ -394,7 +394,7 @@ func TestLoadLeaf(t *testing.T) {
 
 	badRef := *ref
 	badRef.SeqHi = 200
-	if _, err := cat.loadLeaf(context.Background(), badRef); !errors.Is(err, ErrCorruptCatalog) {
+	if _, err := cat.loadLeaf(context.Background(), badRef, cat.opts.StreamID, 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("loadLeaf(bad ref) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }
@@ -415,7 +415,7 @@ func TestLoadIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeIndex() error = %v", err)
 	}
-	got, err := cat.loadIndex(context.Background(), *ref)
+	got, err := cat.loadIndex(context.Background(), *ref, cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadIndex() error = %v", err)
 	}
@@ -425,8 +425,65 @@ func TestLoadIndex(t *testing.T) {
 
 	badRef := *ref
 	badRef.PageID = "different"
-	if _, err := cat.loadIndex(context.Background(), badRef); !errors.Is(err, ErrCorruptCatalog) {
+	if _, err := cat.loadIndex(context.Background(), badRef, cat.opts.StreamID, 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("loadIndex(bad ref) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
+func TestLoadLeafRejectsWrongStream(t *testing.T) {
+	t.Parallel()
+
+	backend := NewMemoryBackend()
+	catA, err := New(backend, Options{Prefix: "test-catalog", StreamID: "stream-a"})
+	if err != nil {
+		t.Fatalf("New(stream-a) error = %v", err)
+	}
+	catB, err := New(backend, Options{Prefix: "test-catalog", StreamID: "stream-b"})
+	if err != nil {
+		t.Fatalf("New(stream-b) error = %v", err)
+	}
+
+	segment := testSegmentRef(1, 100, 199, 1)
+	segment.StreamID = catB.opts.StreamID
+	ref, _, err := catB.writeLeaf(context.Background(), leafPage{
+		Partition:  1,
+		Generation: 2,
+		Segments:   []pmeta.SegmentRef{segment},
+	})
+	if err != nil {
+		t.Fatalf("writeLeaf(stream-b) error = %v", err)
+	}
+
+	if _, err := catA.loadLeaf(context.Background(), *ref, catA.opts.StreamID, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("loadLeaf(wrong stream) error = %v, want %v", err, ErrCorruptCatalog)
+	}
+}
+
+func TestLoadIndexRejectsWrongStream(t *testing.T) {
+	t.Parallel()
+
+	backend := NewMemoryBackend()
+	catA, err := New(backend, Options{Prefix: "test-catalog", StreamID: "stream-a"})
+	if err != nil {
+		t.Fatalf("New(stream-a) error = %v", err)
+	}
+	catB, err := New(backend, Options{Prefix: "test-catalog", StreamID: "stream-b"})
+	if err != nil {
+		t.Fatalf("New(stream-b) error = %v", err)
+	}
+
+	ref, err := catB.writeIndex(context.Background(), indexPage{
+		Level:      1,
+		Partition:  1,
+		Generation: 3,
+		Refs:       []pageRef{testPageRef(0, 100, 199, 2, "a", 1)},
+	})
+	if err != nil {
+		t.Fatalf("writeIndex(stream-b) error = %v", err)
+	}
+
+	if _, err := catA.loadIndex(context.Background(), *ref, catA.opts.StreamID, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("loadIndex(wrong stream) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }
 
@@ -441,7 +498,7 @@ func TestLoadPageRejectsBadJSON(t *testing.T) {
 	if _, err := cat.backend.Put(context.Background(), ref.Path, []byte("{bad json")); err != nil {
 		t.Fatalf("Put(bad json) error = %v", err)
 	}
-	if _, err := cat.loadLeaf(context.Background(), ref); !errors.Is(err, ErrCorruptCatalog) {
+	if _, err := cat.loadLeaf(context.Background(), ref, cat.opts.StreamID, 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("loadLeaf(bad json) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }

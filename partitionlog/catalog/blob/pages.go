@@ -72,7 +72,7 @@ func (c *Catalog) carryPageRef(ctx context.Context, partition uint32, frontier [
 		return trimFrontier(frontier), nil
 	}
 
-	page, err := c.loadIndex(ctx, existing)
+	page, err := c.loadIndex(ctx, existing, c.opts.StreamID, partition)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +115,7 @@ func (c *Catalog) writeLeaf(ctx context.Context, page leafPage) (*pageRef, leafP
 	}
 	page.Version = pageVersion
 	page.Type = "leaf"
+	page.StreamID = c.opts.StreamID
 	page.SeqLo = page.Segments[0].BaseLSN
 	page.SeqHi = page.Segments[len(page.Segments)-1].LastLSN
 	if err := validateLeafPage(page); err != nil {
@@ -135,7 +136,7 @@ func (c *Catalog) writeLeaf(ctx context.Context, page leafPage) (*pageRef, leafP
 		SeqHi:      page.SeqHi,
 		Generation: page.Generation,
 		PageID:     page.PageID,
-		Path:       LeafPagePath(c.opts.Prefix, page.Partition, page.SeqLo, page.SeqHi, page.Generation, page.PageID),
+		Path:       LeafPagePath(c.opts.Prefix, c.opts.StreamID, page.Partition, page.SeqLo, page.SeqHi, page.Generation, page.PageID),
 		Count:      len(page.Segments),
 	}
 	if _, err := c.backend.Put(ctx, ref.Path, body); err != nil {
@@ -150,6 +151,7 @@ func (c *Catalog) writeIndex(ctx context.Context, page indexPage) (*pageRef, err
 	}
 	page.Version = pageVersion
 	page.Type = "index"
+	page.StreamID = c.opts.StreamID
 	page.SeqLo = page.Refs[0].SeqLo
 	page.SeqHi = page.Refs[len(page.Refs)-1].SeqHi
 	if err := validateIndexPage(page); err != nil {
@@ -171,7 +173,7 @@ func (c *Catalog) writeIndex(ctx context.Context, page indexPage) (*pageRef, err
 		SeqHi:      page.SeqHi,
 		Generation: page.Generation,
 		PageID:     page.PageID,
-		Path:       IndexPagePath(c.opts.Prefix, page.Partition, page.Level, page.SeqLo, page.SeqHi, page.Generation, page.PageID),
+		Path:       IndexPagePath(c.opts.Prefix, c.opts.StreamID, page.Partition, page.Level, page.SeqLo, page.SeqHi, page.Generation, page.PageID),
 		Count:      len(page.Refs),
 	}
 	if _, err := c.backend.Put(ctx, ref.Path, body); err != nil {
@@ -180,7 +182,7 @@ func (c *Catalog) writeIndex(ctx context.Context, page indexPage) (*pageRef, err
 	return &ref, nil
 }
 
-func (c *Catalog) loadLeaf(ctx context.Context, ref pageRef) (leafPage, error) {
+func (c *Catalog) loadLeaf(ctx context.Context, ref pageRef, streamID string, partition uint32) (leafPage, error) {
 	obj, err := c.backend.Get(ctx, ref.Path)
 	if err != nil {
 		return leafPage{}, err
@@ -192,6 +194,12 @@ func (c *Catalog) loadLeaf(ctx context.Context, ref pageRef) (leafPage, error) {
 	if err := validateLeafPage(page); err != nil {
 		return leafPage{}, err
 	}
+	if page.StreamID != streamID {
+		return leafPage{}, fmt.Errorf("%w: leaf stream_id=%q want=%q", ErrCorruptCatalog, page.StreamID, streamID)
+	}
+	if page.Partition != partition {
+		return leafPage{}, fmt.Errorf("%w: leaf partition=%d want=%d", ErrCorruptCatalog, page.Partition, partition)
+	}
 	if err := verifyLeafRef(page, ref); err != nil {
 		return leafPage{}, err
 	}
@@ -201,7 +209,7 @@ func (c *Catalog) loadLeaf(ctx context.Context, ref pageRef) (leafPage, error) {
 	return page, nil
 }
 
-func (c *Catalog) loadIndex(ctx context.Context, ref pageRef) (indexPage, error) {
+func (c *Catalog) loadIndex(ctx context.Context, ref pageRef, streamID string, partition uint32) (indexPage, error) {
 	obj, err := c.backend.Get(ctx, ref.Path)
 	if err != nil {
 		return indexPage{}, err
@@ -212,6 +220,12 @@ func (c *Catalog) loadIndex(ctx context.Context, ref pageRef) (indexPage, error)
 	}
 	if err := validateIndexPage(page); err != nil {
 		return indexPage{}, err
+	}
+	if page.StreamID != streamID {
+		return indexPage{}, fmt.Errorf("%w: index stream_id=%q want=%q", ErrCorruptCatalog, page.StreamID, streamID)
+	}
+	if page.Partition != partition {
+		return indexPage{}, fmt.Errorf("%w: index partition=%d want=%d", ErrCorruptCatalog, page.Partition, partition)
 	}
 	if err := verifyIndexRef(page, ref); err != nil {
 		return indexPage{}, err

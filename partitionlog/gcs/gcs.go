@@ -2,6 +2,7 @@
 package gcs
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	gcscatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob/gcs"
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 	"github.com/ankur-anand/unijord/partitionlog/reader"
 	"github.com/ankur-anand/unijord/partitionlog/writer"
 )
@@ -24,6 +26,9 @@ type Options struct {
 	// Prefix is the common object key root. Catalog metadata defaults to
 	// <prefix>/catalog and segment objects default to <prefix>/segments.
 	Prefix string
+
+	// StreamID scopes catalog metadata and segment object keys to one stream.
+	StreamID string
 
 	// CatalogPrefix overrides the catalog metadata prefix.
 	CatalogPrefix string
@@ -46,9 +51,14 @@ type Store struct {
 // New builds a complete GCS-backed partitionlog store.
 func New(opts Options) (*Store, error) {
 	root := rootPrefix(opts.Prefix)
+	streamID, err := normalizeStreamID(opts.StreamID)
+	if err != nil {
+		return nil, err
+	}
 
 	cat, err := gcscatalog.New(opts.Client, opts.Bucket, gcscatalog.Options{
-		Prefix: catalogPrefix(root, opts.CatalogPrefix),
+		Prefix:   catalogPrefix(root, opts.CatalogPrefix),
+		StreamID: streamID,
 	})
 	if err != nil {
 		return nil, err
@@ -72,6 +82,14 @@ func New(opts Options) (*Store, error) {
 	}
 
 	return &Store{catalog: cat, sink: sinkFactory, source: source}, nil
+}
+
+func normalizeStreamID(streamID string) (string, error) {
+	streamID = keylayout.NormalizeStreamID(streamID)
+	if streamID == "" {
+		return "", fmt.Errorf("partitionlog/gcs: empty stream_id")
+	}
+	return streamID, nil
 }
 
 func (s *Store) WriterManager() catalog.WriterManager {

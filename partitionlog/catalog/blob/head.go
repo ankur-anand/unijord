@@ -22,7 +22,7 @@ func (c *Catalog) OpenWriter(ctx context.Context, partition uint32, writerID [16
 		return nil, fmt.Errorf("%w: empty writer_id", csession.ErrInvalidRequest)
 	}
 
-	path := HeadPath(c.opts.Prefix, partition)
+	path := HeadPath(c.opts.Prefix, c.opts.StreamID, partition)
 	backoff := c.opts.WriterAcquireInitialBackoff
 	for attempt := 0; attempt < c.opts.WriterAcquireMaxAttempts; attempt++ {
 		head, token, err := c.loadHead(ctx, partition)
@@ -32,11 +32,12 @@ func (c *Catalog) OpenWriter(ctx context.Context, partition uint32, writerID [16
 
 		next := head
 		next.Version = pageVersion
+		next.StreamID = c.opts.StreamID
 		next.Partition = partition
 		next.WriterEpoch++
 		next.WriterID = writerID
 		next.Generation++
-		body, err := marshalHead(next, partition)
+		body, err := marshalHead(next, c.opts.StreamID, partition)
 		if err != nil {
 			return nil, err
 		}
@@ -133,11 +134,11 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 	next.ActiveSegments = pages.ActiveSegments
 	next.Generation = generation
 
-	body, err := marshalHead(next, head.Partition)
+	body, err := marshalHead(next, s.cat.opts.StreamID, head.Partition)
 	if err != nil {
 		return pmeta.PartitionHead{}, err
 	}
-	obj, swapped, err := s.cat.backend.CompareAndSwap(ctx, HeadPath(s.cat.opts.Prefix, head.Partition), s.token, body)
+	obj, swapped, err := s.cat.backend.CompareAndSwap(ctx, HeadPath(s.cat.opts.Prefix, s.cat.opts.StreamID, head.Partition), s.token, body)
 	if err != nil {
 		return pmeta.PartitionHead{}, err
 	}
@@ -147,7 +148,7 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 		return stateFromHead(next), nil
 	}
 
-	current, decodeErr := decodeHead(obj.Body, head.Partition)
+	current, decodeErr := decodeHead(obj.Body, s.cat.opts.StreamID, head.Partition)
 	if decodeErr != nil {
 		return pmeta.PartitionHead{}, decodeErr
 	}
@@ -163,33 +164,33 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 }
 
 func (c *Catalog) loadHead(ctx context.Context, partition uint32) (headFile, string, error) {
-	obj, err := c.backend.Get(ctx, HeadPath(c.opts.Prefix, partition))
+	obj, err := c.backend.Get(ctx, HeadPath(c.opts.Prefix, c.opts.StreamID, partition))
 	if errors.Is(err, ErrObjectNotFound) {
-		return headFile{Version: pageVersion, Partition: partition}, "", nil
+		return headFile{Version: pageVersion, StreamID: c.opts.StreamID, Partition: partition}, "", nil
 	}
 	if err != nil {
 		return headFile{}, "", err
 	}
-	head, err := decodeHead(obj.Body, partition)
+	head, err := decodeHead(obj.Body, c.opts.StreamID, partition)
 	if err != nil {
 		return headFile{}, "", err
 	}
 	return head, obj.Token, nil
 }
 
-func decodeHead(body []byte, partition uint32) (headFile, error) {
+func decodeHead(body []byte, streamID string, partition uint32) (headFile, error) {
 	var head headFile
 	if err := json.Unmarshal(body, &head); err != nil {
 		return headFile{}, fmt.Errorf("%w: decode head partition=%d: %v", ErrCorruptCatalog, partition, err)
 	}
-	if err := validateHeadFile(head, partition); err != nil {
+	if err := validateHeadFile(head, streamID, partition); err != nil {
 		return headFile{}, err
 	}
 	return head, nil
 }
 
-func marshalHead(head headFile, partition uint32) ([]byte, error) {
-	if err := validateHeadFile(head, partition); err != nil {
+func marshalHead(head headFile, streamID string, partition uint32) ([]byte, error) {
+	if err := validateHeadFile(head, streamID, partition); err != nil {
 		return nil, err
 	}
 	body, err := json.Marshal(head)
@@ -205,6 +206,9 @@ func validateAppend(head headFile, segment pmeta.SegmentRef) error {
 	}
 	if segment.Partition != head.Partition {
 		return fmt.Errorf("%w: head partition=%d segment partition=%d", csession.ErrInvalidRequest, head.Partition, segment.Partition)
+	}
+	if segment.StreamID != head.StreamID {
+		return fmt.Errorf("%w: head stream_id=%q segment stream_id=%q", csession.ErrInvalidRequest, head.StreamID, segment.StreamID)
 	}
 	if segment.WriterEpoch != head.WriterEpoch {
 		return fmt.Errorf("%w: head writer_epoch=%d segment writer_epoch=%d", csession.ErrStaleWriter, head.WriterEpoch, segment.WriterEpoch)
@@ -236,6 +240,7 @@ func idempotentHeadRetry(head headFile, segment pmeta.SegmentRef) (pmeta.Partiti
 
 func stateFromHead(head headFile) pmeta.PartitionHead {
 	return pmeta.PartitionHead{
+		StreamID:       head.StreamID,
 		Partition:      head.Partition,
 		NextLSN:        head.NextLSN,
 		OldestLSN:      head.OldestLSN,

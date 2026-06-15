@@ -14,6 +14,7 @@ import (
 // exists.
 type MemoryCatalog struct {
 	mu         sync.RWMutex
+	streamID   string
 	partitions map[uint32]*memoryPartition
 }
 
@@ -74,6 +75,7 @@ func (c *MemoryCatalog) acquireWriter(ctx context.Context, partition uint32, wri
 		c.partitions = make(map[uint32]*memoryPartition)
 	}
 	data := c.getOrCreateLocked(partition)
+	data.state.StreamID = c.streamID
 	data.state.WriterEpoch++
 	data.writerID = writerID
 	data.headVersion++
@@ -89,7 +91,7 @@ func (c *MemoryCatalog) LoadPartition(ctx context.Context, partition uint32) (pm
 
 	data, ok := c.partitions[partition]
 	if !ok {
-		return pmeta.PartitionHead{Partition: partition}, nil
+		return pmeta.PartitionHead{StreamID: c.streamID, Partition: partition}, nil
 	}
 	return data.state, nil
 }
@@ -98,7 +100,7 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	if err := ctx.Err(); err != nil {
 		return pmeta.PartitionHead{}, 0, err
 	}
-	if err := ValidateAppendSegment(partition, expectedNextLSN, writerEpoch, segment); err != nil {
+	if err := ValidateAppendSegment(c.streamID, partition, expectedNextLSN, writerEpoch, segment); err != nil {
 		return pmeta.PartitionHead{}, 0, err
 	}
 
@@ -211,7 +213,7 @@ func (c *MemoryCatalog) getOrCreateLocked(partition uint32) *memoryPartition {
 	if ok {
 		return data
 	}
-	data = &memoryPartition{state: pmeta.PartitionHead{Partition: partition}}
+	data = &memoryPartition{state: pmeta.PartitionHead{StreamID: c.streamID, Partition: partition}}
 	c.partitions[partition] = data
 	return data
 }

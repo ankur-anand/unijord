@@ -64,7 +64,10 @@ func ValidateWriterID(writerID [16]byte) error {
 	return nil
 }
 
-func ValidateAppendSegment(partition uint32, expectedNextLSN uint64, writerEpoch uint64, segment pmeta.SegmentRef) error {
+func ValidateAppendSegment(streamID string, partition uint32, expectedNextLSN uint64, writerEpoch uint64, segment pmeta.SegmentRef) error {
+	if streamID != segment.StreamID {
+		return fmt.Errorf("%w: request stream_id=%q segment stream_id=%q", ErrInvalidRequest, streamID, segment.StreamID)
+	}
 	if partition != segment.Partition {
 		return fmt.Errorf("%w: request partition=%d segment partition=%d", ErrInvalidRequest, partition, segment.Partition)
 	}

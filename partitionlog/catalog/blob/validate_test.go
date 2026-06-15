@@ -45,17 +45,17 @@ func TestValidateHeadFileEmpty(t *testing.T) {
 	t.Parallel()
 
 	head := headFile{Version: pageVersion, Partition: 1}
-	if err := validateHeadFile(head, 1); err != nil {
+	if err := validateHeadFile(head, "", 1); err != nil {
 		t.Fatalf("validateHeadFile(empty) error = %v", err)
 	}
 
 	head.WriterID = [16]byte{1}
-	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+	if err := validateHeadFile(head, "", 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("validateHeadFile(writer without epoch) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 
 	head = headFile{Version: pageVersion, Partition: 1, HasLastSegment: false, NextLSN: 1}
-	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+	if err := validateHeadFile(head, "", 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("validateHeadFile(empty with state) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }
@@ -77,12 +77,12 @@ func TestValidateHeadFileWithActiveSegments(t *testing.T) {
 		ActiveSegments: []pmeta.SegmentRef{segment},
 		Generation:     2,
 	}
-	if err := validateHeadFile(head, 1); err != nil {
+	if err := validateHeadFile(head, "", 1); err != nil {
 		t.Fatalf("validateHeadFile(active segments) error = %v", err)
 	}
 
 	head.ActiveSegments[0].LastLSN = 198
-	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+	if err := validateHeadFile(head, "", 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("validateHeadFile(active segment mismatch) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }
@@ -103,12 +103,12 @@ func TestValidateHeadFileWithLeafFrontier(t *testing.T) {
 		LeafFrontier:   refPtr(testPageRef(0, 100, 199, 2, "leaf", 1)),
 		Generation:     2,
 	}
-	if err := validateHeadFile(head, 1); err != nil {
+	if err := validateHeadFile(head, "", 1); err != nil {
 		t.Fatalf("validateHeadFile(leaf frontier) error = %v", err)
 	}
 
 	head.LeafFrontier.SeqHi = 198
-	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+	if err := validateHeadFile(head, "", 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("validateHeadFile(leaf frontier mismatch) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }
@@ -132,12 +132,12 @@ func TestValidateHeadFileWithIndexFrontier(t *testing.T) {
 		},
 		Generation: 5,
 	}
-	if err := validateHeadFile(head, 1); err != nil {
+	if err := validateHeadFile(head, "", 1); err != nil {
 		t.Fatalf("validateHeadFile(index frontier) error = %v", err)
 	}
 
 	head.IndexFrontier[0].SeqHi = 398
-	if err := validateHeadFile(head, 1); !errors.Is(err, ErrCorruptCatalog) {
+	if err := validateHeadFile(head, "", 1); !errors.Is(err, ErrCorruptCatalog) {
 		t.Fatalf("validateHeadFile(frontier gap) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 }

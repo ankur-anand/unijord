@@ -5,6 +5,7 @@ import (
 	"time"
 
 	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 )
 
 const (
@@ -16,6 +17,9 @@ const (
 
 type Options struct {
 	Prefix string
+	// StreamID scopes this catalog instance to one stream. Non-empty values are
+	// included in object keys and in committed metadata.
+	StreamID string
 
 	// LeafSegmentLimit bounds SegmentRef entries per leaf page.
 	LeafSegmentLimit int
@@ -38,6 +42,7 @@ type Options struct {
 
 func normalizeOptions(opts Options) (Options, error) {
 	opts.Prefix = normalizePrefix(opts.Prefix)
+	opts.StreamID = keylayout.NormalizeStreamID(opts.StreamID)
 	switch {
 	case opts.LeafSegmentLimit <= 0:
 		opts.LeafSegmentLimit = csession.DefaultSegmentPageLimit

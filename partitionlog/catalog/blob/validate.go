@@ -11,9 +11,12 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 )
 
-func validateHeadFile(head headFile, partition uint32) error {
+func validateHeadFile(head headFile, streamID string, partition uint32) error {
 	if head.Version != pageVersion {
 		return fmt.Errorf("%w: head version=%d", ErrCorruptCatalog, head.Version)
+	}
+	if head.StreamID != streamID {
+		return fmt.Errorf("%w: head stream_id=%q want=%q", ErrCorruptCatalog, head.StreamID, streamID)
 	}
 	if head.Partition != partition {
 		return fmt.Errorf("%w: head partition=%d want=%d", ErrCorruptCatalog, head.Partition, partition)
@@ -39,6 +42,9 @@ func validateHeadFile(head headFile, partition uint32) error {
 	if head.LastSegment.Partition != head.Partition {
 		return fmt.Errorf("%w: head partition=%d last segment partition=%d", ErrCorruptCatalog, head.Partition, head.LastSegment.Partition)
 	}
+	if head.LastSegment.StreamID != head.StreamID {
+		return fmt.Errorf("%w: head stream_id=%q last segment stream_id=%q", ErrCorruptCatalog, head.StreamID, head.LastSegment.StreamID)
+	}
 	if head.LastSegment.WriterEpoch > head.WriterEpoch {
 		return fmt.Errorf("%w: last segment writer_epoch=%d head writer_epoch=%d", ErrCorruptCatalog, head.LastSegment.WriterEpoch, head.WriterEpoch)
 	}
@@ -62,7 +68,7 @@ func validateHeadFile(head headFile, partition uint32) error {
 			return err
 		}
 	}
-	if err := validateActiveSegments(head.Partition, head.ActiveSegments); err != nil {
+	if err := validateActiveSegments(head.StreamID, head.Partition, head.ActiveSegments); err != nil {
 		return err
 	}
 	if len(head.ActiveSegments) > int(csession.MaxSegmentPageLimit) {
@@ -116,10 +122,13 @@ func validateHeadFile(head headFile, partition uint32) error {
 	return nil
 }
 
-func validateActiveSegments(partition uint32, segments []pmeta.SegmentRef) error {
+func validateActiveSegments(streamID string, partition uint32, segments []pmeta.SegmentRef) error {
 	for i, segment := range segments {
 		if err := segment.Validate(); err != nil {
 			return fmt.Errorf("%w: %w", ErrCorruptCatalog, err)
+		}
+		if segment.StreamID != streamID {
+			return fmt.Errorf("%w: active segment stream_id=%q head stream_id=%q", ErrCorruptCatalog, segment.StreamID, streamID)
 		}
 		if segment.Partition != partition {
 			return fmt.Errorf("%w: active segment partition=%d head partition=%d", ErrCorruptCatalog, segment.Partition, partition)
@@ -164,6 +173,9 @@ func validateLeafPage(page leafPage) error {
 		}
 		if segment.Partition != page.Partition {
 			return fmt.Errorf("%w: leaf partition=%d segment partition=%d", ErrCorruptCatalog, page.Partition, segment.Partition)
+		}
+		if segment.StreamID != page.StreamID {
+			return fmt.Errorf("%w: leaf stream_id=%q segment stream_id=%q", ErrCorruptCatalog, page.StreamID, segment.StreamID)
 		}
 		if i == 0 {
 			if segment.BaseLSN != page.SeqLo {
