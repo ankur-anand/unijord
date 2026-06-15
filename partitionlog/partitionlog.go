@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/writeradapter"
 	"github.com/ankur-anand/unijord/partitionlog/reader"
-	plruntime "github.com/ankur-anand/unijord/partitionlog/runtime"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/ankur-anand/unijord/partitionlog/segwriter"
 	lowwriter "github.com/ankur-anand/unijord/partitionlog/writer"
@@ -84,7 +85,14 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 		return nil, err
 	}
 
+	catalogWriterManager := l.store.WriterManager()
+	if catalogWriterManager == nil {
+		return nil, fmt.Errorf("partitionlog: nil writer catalog")
+	}
 	sinkFactory := l.store.SinkFactory()
+	if sinkFactory == nil {
+		return nil, fmt.Errorf("partitionlog: nil sink factory")
+	}
 	wopts := lowwriter.DefaultOptions(sinkFactory)
 	if opts.Batch.MaxRecords > 0 {
 		wopts.Roll.MaxSegmentRecords = opts.Batch.MaxRecords
@@ -108,13 +116,16 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 		wopts.Observer = writerMetricsAdapter{metrics: l.metrics}
 	}
 
-	inner, err := plruntime.NewWriter(ctx, plruntime.WriterConfig{
-		Partition:   opts.Partition,
-		WriterID:    opts.WriterID,
-		Catalog:     l.store.WriterManager(),
-		SinkFactory: sinkFactory,
-		Options:     wopts,
-	})
+	catalogSession, err := catalogWriterManager.OpenWriter(ctx, opts.Partition, opts.WriterID)
+	if err != nil {
+		return nil, err
+	}
+	session, err := writeradapter.New(catalogSession)
+	if err != nil {
+		return nil, err
+	}
+	wopts.Session = session
+	inner, err := lowwriter.New(wopts)
 	if err != nil {
 		return nil, err
 	}
@@ -239,28 +250,37 @@ func (w *Writer) observe(metric Metric) {
 }
 
 func newReader(store Store, opts ReaderOptions, metrics Metrics) (*Reader, error) {
-	cfg := plruntime.ReaderConfig{
-		Catalog:      store.ReaderCatalog(),
-		SegmentStore: store.SegmentStore(),
-		Options: reader.Options{
-			MaxRecordsPerBatch: opts.MaxRecordsPerBatch,
-			Refresh:            opts.Refresh,
-		},
+	cat := store.ReaderCatalog()
+	if cat == nil {
+		return nil, fmt.Errorf("partitionlog: nil reader catalog")
+	}
+	segmentStore := store.SegmentStore()
+	if segmentStore == nil {
+		return nil, fmt.Errorf("partitionlog: nil segment store")
+	}
+
+	ropts := reader.Options{
+		MaxRecordsPerBatch: opts.MaxRecordsPerBatch,
+		Refresh:            opts.Refresh,
 	}
 	if metrics != nil {
-		cfg.Options.Observer = readerMetricsAdapter{metrics: metrics}
+		ropts.Observer = readerMetricsAdapter{metrics: metrics}
 	}
 	if opts.RangeCacheBytes > 0 {
-		cfg.BlobCache = &plruntime.BlobCacheConfig{MaxBytes: opts.RangeCacheBytes}
+		cachedStore, err := blobcache.NewStore(segmentStore, blobcache.NewLRU(opts.RangeCacheBytes))
+		if err != nil {
+			return nil, err
+		}
+		segmentStore = cachedStore
 	}
 	if opts.OpenSegmentReaders > 0 {
-		cfg.SegmentCache = &plruntime.SegmentCacheConfig{MaxEntries: opts.OpenSegmentReaders}
+		segmentCache, err := reader.NewSegmentReaderCache(opts.OpenSegmentReaders)
+		if err != nil {
+			return nil, err
+		}
+		ropts.SegmentCache = segmentCache
 	}
-	runtime, err := plruntime.NewReader(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return runtime.Reader, nil
+	return reader.New(cat, segmentStore, ropts)
 }
 
 func validateWriterOptions(opts WriterOptions) error {
