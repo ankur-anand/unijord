@@ -35,8 +35,8 @@
 
   <rect class="bg" width="1180" height="620" rx="26"/>
 
-  <text x="54" y="52" class="ink title">Unijord stores event history as files, not broker state</text>
-  <text x="54" y="78" class="muted body">Local writers create owned timelines. Object storage is the durable source of truth. Readers replay by reading finalized files directly.</text>
+  <text x="54" y="52" class="ink title">Replayable event history stored as object-storage files</text>
+  <text x="54" y="78" class="muted body">Agents and workflows write directly to object storage. No centralized broker is required for durable history or replay.</text>
 
   <!-- Producers -->
   <g transform="translate(54 128)">
