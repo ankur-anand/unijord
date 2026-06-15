@@ -161,7 +161,7 @@ func IndexPagePath(prefix string, streamID string, partition uint32, level uint8
 }
 
 func partitionPrefix(prefix string, streamID string, partition uint32) string {
-	streamID = normalizeStreamID(streamID)
+	streamID = keylayout.NormalizeStreamID(streamID)
 	bucket := keylayout.Bucket(streamID, partition)
 	if streamID == "" {
 		return fmt.Sprintf("%s/%s/p%08d", normalizePrefix(prefix), bucket, partition)
@@ -175,8 +175,4 @@ func normalizePrefix(prefix string) string {
 		return DefaultPrefix
 	}
 	return prefix
-}
-
-func normalizeStreamID(streamID string) string {
-	return strings.Trim(streamID, "/")
 }

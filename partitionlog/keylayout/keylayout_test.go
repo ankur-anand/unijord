@@ -44,3 +44,18 @@ func TestBucketConstants(t *testing.T) {
 		t.Fatalf("BucketCount = %d, want 4096", BucketCount)
 	}
 }
+
+func TestBucketNormalizesStreamID(t *testing.T) {
+	t.Parallel()
+
+	const streamID = "hosts/host-a/events"
+	if got, want := Bucket("/"+streamID+"/", 7), Bucket(streamID, 7); got != want {
+		t.Fatalf("Bucket() with slashes = %q, want %q", got, want)
+	}
+	if got, want := Checksum("/"+streamID+"/", 7), Checksum(streamID, 7); got != want {
+		t.Fatalf("Checksum() with slashes = %#08x, want %#08x", got, want)
+	}
+	if got := NormalizeStreamID("/" + streamID + "/"); got != streamID {
+		t.Fatalf("NormalizeStreamID() = %q, want %q", got, streamID)
+	}
+}

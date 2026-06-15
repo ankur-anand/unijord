@@ -13,6 +13,7 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	azurecatalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob/azure"
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 	"github.com/ankur-anand/unijord/partitionlog/reader"
 	"github.com/ankur-anand/unijord/partitionlog/writer"
 )
@@ -83,7 +84,7 @@ func New(opts Options) (*Store, error) {
 }
 
 func normalizeStreamID(streamID string) (string, error) {
-	streamID = strings.Trim(streamID, "/")
+	streamID = keylayout.NormalizeStreamID(streamID)
 	if streamID == "" {
 		return "", fmt.Errorf("partitionlog/azure: empty stream_id")
 	}

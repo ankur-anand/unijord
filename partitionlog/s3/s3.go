@@ -13,6 +13,7 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	s3catalog "github.com/ankur-anand/unijord/partitionlog/catalog/blob/s3"
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 	"github.com/ankur-anand/unijord/partitionlog/reader"
 	"github.com/ankur-anand/unijord/partitionlog/writer"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -85,7 +86,7 @@ func New(opts Options) (*Store, error) {
 }
 
 func normalizeStreamID(streamID string) (string, error) {
-	streamID = strings.Trim(streamID, "/")
+	streamID = keylayout.NormalizeStreamID(streamID)
 	if streamID == "" {
 		return "", fmt.Errorf("partitionlog/s3: empty stream_id")
 	}

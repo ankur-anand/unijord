@@ -83,7 +83,7 @@ func TestBlobCatalogWriterSealsLeafAndCarriesOldLeafIntoIndex(t *testing.T) {
 	if len(head.IndexFrontier) != 1 || head.IndexFrontier[0].Level != 1 || head.IndexFrontier[0].SeqLo != 0 || head.IndexFrontier[0].SeqHi != 19 {
 		t.Fatalf("index_frontier = %+v, want l01 0-19", head.IndexFrontier)
 	}
-	index, err := cat.loadIndex(context.Background(), head.IndexFrontier[0])
+	index, err := cat.loadIndex(context.Background(), head.IndexFrontier[0], cat.opts.StreamID, 1)
 	if err != nil {
 		t.Fatalf("loadIndex(index_frontier[0]) error = %v", err)
 	}

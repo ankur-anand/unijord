@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"strings"
 )
 
 const (
@@ -30,6 +31,9 @@ var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
 
 // Bucket returns the layout bucket string for a stream partition.
 //
+// streamID is normalized before hashing. The storage layout treats leading and
+// trailing slashes as path separators, not as part of stream identity.
+//
 // Computation:
 //   - input = uint32 byte length of streamID, big-endian
 //   - input += streamID bytes
@@ -47,6 +51,7 @@ func Bucket(streamID string, partition uint32) string {
 // It is exported so conformance tests in other implementations can pin the
 // complete hash, not only the low bucket bits.
 func Checksum(streamID string, partition uint32) uint32 {
+	streamID = NormalizeStreamID(streamID)
 	h := crc32.New(castagnoliTable)
 
 	var lenBuf [4]byte
@@ -59,4 +64,10 @@ func Checksum(streamID string, partition uint32) uint32 {
 	_, _ = h.Write(partitionBuf[:])
 
 	return h.Sum32()
+}
+
+// NormalizeStreamID returns the canonical stream ID used by object-store key
+// hashing and path builders.
+func NormalizeStreamID(streamID string) string {
+	return strings.Trim(streamID, "/")
 }

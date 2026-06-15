@@ -28,7 +28,7 @@ func (l Layout) Prefix() string {
 }
 
 func (l Layout) SegmentKey(info plwriter.SegmentInfo) string {
-	streamID := normalizeStreamID(info.StreamID)
+	streamID := keylayout.NormalizeStreamID(info.StreamID)
 	parts := []string{
 		l.root(),
 		"segments",
@@ -42,7 +42,7 @@ func (l Layout) SegmentKey(info plwriter.SegmentInfo) string {
 }
 
 func (l Layout) StagingPrefix(info plwriter.SegmentInfo) string {
-	streamID := normalizeStreamID(info.StreamID)
+	streamID := keylayout.NormalizeStreamID(info.StreamID)
 	parts := []string{
 		l.root(),
 		"staging",
@@ -67,8 +67,4 @@ func appendStreamParts(parts []string, streamID string) []string {
 		return parts
 	}
 	return append(parts, "streams", streamID)
-}
-
-func normalizeStreamID(streamID string) string {
-	return strings.Trim(streamID, "/")
 }

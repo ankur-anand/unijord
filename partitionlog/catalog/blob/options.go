@@ -5,6 +5,7 @@ import (
 	"time"
 
 	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 )
 
 const (
@@ -41,7 +42,7 @@ type Options struct {
 
 func normalizeOptions(opts Options) (Options, error) {
 	opts.Prefix = normalizePrefix(opts.Prefix)
-	opts.StreamID = normalizeStreamID(opts.StreamID)
+	opts.StreamID = keylayout.NormalizeStreamID(opts.StreamID)
 	switch {
 	case opts.LeafSegmentLimit <= 0:
 		opts.LeafSegmentLimit = csession.DefaultSegmentPageLimit

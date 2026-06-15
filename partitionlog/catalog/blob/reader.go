@@ -38,7 +38,7 @@ func (c *Catalog) FindSegment(ctx context.Context, partition uint32, lsn uint64)
 		if lsn < root.SeqLo || lsn > root.SeqHi {
 			continue
 		}
-		return c.findInPageRef(ctx, root, lsn)
+		return c.findInPageRef(ctx, root, head.StreamID, head.Partition, lsn)
 	}
 	return findInSegments(head.ActiveSegments, lsn)
 }
@@ -66,7 +66,7 @@ func (c *Catalog) ListSegments(ctx context.Context, req csession.ListSegmentsReq
 		if root.SeqHi < req.FromLSN {
 			continue
 		}
-		if err := c.collectFromPageRef(ctx, root, &collector); err != nil {
+		if err := c.collectFromPageRef(ctx, root, head.StreamID, head.Partition, &collector); err != nil {
 			return pmeta.SegmentPage{}, err
 		}
 	}
@@ -80,15 +80,15 @@ func (c *Catalog) ListSegments(ctx context.Context, req csession.ListSegmentsReq
 	}, nil
 }
 
-func (c *Catalog) findInPageRef(ctx context.Context, ref pageRef, lsn uint64) (pmeta.SegmentRef, bool, error) {
+func (c *Catalog) findInPageRef(ctx context.Context, ref pageRef, streamID string, partition uint32, lsn uint64) (pmeta.SegmentRef, bool, error) {
 	if ref.Level == 0 {
-		leaf, err := c.loadLeaf(ctx, ref)
+		leaf, err := c.loadLeaf(ctx, ref, streamID, partition)
 		if err != nil {
 			return pmeta.SegmentRef{}, false, err
 		}
 		return findInSegments(leaf.Segments, lsn)
 	}
-	index, err := c.loadIndex(ctx, ref)
+	index, err := c.loadIndex(ctx, ref, streamID, partition)
 	if err != nil {
 		return pmeta.SegmentRef{}, false, err
 	}
@@ -96,28 +96,28 @@ func (c *Catalog) findInPageRef(ctx context.Context, ref pageRef, lsn uint64) (p
 	if i == len(index.Refs) || lsn < index.Refs[i].SeqLo || lsn > index.Refs[i].SeqHi {
 		return pmeta.SegmentRef{}, false, nil
 	}
-	return c.findInPageRef(ctx, index.Refs[i], lsn)
+	return c.findInPageRef(ctx, index.Refs[i], streamID, partition, lsn)
 }
 
-func (c *Catalog) collectFromPageRef(ctx context.Context, ref pageRef, collector *segmentCollector) error {
+func (c *Catalog) collectFromPageRef(ctx context.Context, ref pageRef, streamID string, partition uint32, collector *segmentCollector) error {
 	if collector.done() || ref.SeqHi < collector.from {
 		return nil
 	}
 	if ref.Level == 0 {
-		leaf, err := c.loadLeaf(ctx, ref)
+		leaf, err := c.loadLeaf(ctx, ref, streamID, partition)
 		if err != nil {
 			return err
 		}
 		collector.addSegments(leaf.Segments)
 		return nil
 	}
-	index, err := c.loadIndex(ctx, ref)
+	index, err := c.loadIndex(ctx, ref, streamID, partition)
 	if err != nil {
 		return err
 	}
 	start := firstPageRefAtOrAfter(index.Refs, collector.from)
 	for i := start; i < len(index.Refs) && !collector.done(); i++ {
-		if err := c.collectFromPageRef(ctx, index.Refs[i], collector); err != nil {
+		if err := c.collectFromPageRef(ctx, index.Refs[i], streamID, partition, collector); err != nil {
 			return err
 		}
 	}
