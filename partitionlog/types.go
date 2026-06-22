@@ -38,6 +38,20 @@ type Snapshot struct {
 	Identity WriterIdentity
 }
 
+// InitializePartition creates an empty partition head at NextLSN when no
+// catalog state exists yet.
+type InitializePartition struct {
+	Partition uint32
+	NextLSN   uint64
+}
+
+// InitializePartitionResult reports the durable head and whether it was
+// created by this call.
+type InitializePartitionResult struct {
+	Head    PartitionHead
+	Created bool
+}
+
 type WriterState struct {
 	Snapshot          Snapshot
 	OptimisticNextLSN uint64

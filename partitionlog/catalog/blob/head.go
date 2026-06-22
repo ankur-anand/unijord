@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
@@ -13,6 +14,41 @@ import (
 
 var _ csession.WriterManager = (*Catalog)(nil)
 var _ csession.WriterSession = (*writerSession)(nil)
+
+func (c *Catalog) InitializePartition(ctx context.Context, partition uint32, nextLSN uint64) (pmeta.PartitionHead, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return pmeta.PartitionHead{}, false, err
+	}
+	if nextLSN == math.MaxUint64 {
+		return pmeta.PartitionHead{}, false, fmt.Errorf("%w: next_lsn exhausted", csession.ErrInvalidRequest)
+	}
+
+	head := headFile{
+		Version:   pageVersion,
+		StreamID:  c.opts.StreamID,
+		Partition: partition,
+		NextLSN:   nextLSN,
+		OldestLSN: nextLSN,
+	}
+	body, err := marshalHead(head, c.opts.StreamID, partition)
+	if err != nil {
+		return pmeta.PartitionHead{}, false, err
+	}
+
+	obj, swapped, err := c.backend.CompareAndSwap(ctx, HeadPath(c.opts.Prefix, c.opts.StreamID, partition), "", body)
+	if err != nil {
+		return pmeta.PartitionHead{}, false, err
+	}
+	if swapped {
+		return stateFromHead(head), true, nil
+	}
+
+	current, err := decodeHead(obj.Body, c.opts.StreamID, partition)
+	if err != nil {
+		return pmeta.PartitionHead{}, false, err
+	}
+	return stateFromHead(current), false, nil
+}
 
 func (c *Catalog) OpenWriter(ctx context.Context, partition uint32, writerID [16]byte) (csession.WriterSession, error) {
 	if err := ctx.Err(); err != nil {

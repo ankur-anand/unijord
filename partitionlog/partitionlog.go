@@ -76,6 +76,23 @@ func (l *Log) NewReader(opts ReaderOptions) (*Reader, error) {
 	return newReader(l.store, opts, l.metrics)
 }
 
+// InitializePartition creates an empty partition at a chosen next LSN only
+// when no durable catalog state exists yet.
+func (l *Log) InitializePartition(ctx context.Context, opts InitializePartition) (InitializePartitionResult, error) {
+	if l == nil || l.store == nil {
+		return InitializePartitionResult{}, fmt.Errorf("partitionlog: nil log")
+	}
+	manager := l.store.WriterManager()
+	if manager == nil {
+		return InitializePartitionResult{}, fmt.Errorf("partitionlog: nil writer catalog")
+	}
+	head, created, err := manager.InitializePartition(ctx, opts.Partition, opts.NextLSN)
+	if err != nil {
+		return InitializePartitionResult{}, err
+	}
+	return InitializePartitionResult{Head: head, Created: created}, nil
+}
+
 // OpenWriter opens one fenced writer for one partition.
 func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, error) {
 	if l == nil || l.store == nil {

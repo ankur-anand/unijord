@@ -17,6 +17,9 @@ type Watch = plreader.Watch
 // Tailer is a blocking cursor attached to a Watch.
 type Tailer = plreader.Tailer
 
+// LSNExpiredError reports reads below the catalog oldest LSN.
+type LSNExpiredError = plreader.LSNExpiredError
+
 // ReadRecord is returned by partition readers.
 type ReadRecord = plreader.Record
 

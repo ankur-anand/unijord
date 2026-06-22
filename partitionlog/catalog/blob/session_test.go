@@ -48,6 +48,51 @@ func TestBlobCatalogWriterBuffersSegmentsInHeadBeforeLeafSeal(t *testing.T) {
 	}
 }
 
+func TestBlobCatalogInitializePartitionAtCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	cat, err := NewMemory(Options{})
+	if err != nil {
+		t.Fatalf("NewMemory() error = %v", err)
+	}
+
+	const nextLSN uint64 = 18_900_001
+	head, created, err := cat.InitializePartition(context.Background(), 1, nextLSN)
+	if err != nil {
+		t.Fatalf("InitializePartition() error = %v", err)
+	}
+	if !created {
+		t.Fatal("InitializePartition() created = false, want true")
+	}
+	if head.NextLSN != nextLSN || head.OldestLSN != nextLSN || head.HasLastSegment {
+		t.Fatalf("initialized head = %+v", head)
+	}
+
+	again, created, err := cat.InitializePartition(context.Background(), 1, 1)
+	if err != nil {
+		t.Fatalf("InitializePartition(existing) error = %v", err)
+	}
+	if created {
+		t.Fatal("InitializePartition(existing) created = true, want false")
+	}
+	if again.NextLSN != nextLSN || again.OldestLSN != nextLSN {
+		t.Fatalf("existing head = %+v, want next_lsn=%d", again, nextLSN)
+	}
+
+	ws, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	segment := testSegmentRef(1, nextLSN, nextLSN+9, ws.Epoch())
+	state, err := ws.AppendSegment(context.Background(), segment)
+	if err != nil {
+		t.Fatalf("AppendSegment() error = %v", err)
+	}
+	if state.NextLSN != nextLSN+10 || state.OldestLSN != nextLSN || state.LastSegment != segment {
+		t.Fatalf("state = %+v", state)
+	}
+}
+
 func TestBlobCatalogWriterSealsLeafAndCarriesOldLeafIntoIndex(t *testing.T) {
 	t.Parallel()
 
