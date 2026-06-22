@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -44,6 +45,32 @@ func NewMemoryCatalog() *MemoryCatalog {
 // NewMemory is the short constructor for the in-process catalog.
 func NewMemory() *MemoryCatalog {
 	return NewMemoryCatalog()
+}
+
+func (c *MemoryCatalog) InitializePartition(ctx context.Context, partition uint32, nextLSN uint64) (pmeta.PartitionHead, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return pmeta.PartitionHead{}, false, err
+	}
+	if nextLSN == math.MaxUint64 {
+		return pmeta.PartitionHead{}, false, fmt.Errorf("%w: next_lsn exhausted", ErrInvalidRequest)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.partitions == nil {
+		c.partitions = make(map[uint32]*memoryPartition)
+	}
+	if data, ok := c.partitions[partition]; ok {
+		return data.state, false, nil
+	}
+	state := pmeta.PartitionHead{
+		StreamID:  c.streamID,
+		Partition: partition,
+		NextLSN:   nextLSN,
+		OldestLSN: nextLSN,
+	}
+	c.partitions[partition] = &memoryPartition{state: state}
+	return state, true, nil
 }
 
 func (c *MemoryCatalog) OpenWriter(ctx context.Context, partition uint32, writerID [16]byte) (WriterSession, error) {

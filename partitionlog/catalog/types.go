@@ -19,8 +19,13 @@ type Reader interface {
 	ListSegments(ctx context.Context, req ListSegmentsRequest) (pmeta.SegmentPage, error)
 }
 
-// WriterManager issues one fenced writer session for one partition.
+// WriterManager owns the write-side catalog surface for one partition.
 type WriterManager interface {
+	// InitializePartition creates an empty partition head at a chosen next LSN
+	// when the partition does not already exist.
+	InitializePartition(ctx context.Context, partition uint32, nextLSN uint64) (pmeta.PartitionHead, bool, error)
+
+	// OpenWriter issues one fenced writer session for one partition.
 	OpenWriter(ctx context.Context, partition uint32, writerID [16]byte) (WriterSession, error)
 }
 

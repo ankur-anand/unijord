@@ -2,6 +2,7 @@ package partitionlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -54,6 +55,83 @@ func TestLogWriteAndReadWithMemoryStore(t *testing.T) {
 	}
 	if got.Records[1].LSN != 1 || string(got.Records[1].Value) != "b" {
 		t.Fatalf("record[1] = %+v, want lsn=1 value=b", got.Records[1])
+	}
+}
+
+func TestLogInitializePartitionAtCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	log, err := Open(Options{Store: store})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	const checkpoint uint64 = 18_900_000
+	init, err := log.InitializePartition(ctx, InitializePartition{
+		Partition: 1,
+		NextLSN:   checkpoint + 1,
+	})
+	if err != nil {
+		t.Fatalf("InitializePartition() error = %v", err)
+	}
+	if !init.Created {
+		t.Fatal("InitializePartition() created = false, want true")
+	}
+	if init.Head.NextLSN != checkpoint+1 || init.Head.OldestLSN != checkpoint+1 || init.Head.HasLastSegment {
+		t.Fatalf("initialized head = %+v", init.Head)
+	}
+
+	again, err := log.InitializePartition(ctx, InitializePartition{
+		Partition: 1,
+		NextLSN:   1,
+	})
+	if err != nil {
+		t.Fatalf("InitializePartition(existing) error = %v", err)
+	}
+	if again.Created {
+		t.Fatal("InitializePartition(existing) created = true, want false")
+	}
+	if again.Head.NextLSN != checkpoint+1 || again.Head.OldestLSN != checkpoint+1 {
+		t.Fatalf("existing head = %+v, want checkpoint head", again.Head)
+	}
+
+	if _, err := log.Reader().Partition(1).Read(ctx, ReadRequest{
+		StartLSN:  checkpoint,
+		Limit:     1,
+		Freshness: FreshnessLatest,
+	}); !errors.As(err, new(LSNExpiredError)) {
+		t.Fatalf("Read(before checkpoint) error = %v, want LSNExpiredError", err)
+	}
+
+	w, err := log.OpenWriter(ctx, WriterOptions{
+		Partition: 1,
+		WriterID:  [16]byte{1},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	appendResult, err := w.Append(ctx, Record{TimestampMS: 10, Value: []byte("after-checkpoint")})
+	if err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if appendResult.LSN != checkpoint+1 {
+		t.Fatalf("Append() LSN = %d, want %d", appendResult.LSN, checkpoint+1)
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	read, err := log.Reader().Partition(1).Read(ctx, ReadRequest{
+		StartLSN:  checkpoint + 1,
+		Limit:     1,
+		Freshness: FreshnessLatest,
+	})
+	if err != nil {
+		t.Fatalf("Read(after checkpoint) error = %v", err)
+	}
+	if len(read.Records) != 1 || read.Records[0].LSN != checkpoint+1 || string(read.Records[0].Value) != "after-checkpoint" {
+		t.Fatalf("Read(after checkpoint) = %+v", read)
 	}
 }
 

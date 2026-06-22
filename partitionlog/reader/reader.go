@@ -74,9 +74,6 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 		return FetchResult{}, err
 	}
 	result = FetchResult{Head: head}
-	if !head.HasLastSegment {
-		return result, nil
-	}
 	if req.LSN < head.OldestLSN {
 		return FetchResult{}, LSNExpiredError{
 			Requested: req.LSN,
@@ -86,6 +83,9 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 	}
 	if req.LSN >= head.NextLSN {
 		return result, nil
+	}
+	if !head.HasLastSegment {
+		return FetchResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
 	}
 
 	segment, found, err := r.catalog.FindSegment(ctx, req.Partition, req.LSN)
@@ -262,15 +262,18 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 		Head:    head,
 		NextLSN: startLSN,
 	}
-	if !head.HasLastSegment {
-		return result, nil
-	}
 	if startLSN < head.OldestLSN {
 		return ConsumeResult{}, LSNExpiredError{
 			Requested: startLSN,
 			Oldest:    head.OldestLSN,
 			HeadNext:  head.NextLSN,
 		}
+	}
+	if !head.HasLastSegment {
+		if startLSN < head.NextLSN {
+			result.NextLSN = head.NextLSN
+		}
+		return result, nil
 	}
 	if startLSN >= head.NextLSN {
 		return result, nil

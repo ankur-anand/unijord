@@ -28,7 +28,7 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 		return fmt.Errorf("%w: head has writer_epoch without writer_id", ErrCorruptCatalog)
 	}
 	if !head.HasLastSegment {
-		if head.NextLSN != 0 || head.OldestLSN != 0 || head.SegmentCount != 0 || head.LeafFrontier != nil || len(head.IndexFrontier) != 0 || len(head.ActiveSegments) != 0 {
+		if head.OldestLSN != head.NextLSN || head.SegmentCount != 0 || head.LeafFrontier != nil || len(head.IndexFrontier) != 0 || len(head.ActiveSegments) != 0 {
 			return fmt.Errorf("%w: empty head carries segment state", ErrCorruptCatalog)
 		}
 		return nil
