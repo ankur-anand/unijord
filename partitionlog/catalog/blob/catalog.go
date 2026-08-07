@@ -33,6 +33,9 @@ func NewMemory(opts Options) (*Catalog, error) {
 type writerSession struct {
 	cat *Catalog
 
+	writerEpoch uint64
+	writerID    [16]byte
+
 	mu    sync.Mutex
 	head  headFile
 	token string

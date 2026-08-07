@@ -53,7 +53,7 @@ func (b *casFaultBackend) Get(ctx context.Context, key string) (Object, error) {
 	if b.counting {
 		b.getCalls++
 	}
-	fail := b.counting && b.failGets
+	fail := b.counting && b.failGets && b.casCalls > 0
 	b.mu.Unlock()
 	if fail {
 		return Object{}, errInjectedCAS
@@ -202,6 +202,9 @@ func TestAppendSegmentReconcilesHistoricalCommitAfterHeadAdvances(t *testing.T) 
 	}
 	if state.SegmentCount != 1 || state.LastSegment != firstSegment || state.NextLSN != 10 {
 		t.Fatalf("reconciled state = %+v", state)
+	}
+	if first.Epoch() != firstSegment.WriterEpoch || first.WriterID() != ([16]byte{1}) {
+		t.Fatalf("first writer identity changed epoch=%d id=%v", first.Epoch(), first.WriterID())
 	}
 	if _, callbackErr := backend.stats(); callbackErr != nil {
 		t.Fatalf("advance head callback error = %v", callbackErr)

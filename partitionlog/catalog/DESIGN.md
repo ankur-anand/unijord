@@ -301,6 +301,18 @@ Fence acquisition:
    - `generation = oldGeneration + 1`
 3. return `(epoch, state, token)`.
 
+`writer_id` identifies one writer incarnation. Concurrent writers must not
+share it, and a restarted or replacement writer uses a new ID. The ID remains
+stable within one `OpenWriter` acquisition while the catalog retries an
+ambiguous CAS result.
+
+If a fence CAS response is lost, the catalog retries the exact candidate fence
+instead of incrementing the epoch again. A current head that exactly matches
+the candidate proves acquisition succeeded. If another writer superseded that
+candidate, the same `OpenWriter` call builds a new candidate from the returned
+head and attempts to acquire the next epoch. If neither the CAS result nor a
+confirming head read is available, it returns `ErrFenceIndeterminate`.
+
 Append with a writer fence:
 
 1. `req.WriterEpoch` must equal current `head.WriterEpoch`;

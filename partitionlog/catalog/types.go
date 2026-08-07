@@ -25,7 +25,9 @@ type WriterManager interface {
 	// when the partition does not already exist.
 	InitializePartition(ctx context.Context, partition uint32, nextLSN uint64) (pmeta.PartitionHead, bool, error)
 
-	// OpenWriter issues one fenced writer session for one partition.
+	// OpenWriter issues one fenced writer session for one partition. writerID
+	// identifies one writer incarnation and must not be shared by concurrent
+	// writers. A replacement writer uses a new ID.
 	OpenWriter(ctx context.Context, partition uint32, writerID [16]byte) (WriterSession, error)
 }
 

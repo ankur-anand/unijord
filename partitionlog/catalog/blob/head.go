@@ -59,47 +59,123 @@ func (c *Catalog) OpenWriter(ctx context.Context, partition uint32, writerID [16
 	}
 
 	path := HeadPath(c.opts.Prefix, c.opts.StreamID, partition)
+	head, token, err := c.loadHead(ctx, partition)
+	if err != nil {
+		return nil, err
+	}
 	backoff := c.opts.WriterAcquireInitialBackoff
+	var candidateBase headFile
+	var candidate headFile
+	var candidateBody []byte
+	var candidateReady bool
+	var lastCASErr error
+
 	for attempt := 0; attempt < c.opts.WriterAcquireMaxAttempts; attempt++ {
-		head, token, err := c.loadHead(ctx, partition)
-		if err != nil {
-			return nil, err
+		if !candidateReady {
+			candidateBase = head
+			candidate, err = nextWriterHead(head, c.opts.StreamID, partition, writerID)
+			if err != nil {
+				return nil, err
+			}
+			candidateBody, err = marshalHead(candidate, c.opts.StreamID, partition)
+			if err != nil {
+				return nil, err
+			}
+			candidateReady = true
+			lastCASErr = nil
 		}
 
-		next := head
-		next.Version = pageVersion
-		next.StreamID = c.opts.StreamID
-		next.Partition = partition
-		next.WriterEpoch++
-		next.WriterID = writerID
-		next.Generation++
-		body, err := marshalHead(next, c.opts.StreamID, partition)
+		obj, swapped, err := c.backend.CompareAndSwap(ctx, path, token, candidateBody)
 		if err != nil {
-			return nil, err
-		}
-
-		obj, swapped, err := c.backend.CompareAndSwap(ctx, path, token, body)
-		if err != nil {
-			return nil, err
-		}
-		if swapped {
-			return &writerSession{
-				cat:   c,
-				head:  next,
-				token: obj.Token,
-			}, nil
-		}
-		if err := sleepBackoff(ctx, backoff); err != nil {
-			return nil, err
-		}
-		if backoff < c.opts.WriterAcquireMaxBackoff {
-			backoff *= 2
-			if backoff > c.opts.WriterAcquireMaxBackoff {
-				backoff = c.opts.WriterAcquireMaxBackoff
+			lastCASErr = err
+		} else if swapped {
+			return c.newWriterSession(candidate, obj.Token), nil
+		} else {
+			current, err := decodeHead(obj.Body, c.opts.StreamID, partition)
+			if err != nil {
+				return nil, err
+			}
+			if sameHeadState(current, candidate) {
+				return c.newWriterSession(candidate, obj.Token), nil
+			}
+			token = obj.Token
+			if !sameHeadState(current, candidateBase) {
+				head = current
+				candidateReady = false
+				lastCASErr = nil
+			}
+			if attempt+1 == c.opts.WriterAcquireMaxAttempts {
+				if lastCASErr != nil {
+					return nil, fmt.Errorf("acquire writer fence partition=%d: %w", partition, lastCASErr)
+				}
+				return nil, fmt.Errorf("%w: open writer contention partition=%d", csession.ErrConflict, partition)
 			}
 		}
+		if attempt+1 == c.opts.WriterAcquireMaxAttempts {
+			break
+		}
+		if err := sleepBackoff(ctx, backoff); err != nil {
+			if lastCASErr != nil {
+				return nil, indeterminateFence(partition, errors.Join(lastCASErr, err))
+			}
+			return nil, err
+		}
+		backoff = growBackoff(backoff, c.opts.WriterAcquireMaxBackoff)
+	}
+
+	current, currentToken, err := c.loadHead(ctx, partition)
+	if err != nil {
+		return nil, indeterminateFence(partition, errors.Join(lastCASErr, err))
+	}
+	if candidateReady && sameHeadState(current, candidate) {
+		return c.newWriterSession(candidate, currentToken), nil
+	}
+	if candidateReady && sameHeadState(current, candidateBase) && lastCASErr != nil {
+		return nil, fmt.Errorf("acquire writer fence partition=%d: %w", partition, lastCASErr)
 	}
 	return nil, fmt.Errorf("%w: open writer contention partition=%d", csession.ErrConflict, partition)
+}
+
+func nextWriterHead(head headFile, streamID string, partition uint32, writerID [16]byte) (headFile, error) {
+	if head.WriterEpoch == math.MaxUint64 {
+		return headFile{}, fmt.Errorf("%w: writer_epoch partition=%d", csession.ErrFenceExhausted, partition)
+	}
+	generation, err := nextGeneration(head.Generation, partition)
+	if err != nil {
+		return headFile{}, err
+	}
+	next := head
+	next.Version = pageVersion
+	next.StreamID = streamID
+	next.Partition = partition
+	next.WriterEpoch++
+	next.WriterID = writerID
+	next.Generation = generation
+	return next, nil
+}
+
+func nextGeneration(current uint64, partition uint32) (uint64, error) {
+	if current == math.MaxUint64 {
+		return 0, fmt.Errorf("%w: partition=%d", csession.ErrGenerationExhausted, partition)
+	}
+	return current + 1, nil
+}
+
+func (c *Catalog) newWriterSession(head headFile, token string) *writerSession {
+	return &writerSession{
+		cat:         c,
+		writerEpoch: head.WriterEpoch,
+		writerID:    head.WriterID,
+		head:        head,
+		token:       token,
+	}
+}
+
+func indeterminateFence(partition uint32, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("%w: partition=%d", csession.ErrFenceIndeterminate, partition)
+	}
+	return fmt.Errorf("%w: partition=%d: %w", csession.ErrFenceIndeterminate, partition, cause)
 }
 
 func (s *writerSession) Head() pmeta.PartitionHead {
@@ -109,15 +185,11 @@ func (s *writerSession) Head() pmeta.PartitionHead {
 }
 
 func (s *writerSession) Epoch() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.head.WriterEpoch
+	return s.writerEpoch
 }
 
 func (s *writerSession) WriterID() [16]byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.head.WriterID
+	return s.writerID
 }
 
 func (s *writerSession) AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error) {
@@ -151,7 +223,10 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 		return pmeta.PartitionHead{}, err
 	}
 
-	generation := head.Generation + 1
+	generation, err := nextGeneration(head.Generation, head.Partition)
+	if err != nil {
+		return pmeta.PartitionHead{}, err
+	}
 	pages, err := s.cat.buildNextPageSet(ctx, head, segment, generation)
 	if err != nil {
 		return pmeta.PartitionHead{}, err
