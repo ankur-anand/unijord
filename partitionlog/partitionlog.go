@@ -37,7 +37,9 @@ type ReaderOptions struct {
 // WriterOptions configures one per-partition writer opened from a Log.
 type WriterOptions struct {
 	Partition uint32
-	WriterID  [16]byte
+	// WriterID uniquely identifies this writer incarnation. Do not reuse it for
+	// concurrent writers; generate a new ID after restart or replacement.
+	WriterID [16]byte
 
 	Batch        BatchPolicy
 	Backpressure BackpressurePolicy
