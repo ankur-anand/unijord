@@ -56,6 +56,15 @@ func TestNormalizeOptionsDefaults(t *testing.T) {
 	if opts.WriterAcquireMaxBackoff != DefaultWriterAcquireMaxBackoff {
 		t.Fatalf("WriterAcquireMaxBackoff = %s", opts.WriterAcquireMaxBackoff)
 	}
+	if opts.WriterCommitMaxAttempts != DefaultWriterCommitMaxAttempts {
+		t.Fatalf("WriterCommitMaxAttempts = %d", opts.WriterCommitMaxAttempts)
+	}
+	if opts.WriterCommitInitialBackoff != DefaultWriterCommitInitialBackoff {
+		t.Fatalf("WriterCommitInitialBackoff = %s", opts.WriterCommitInitialBackoff)
+	}
+	if opts.WriterCommitMaxBackoff != DefaultWriterCommitMaxBackoff {
+		t.Fatalf("WriterCommitMaxBackoff = %s", opts.WriterCommitMaxBackoff)
+	}
 }
 
 func TestNormalizeOptionsRejectsInvalidValues(t *testing.T) {
@@ -67,6 +76,9 @@ func TestNormalizeOptionsRejectsInvalidValues(t *testing.T) {
 		{WriterAcquireInitialBackoff: -time.Nanosecond},
 		{WriterAcquireMaxBackoff: -time.Nanosecond},
 		{WriterAcquireInitialBackoff: 10 * time.Millisecond, WriterAcquireMaxBackoff: time.Millisecond},
+		{WriterCommitInitialBackoff: -time.Nanosecond},
+		{WriterCommitMaxBackoff: -time.Nanosecond},
+		{WriterCommitInitialBackoff: 10 * time.Millisecond, WriterCommitMaxBackoff: time.Millisecond},
 	}
 	for i, opts := range cases {
 		if _, err := normalizeOptions(opts); !errors.Is(err, pcatalog.ErrInvalidRequest) {

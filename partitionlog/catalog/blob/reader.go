@@ -29,6 +29,10 @@ func (c *Catalog) FindSegment(ctx context.Context, partition uint32, lsn uint64)
 	if err != nil {
 		return pmeta.SegmentRef{}, false, err
 	}
+	return c.findSegmentInHead(ctx, head, lsn)
+}
+
+func (c *Catalog) findSegmentInHead(ctx context.Context, head headFile, lsn uint64) (pmeta.SegmentRef, bool, error) {
 	if !head.HasLastSegment || lsn < head.OldestLSN || lsn >= head.NextLSN {
 		return pmeta.SegmentRef{}, false, nil
 	}

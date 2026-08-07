@@ -174,29 +174,174 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 	if err != nil {
 		return pmeta.PartitionHead{}, err
 	}
-	obj, swapped, err := s.cat.backend.CompareAndSwap(ctx, HeadPath(s.cat.opts.Prefix, s.cat.opts.StreamID, head.Partition), s.token, body)
+	return s.commitSegmentHead(ctx, head, next, segment, body)
+}
+
+type commitObservation uint8
+
+const (
+	commitNeedsRetry commitObservation = iota
+	commitApplied
+)
+
+func (s *writerSession) commitSegmentHead(ctx context.Context, previous, next headFile, segment pmeta.SegmentRef, body []byte) (pmeta.PartitionHead, error) {
+	path := HeadPath(s.cat.opts.Prefix, s.cat.opts.StreamID, previous.Partition)
+	expectedToken := s.token
+	backoff := s.cat.opts.WriterCommitInitialBackoff
+	var lastCASErr error
+
+	for attempt := 0; attempt < s.cat.opts.WriterCommitMaxAttempts; attempt++ {
+		obj, swapped, err := s.cat.backend.CompareAndSwap(ctx, path, expectedToken, body)
+		if err != nil {
+			lastCASErr = err
+		} else if swapped {
+			s.head = next
+			s.token = obj.Token
+			return stateFromHead(next), nil
+		} else {
+			current, err := decodeHead(obj.Body, s.cat.opts.StreamID, previous.Partition)
+			if err != nil {
+				return pmeta.PartitionHead{}, err
+			}
+			observation, err := s.observeSegmentCommit(ctx, previous, current, segment)
+			if err != nil {
+				return pmeta.PartitionHead{}, err
+			}
+			if observation == commitApplied {
+				return s.acceptObservedCommit(next, current, obj.Token), nil
+			}
+			expectedToken = obj.Token
+			if attempt+1 == s.cat.opts.WriterCommitMaxAttempts {
+				if lastCASErr != nil {
+					return pmeta.PartitionHead{}, fmt.Errorf("commit head partition=%d: %w", previous.Partition, lastCASErr)
+				}
+				return pmeta.PartitionHead{}, fmt.Errorf("%w: head CAS did not apply partition=%d", csession.ErrConflict, previous.Partition)
+			}
+		}
+
+		if attempt+1 == s.cat.opts.WriterCommitMaxAttempts {
+			break
+		}
+		if err := sleepBackoff(ctx, backoff); err != nil {
+			if lastCASErr != nil {
+				return pmeta.PartitionHead{}, indeterminateCommit(previous.Partition, errors.Join(lastCASErr, err))
+			}
+			return pmeta.PartitionHead{}, err
+		}
+		backoff = growBackoff(backoff, s.cat.opts.WriterCommitMaxBackoff)
+	}
+
+	current, token, err := s.cat.loadHead(ctx, previous.Partition)
+	if err != nil {
+		return pmeta.PartitionHead{}, indeterminateCommit(previous.Partition, errors.Join(lastCASErr, err))
+	}
+	observation, err := s.observeSegmentCommit(ctx, previous, current, segment)
 	if err != nil {
 		return pmeta.PartitionHead{}, err
 	}
-	if swapped {
-		s.head = next
-		s.token = obj.Token
-		return stateFromHead(next), nil
+	if observation == commitApplied {
+		return s.acceptObservedCommit(next, current, token), nil
 	}
+	if lastCASErr != nil {
+		return pmeta.PartitionHead{}, fmt.Errorf("commit head partition=%d: %w", previous.Partition, lastCASErr)
+	}
+	return pmeta.PartitionHead{}, fmt.Errorf("%w: head CAS did not apply partition=%d", csession.ErrConflict, previous.Partition)
+}
 
-	current, decodeErr := decodeHead(obj.Body, s.cat.opts.StreamID, head.Partition)
-	if decodeErr != nil {
-		return pmeta.PartitionHead{}, decodeErr
+func (s *writerSession) observeSegmentCommit(ctx context.Context, previous, current headFile, segment pmeta.SegmentRef) (commitObservation, error) {
+	if sameHeadState(current, previous) {
+		return commitNeedsRetry, nil
 	}
-	if retry, ok := idempotentHeadRetry(current, segment); ok {
-		s.head = current
-		s.token = obj.Token
-		return retry, nil
+	if current.HasLastSegment && current.LastSegment == segment {
+		return commitApplied, nil
 	}
-	if current.WriterEpoch != head.WriterEpoch || current.WriterID != head.WriterID {
-		return pmeta.PartitionHead{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, head.Partition)
+	if current.NextLSN >= segment.NextLSN() {
+		if segment.BaseLSN < current.OldestLSN {
+			return commitNeedsRetry, indeterminateCommit(previous.Partition, fmt.Errorf("segment base_lsn=%d is below retained oldest_lsn=%d", segment.BaseLSN, current.OldestLSN))
+		}
+		committed, ok, err := s.cat.findSegmentInHead(ctx, current, segment.BaseLSN)
+		if err != nil {
+			return commitNeedsRetry, indeterminateCommit(previous.Partition, err)
+		}
+		if !ok {
+			return commitNeedsRetry, fmt.Errorf("%w: committed range does not contain base_lsn=%d", ErrCorruptCatalog, segment.BaseLSN)
+		}
+		if committed != segment {
+			if current.WriterEpoch != previous.WriterEpoch || current.WriterID != previous.WriterID {
+				return commitNeedsRetry, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, previous.Partition)
+			}
+			return commitNeedsRetry, fmt.Errorf("%w: base_lsn=%d belongs to a different segment", csession.ErrConflict, segment.BaseLSN)
+		}
+		return commitApplied, nil
 	}
-	return pmeta.PartitionHead{}, fmt.Errorf("%w: head changed partition=%d", csession.ErrConflict, head.Partition)
+	if current.WriterEpoch != previous.WriterEpoch || current.WriterID != previous.WriterID {
+		return commitNeedsRetry, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, previous.Partition)
+	}
+	return commitNeedsRetry, fmt.Errorf("%w: head changed partition=%d", csession.ErrConflict, previous.Partition)
+}
+
+func (s *writerSession) acceptObservedCommit(expected, observed headFile, token string) pmeta.PartitionHead {
+	s.head = expected
+	if sameHeadState(observed, expected) {
+		s.token = token
+	}
+	return stateFromHead(expected)
+}
+
+func sameHeadState(a, b headFile) bool {
+	if a.Version != b.Version ||
+		a.StreamID != b.StreamID ||
+		a.Partition != b.Partition ||
+		a.NextLSN != b.NextLSN ||
+		a.OldestLSN != b.OldestLSN ||
+		a.WriterEpoch != b.WriterEpoch ||
+		a.WriterID != b.WriterID ||
+		a.SegmentCount != b.SegmentCount ||
+		a.LastSegment != b.LastSegment ||
+		a.HasLastSegment != b.HasLastSegment ||
+		a.Generation != b.Generation ||
+		len(a.IndexFrontier) != len(b.IndexFrontier) ||
+		len(a.ActiveSegments) != len(b.ActiveSegments) {
+		return false
+	}
+	if (a.LeafFrontier == nil) != (b.LeafFrontier == nil) {
+		return false
+	}
+	if a.LeafFrontier != nil && *a.LeafFrontier != *b.LeafFrontier {
+		return false
+	}
+	for i := range a.IndexFrontier {
+		if a.IndexFrontier[i] != b.IndexFrontier[i] {
+			return false
+		}
+	}
+	for i := range a.ActiveSegments {
+		if a.ActiveSegments[i] != b.ActiveSegments[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func indeterminateCommit(partition uint32, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("%w: partition=%d", csession.ErrCommitIndeterminate, partition)
+	}
+	return fmt.Errorf("%w: partition=%d: %w", csession.ErrCommitIndeterminate, partition, cause)
+}
+
+func growBackoff(current, maximum time.Duration) time.Duration {
+	if current >= maximum {
+		return maximum
+	}
+	if current > maximum-current {
+		return maximum
+	}
+	next := current * 2
+	if next > maximum {
+		return maximum
+	}
+	return next
 }
 
 func (c *Catalog) loadHead(ctx context.Context, partition uint32) (headFile, string, error) {

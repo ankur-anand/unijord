@@ -72,5 +72,8 @@ func mapCatalogError(err error) error {
 	if errors.Is(err, catalog.ErrStaleWriter) {
 		return fmt.Errorf("%w: %w", writer.ErrStaleWriter, err)
 	}
+	if errors.Is(err, catalog.ErrCommitIndeterminate) {
+		return fmt.Errorf("%w: %w", writer.ErrPublishIndeterminate, err)
+	}
 	return fmt.Errorf("%w: %w", writer.ErrPublishFailed, err)
 }

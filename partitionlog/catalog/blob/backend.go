@@ -25,7 +25,9 @@ const (
 // replays idempotent and reject the same key with different bytes.
 //
 // CompareAndSwap is for the mutable partition head. expectedToken == "" means
-// create-if-absent.
+// create-if-absent. When the comparison fails and the object exists, it returns
+// the current object with swapped=false so callers can reconcile without a
+// second Get.
 //
 // Delete is used by bounded catalog-page GC. It should be idempotent for
 // missing objects.

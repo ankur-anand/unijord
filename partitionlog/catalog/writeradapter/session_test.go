@@ -70,6 +70,24 @@ func TestSessionMapsStaleWriter(t *testing.T) {
 	}
 }
 
+func TestSessionMapsIndeterminateCommit(t *testing.T) {
+	t.Parallel()
+
+	inner := &errorWriterSession{
+		head: pmeta.PartitionHead{Partition: 7, WriterEpoch: 1},
+		id:   [16]byte{1},
+		err:  catalog.ErrCommitIndeterminate,
+	}
+	session, err := writeradapter.New(inner)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, err = session.PublishSegment(context.Background(), writer.PublishRequest{})
+	if !errors.Is(err, writer.ErrPublishIndeterminate) {
+		t.Fatalf("PublishSegment() error = %v, want %v", err, writer.ErrPublishIndeterminate)
+	}
+}
+
 func TestSessionRejectsNil(t *testing.T) {
 	t.Parallel()
 
@@ -102,4 +120,17 @@ func validSegmentRef(partition uint32, base uint64, last uint64, epoch uint64, w
 		Codec:            segformat.CodecNone,
 		HashAlgo:         segformat.HashXXH64,
 	}
+}
+
+type errorWriterSession struct {
+	head pmeta.PartitionHead
+	id   [16]byte
+	err  error
+}
+
+func (s *errorWriterSession) Head() pmeta.PartitionHead { return s.head }
+func (s *errorWriterSession) Epoch() uint64             { return s.head.WriterEpoch }
+func (s *errorWriterSession) WriterID() [16]byte        { return s.id }
+func (s *errorWriterSession) AppendSegment(context.Context, pmeta.SegmentRef) (pmeta.PartitionHead, error) {
+	return pmeta.PartitionHead{}, s.err
 }
