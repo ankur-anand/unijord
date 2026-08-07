@@ -156,6 +156,28 @@ _ = batch.NextLSN
 _ = cursor.Position()
 ```
 
+Persist a stream-bound checkpoint when processing is complete:
+
+```go
+checkpoint, err := cursor.Checkpoint(ctx)
+if err != nil {
+    return err
+}
+
+// Persist the complete checkpoint as JSON. Do not persist NextLSN alone.
+resumed, err := partition.ResumeCursor(ctx, checkpoint, partitionlog.CursorResumeOptions{
+    Limit: 1000,
+})
+if err != nil {
+    return err
+}
+defer resumed.Close()
+```
+
+`Checkpoint` and `ResumeCursor` validate against the latest catalog head.
+Resume fails if the checkpoint belongs to another stream or partition, is
+below the retention floor, or is ahead of the committed tail.
+
 ## Tail
 
 Tailing is explicit. A `Watch` starts background catalog refresh for selected

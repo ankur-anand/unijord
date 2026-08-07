@@ -287,10 +287,11 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 			Limit:     catalog.MaxSegmentPageLimit,
 		})
 		if err != nil {
-			return ConsumeResult{}, err
+			return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
 		}
 		if len(page.Segments) == 0 {
-			return ConsumeResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
+			err := fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
+			return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
 		}
 
 		advanced := false
@@ -305,16 +306,18 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 				continue
 			}
 			if segment.BaseLSN > next {
-				return ConsumeResult{}, fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
+				err := fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
+				return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
 			}
 
 			remaining := limit - len(result.Records)
 			records, err := r.readSegment(ctx, segment, next, remaining, head.NextLSN)
 			if err != nil {
-				return ConsumeResult{}, err
+				return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
 			}
 			if len(records) == 0 {
-				return ConsumeResult{}, fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, next)
+				err := fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, next)
+				return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
 			}
 			result.Records = append(result.Records, records...)
 			next = result.Records[len(result.Records)-1].LSN + 1
@@ -322,10 +325,29 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 			advanced = true
 		}
 		if !advanced {
-			return ConsumeResult{}, fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
+			err := fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
+			return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
 		}
 	}
 	return result, nil
+}
+
+func (r *Reader) classifyReadAnomaly(ctx context.Context, partition uint32, requested uint64, cause error) error {
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return cause
+	}
+	head, err := r.refresh.refresh(ctx, partition)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("refresh retention floor: %w", err))
+	}
+	if requested < head.OldestLSN {
+		return LSNExpiredError{
+			Requested: requested,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	return cause
 }
 
 func (r *Reader) findTimestampStart(ctx context.Context, segment pmeta.SegmentRef, timestampMS int64) (uint64, bool, error) {

@@ -35,6 +35,13 @@ type ReadRequest = plreader.ReadRequest
 // CursorOptions configures a passive replay cursor.
 type CursorOptions = plreader.CursorOptions
 
+// CursorResumeOptions configures a cursor restored from a durable checkpoint.
+type CursorResumeOptions = plreader.CursorResumeOptions
+
+// CursorCheckpoint is a durable next-read position bound to one stream
+// partition.
+type CursorCheckpoint = plreader.CursorCheckpoint
+
 // WatchOptions explicitly starts background catalog refresh for partitions.
 type WatchOptions = plreader.WatchOptions
 
@@ -48,10 +55,17 @@ type RefreshPolicy = plreader.RefreshPolicy
 type Freshness = plreader.Freshness
 
 const (
+	CursorCheckpointVersion = plreader.CursorCheckpointVersion
+
 	FreshnessDefault = plreader.FreshnessDefault
 	FreshnessCached  = plreader.FreshnessCached
 	FreshnessOnTail  = plreader.FreshnessOnTail
 	FreshnessLatest  = plreader.FreshnessLatest
 )
 
-var ErrWatchClosed = plreader.ErrWatchClosed
+var (
+	ErrWatchClosed        = plreader.ErrWatchClosed
+	ErrCheckpointInvalid  = plreader.ErrCheckpointInvalid
+	ErrCheckpointMismatch = plreader.ErrCheckpointMismatch
+	ErrCheckpointAhead    = plreader.ErrCheckpointAhead
+)

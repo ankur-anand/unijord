@@ -6,12 +6,15 @@ import (
 )
 
 var (
-	ErrInvalidOptions = errors.New("partitionlog/reader: invalid options")
-	ErrInvalidRequest = errors.New("partitionlog/reader: invalid request")
-	ErrLSNExpired     = errors.New("partitionlog/reader: lsn expired")
-	ErrLSNExhausted   = errors.New("partitionlog/reader: lsn exhausted")
-	ErrCorruptData    = errors.New("partitionlog/reader: corrupt data")
-	ErrStoreRead      = errors.New("partitionlog/reader: store read failed")
+	ErrInvalidOptions     = errors.New("partitionlog/reader: invalid options")
+	ErrInvalidRequest     = errors.New("partitionlog/reader: invalid request")
+	ErrLSNExpired         = errors.New("partitionlog/reader: lsn expired")
+	ErrLSNExhausted       = errors.New("partitionlog/reader: lsn exhausted")
+	ErrCorruptData        = errors.New("partitionlog/reader: corrupt data")
+	ErrStoreRead          = errors.New("partitionlog/reader: store read failed")
+	ErrCheckpointInvalid  = errors.New("partitionlog/reader: invalid cursor checkpoint")
+	ErrCheckpointMismatch = errors.New("partitionlog/reader: cursor checkpoint mismatch")
+	ErrCheckpointAhead    = errors.New("partitionlog/reader: cursor checkpoint is ahead of head")
 )
 
 type LSNExpiredError struct {

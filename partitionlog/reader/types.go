@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	DefaultMaxRecordsPerBatch = 1024
+	DefaultMaxRecordsPerBatch        = 1024
+	CursorCheckpointVersion   uint16 = 1
 )
 
 type SegmentStore = segreader.SegmentStore
@@ -161,6 +162,20 @@ type ReadResult = ConsumeResult
 type CursorOptions struct {
 	StartLSN uint64
 	Limit    int
+}
+
+// CursorResumeOptions configures a cursor restored from a durable checkpoint.
+type CursorResumeOptions struct {
+	Limit int
+}
+
+// CursorCheckpoint is a durable next-read position bound to one stream
+// partition. Persist the complete value, not NextLSN by itself.
+type CursorCheckpoint struct {
+	Version   uint16 `json:"version"`
+	StreamID  string `json:"stream_id"`
+	Partition uint32 `json:"partition"`
+	NextLSN   uint64 `json:"next_lsn"`
 }
 
 // WatchOptions explicitly starts background catalog refresh for partitions.

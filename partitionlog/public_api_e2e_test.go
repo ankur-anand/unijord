@@ -249,6 +249,25 @@ func runPublicAPIEndToEnd(t *testing.T, store partitionlog.Store) {
 	if cursor.Position() != 2 {
 		t.Fatalf("Cursor.Position() = %d, want 2", cursor.Position())
 	}
+	checkpoint, err := cursor.Checkpoint(ctx)
+	if err != nil {
+		t.Fatalf("Cursor.Checkpoint() error = %v", err)
+	}
+	if checkpoint.Version != partitionlog.CursorCheckpointVersion || checkpoint.StreamID != snapshot.Head.StreamID || checkpoint.Partition != partition || checkpoint.NextLSN != 2 {
+		t.Fatalf("Cursor.Checkpoint() = %+v", checkpoint)
+	}
+	resumed, err := partitionReader.ResumeCursor(ctx, checkpoint, partitionlog.CursorResumeOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ResumeCursor() error = %v", err)
+	}
+	resumedBatch, err := resumed.Next(ctx)
+	if err != nil {
+		t.Fatalf("resumed Cursor.Next() error = %v", err)
+	}
+	assertPublicRecords(t, partition, 2, resumedBatch.Records, want[2:4])
+	if err := resumed.Close(); err != nil {
+		t.Fatalf("resumed Cursor.Close() error = %v", err)
+	}
 	fork := cursor.Fork()
 	cursor.Seek(4)
 	last, err := cursor.Next(ctx)

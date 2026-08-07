@@ -118,10 +118,53 @@ func (p *PartitionReader) Cursor(opts CursorOptions) (*Cursor, error) {
 	}, nil
 }
 
+// ResumeCursor restores a cursor after validating its stream identity,
+// partition, retention floor, and tail against the latest catalog head.
+func (p *PartitionReader) ResumeCursor(ctx context.Context, checkpoint CursorCheckpoint, opts CursorResumeOptions) (*Cursor, error) {
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, opts.Limit)
+	}
+	if checkpoint.Version != CursorCheckpointVersion {
+		return nil, fmt.Errorf("%w: version=%d want=%d", ErrCheckpointInvalid, checkpoint.Version, CursorCheckpointVersion)
+	}
+	if checkpoint.Partition != p.partition {
+		return nil, fmt.Errorf("%w: checkpoint partition=%d reader partition=%d", ErrCheckpointMismatch, checkpoint.Partition, p.partition)
+	}
+	head, err := p.reader.refresh.refresh(ctx, p.partition)
+	if err != nil {
+		return nil, err
+	}
+	if head.Partition != p.partition {
+		return nil, fmt.Errorf("%w: head partition=%d reader partition=%d", ErrCorruptData, head.Partition, p.partition)
+	}
+	if checkpoint.StreamID != head.StreamID {
+		return nil, fmt.Errorf("%w: checkpoint stream_id=%q head stream_id=%q", ErrCheckpointMismatch, checkpoint.StreamID, head.StreamID)
+	}
+	if checkpoint.NextLSN < head.OldestLSN {
+		return nil, LSNExpiredError{
+			Requested: checkpoint.NextLSN,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	if checkpoint.NextLSN > head.NextLSN {
+		return nil, fmt.Errorf("%w: checkpoint next_lsn=%d head_next=%d", ErrCheckpointAhead, checkpoint.NextLSN, head.NextLSN)
+	}
+	return &Cursor{
+		partition: p,
+		streamID:  checkpoint.StreamID,
+		bound:     true,
+		nextLSN:   checkpoint.NextLSN,
+		limit:     opts.Limit,
+	}, nil
+}
+
 // Cursor is a passive stateful replay cursor. It is not safe for concurrent
 // use.
 type Cursor struct {
 	partition *PartitionReader
+	streamID  string
+	bound     bool
 	nextLSN   uint64
 	limit     int
 	closed    bool
@@ -141,10 +184,44 @@ func (c *Cursor) Next(ctx context.Context) (ReadResult, error) {
 	if err != nil {
 		return ReadResult{}, err
 	}
+	if err := c.bind(result.Head); err != nil {
+		return ReadResult{}, err
+	}
 	if len(result.Records) > 0 {
 		c.nextLSN = result.NextLSN
 	}
 	return result, nil
+}
+
+// Checkpoint returns a durable next-read position after validating it against
+// the latest catalog head.
+func (c *Cursor) Checkpoint(ctx context.Context) (CursorCheckpoint, error) {
+	if c.closed {
+		return CursorCheckpoint{}, fmt.Errorf("%w: cursor closed", ErrInvalidRequest)
+	}
+	head, err := c.partition.reader.refresh.refresh(ctx, c.partition.partition)
+	if err != nil {
+		return CursorCheckpoint{}, err
+	}
+	if err := c.bind(head); err != nil {
+		return CursorCheckpoint{}, err
+	}
+	if c.nextLSN < head.OldestLSN {
+		return CursorCheckpoint{}, LSNExpiredError{
+			Requested: c.nextLSN,
+			Oldest:    head.OldestLSN,
+			HeadNext:  head.NextLSN,
+		}
+	}
+	if c.nextLSN > head.NextLSN {
+		return CursorCheckpoint{}, fmt.Errorf("%w: cursor next_lsn=%d head_next=%d", ErrCheckpointAhead, c.nextLSN, head.NextLSN)
+	}
+	return CursorCheckpoint{
+		Version:   CursorCheckpointVersion,
+		StreamID:  c.streamID,
+		Partition: c.partition.partition,
+		NextLSN:   c.nextLSN,
+	}, nil
 }
 
 // Seek moves the cursor to lsn.
@@ -161,6 +238,8 @@ func (c *Cursor) Position() uint64 {
 func (c *Cursor) Fork() *Cursor {
 	return &Cursor{
 		partition: c.partition,
+		streamID:  c.streamID,
+		bound:     c.bound,
 		nextLSN:   c.nextLSN,
 		limit:     c.limit,
 	}
@@ -169,6 +248,18 @@ func (c *Cursor) Fork() *Cursor {
 // Close marks the cursor closed. It does not close the shared Reader runtime.
 func (c *Cursor) Close() error {
 	c.closed = true
+	return nil
+}
+
+func (c *Cursor) bind(head pmeta.PartitionHead) error {
+	if head.Partition != c.partition.partition {
+		return fmt.Errorf("%w: head partition=%d reader partition=%d", ErrCorruptData, head.Partition, c.partition.partition)
+	}
+	if c.bound && c.streamID != head.StreamID {
+		return fmt.Errorf("%w: cursor stream_id=%q head stream_id=%q", ErrCheckpointMismatch, c.streamID, head.StreamID)
+	}
+	c.streamID = head.StreamID
+	c.bound = true
 	return nil
 }
 
