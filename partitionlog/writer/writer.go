@@ -18,8 +18,9 @@ const cleanupTimeout = 5 * time.Second
 
 // Writer owns one partition's append flow. It is not safe for concurrent use.
 type Writer struct {
-	mu   sync.Mutex
-	opts Options
+	mu        sync.Mutex
+	sessionMu sync.Mutex
+	opts      Options
 
 	streamID  string
 	partition uint32
@@ -339,6 +340,48 @@ func (w *Writer) Err() error {
 	return w.firstErr
 }
 
+// ApplyPendingRetention applies the latest retention request through this
+// writer's fenced catalog session. It does not poll automatically; the
+// partition owner chooses when to call it.
+func (w *Writer) ApplyPendingRetention(ctx context.Context) (RetentionResult, error) {
+	session, ok := w.opts.Session.(RetentionSession)
+	if !ok {
+		return RetentionResult{}, ErrRetentionUnsupported
+	}
+
+	w.sessionMu.Lock()
+	w.mu.Lock()
+	if err := w.foregroundErrLocked(); err != nil {
+		w.mu.Unlock()
+		w.sessionMu.Unlock()
+		return RetentionResult{}, err
+	}
+	current := w.committed
+	w.mu.Unlock()
+
+	result, err := session.ApplyPendingRetention(ctx)
+	if err != nil {
+		w.sessionMu.Unlock()
+		err = normalizeRetentionErr(err)
+		if errors.Is(err, ErrStaleWriter) {
+			w.noteAsyncErr(err)
+		}
+		return RetentionResult{}, err
+	}
+	if err := validateRetentionSnapshot(current, result); err != nil {
+		w.sessionMu.Unlock()
+		w.noteAsyncErr(err)
+		return RetentionResult{}, err
+	}
+
+	w.mu.Lock()
+	w.committed = result.Snapshot
+	w.signalStateLocked()
+	w.mu.Unlock()
+	w.sessionMu.Unlock()
+	return result, nil
+}
+
 func (w *Writer) finalizeLoop() {
 	defer w.workersWG.Done()
 
@@ -456,15 +499,19 @@ func (w *Writer) publishLoop() {
 			continue
 		}
 		item := w.ready[0]
-		current := w.committed
 		w.mu.Unlock()
 
+		w.sessionMu.Lock()
+		w.mu.Lock()
+		current := w.committed
+		w.mu.Unlock()
 		start := time.Now()
 		next, err := w.opts.Session.PublishSegment(w.workerCtx, PublishRequest{
 			ExpectedNextLSN: item.expectedNextLSN,
 			Segment:         item.segment,
 		})
 		if err != nil {
+			w.sessionMu.Unlock()
 			w.observe(MetricEvent{
 				Name:       MetricSegmentPublish,
 				Partition:  w.partition,
@@ -480,6 +527,7 @@ func (w *Writer) publishLoop() {
 			return
 		}
 		if err := validatePublishedSnapshot(current, next, item.segment); err != nil {
+			w.sessionMu.Unlock()
 			w.observe(MetricEvent{
 				Name:       MetricSegmentPublish,
 				Partition:  w.partition,
@@ -521,6 +569,7 @@ func (w *Writer) publishLoop() {
 		w.signalStateLocked()
 		stop := w.workerCtx.Err() != nil && w.inflightSegments == 0
 		w.mu.Unlock()
+		w.sessionMu.Unlock()
 		if stop {
 			return
 		}
@@ -969,6 +1018,44 @@ func validatePublishedSnapshot(current Snapshot, next Snapshot, segment pmeta.Se
 	return nil
 }
 
+func validateRetentionSnapshot(current Snapshot, result RetentionResult) error {
+	next := result.Snapshot
+	if err := validateHead(next.Head); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPublishResult, err)
+	}
+	switch {
+	case next.Identity != current.Identity:
+		return fmt.Errorf("%w: retention changed writer identity", ErrInvalidPublishResult)
+	case next.Head.StreamID != current.Head.StreamID:
+		return fmt.Errorf("%w: retention changed stream_id", ErrInvalidPublishResult)
+	case next.Head.Partition != current.Head.Partition:
+		return fmt.Errorf("%w: retention changed partition", ErrInvalidPublishResult)
+	case next.Head.NextLSN != current.Head.NextLSN:
+		return fmt.Errorf("%w: retention changed next_lsn from %d to %d", ErrInvalidPublishResult, current.Head.NextLSN, next.Head.NextLSN)
+	case next.Head.SegmentCount != current.Head.SegmentCount:
+		return fmt.Errorf("%w: retention changed segment_count", ErrInvalidPublishResult)
+	case next.Head.HasLastSegment != current.Head.HasLastSegment || next.Head.LastSegment != current.Head.LastSegment:
+		return fmt.Errorf("%w: retention changed last segment", ErrInvalidPublishResult)
+	case next.Head.OldestLSN < current.Head.OldestLSN:
+		return fmt.Errorf("%w: retention moved oldest_lsn backward", ErrInvalidPublishResult)
+	case next.Head.AppliedRetentionVersion < current.Head.AppliedRetentionVersion:
+		return fmt.Errorf("%w: retention version moved backward", ErrInvalidPublishResult)
+	case next.Head.AppliedRetentionLSN < current.Head.AppliedRetentionLSN:
+		return fmt.Errorf("%w: retention lsn moved backward", ErrInvalidPublishResult)
+	}
+	if result.Applied {
+		if result.PolicyVersion == 0 || next.Head.AppliedRetentionVersion != result.PolicyVersion {
+			return fmt.Errorf("%w: applied retention policy version mismatch", ErrInvalidPublishResult)
+		}
+		if next.Head.AppliedRetentionLSN != result.RequestedLSN {
+			return fmt.Errorf("%w: applied retention lsn mismatch", ErrInvalidPublishResult)
+		}
+	} else if next != current {
+		return fmt.Errorf("%w: unapplied retention changed snapshot", ErrInvalidPublishResult)
+	}
+	return nil
+}
+
 func wrapSegmentWrite(err error) error {
 	if err == nil {
 		return nil
@@ -1001,6 +1088,20 @@ func normalizePublishErr(err error) error {
 		return err
 	default:
 		return fmt.Errorf("%w: %w", ErrPublishFailed, err)
+	}
+}
+
+func normalizeRetentionErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, ErrStaleWriter),
+		errors.Is(err, ErrRetentionUnsupported),
+		errors.Is(err, ErrRetentionFailed):
+		return err
+	default:
+		return fmt.Errorf("%w: %w", ErrRetentionFailed, err)
 	}
 }
 

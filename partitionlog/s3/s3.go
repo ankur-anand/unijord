@@ -97,6 +97,10 @@ func (s *Store) WriterManager() catalog.WriterManager {
 	return s.catalog
 }
 
+func (s *Store) RetentionManager() catalog.RetentionManager {
+	return s.catalog
+}
+
 func (s *Store) ReaderCatalog() catalog.Reader {
 	return s.catalog
 }

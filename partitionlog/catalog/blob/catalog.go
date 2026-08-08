@@ -42,20 +42,22 @@ type writerSession struct {
 }
 
 type headFile struct {
-	Version        int                `json:"version"`
-	StreamID       string             `json:"stream_id,omitempty"`
-	Partition      uint32             `json:"partition"`
-	NextLSN        uint64             `json:"next_lsn"`
-	OldestLSN      uint64             `json:"oldest_lsn"`
-	WriterEpoch    uint64             `json:"writer_epoch"`
-	WriterID       [16]byte           `json:"writer_id,omitempty"`
-	SegmentCount   uint64             `json:"segment_count"`
-	LastSegment    pmeta.SegmentRef   `json:"last_segment,omitempty"`
-	HasLastSegment bool               `json:"has_last_segment,omitempty"`
-	IndexFrontier  []pageRef          `json:"index_frontier,omitempty"`
-	LeafFrontier   *pageRef           `json:"leaf_frontier,omitempty"`
-	ActiveSegments []pmeta.SegmentRef `json:"active_segments,omitempty"`
-	Generation     uint64             `json:"generation"`
+	Version                 int                `json:"version"`
+	StreamID                string             `json:"stream_id,omitempty"`
+	Partition               uint32             `json:"partition"`
+	NextLSN                 uint64             `json:"next_lsn"`
+	OldestLSN               uint64             `json:"oldest_lsn"`
+	AppliedRetentionLSN     uint64             `json:"applied_retention_lsn,omitempty"`
+	AppliedRetentionVersion uint64             `json:"applied_retention_version,omitempty"`
+	WriterEpoch             uint64             `json:"writer_epoch"`
+	WriterID                [16]byte           `json:"writer_id,omitempty"`
+	SegmentCount            uint64             `json:"segment_count"`
+	LastSegment             pmeta.SegmentRef   `json:"last_segment,omitempty"`
+	HasLastSegment          bool               `json:"has_last_segment,omitempty"`
+	IndexFrontier           []pageRef          `json:"index_frontier,omitempty"`
+	LeafFrontier            *pageRef           `json:"leaf_frontier,omitempty"`
+	ActiveSegments          []pmeta.SegmentRef `json:"active_segments,omitempty"`
+	Generation              uint64             `json:"generation"`
 }
 
 type pageRef struct {

@@ -25,6 +25,8 @@ The catalog is responsible for:
 - appending committed `SegmentRef`s in order;
 - finding the segment covering an LSN;
 - listing segments through bounded pages;
+- storing monotonic retention intent;
+- applying retention through the fenced writer session;
 - making visibility depend only on the committed head.
 
 The catalog is not responsible for:
@@ -117,13 +119,15 @@ The public partition head is `pmeta.PartitionHead`:
 
 ```go
 type PartitionHead struct {
-    Partition      uint32
-    NextLSN        uint64
-    OldestLSN      uint64
-    WriterEpoch    uint64
-    SegmentCount   uint64
-    LastSegment    SegmentRef
-    HasLastSegment bool
+    Partition               uint32
+    NextLSN                 uint64
+    OldestLSN               uint64
+    AppliedRetentionLSN     uint64
+    AppliedRetentionVersion uint64
+    WriterEpoch             uint64
+    SegmentCount            uint64
+    LastSegment             SegmentRef
+    HasLastSegment          bool
 }
 ```
 
@@ -136,9 +140,9 @@ needs:
 
 - `generation`
 - `writer_id`
-- `compactor_epoch`
-- `active_leaf_ref`
 - `index_frontier`
+- `leaf_frontier`
+- `active_segments`
 - backend CAS token or version
 
 These fields are backend state, not public API.

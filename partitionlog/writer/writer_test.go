@@ -52,6 +52,114 @@ func TestWriterFlushPublishesSegment(t *testing.T) {
 	}
 }
 
+func TestWriterAppliesRetentionWithoutChangingAppendPosition(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cat := catalog.NewMemoryCatalog()
+	opts := testOptions(t, cat, newMemorySegmentFactory())
+	opts.Roll.MaxSegmentRecords = 1
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := w.Append(ctx, Record{TimestampMS: int64(i), Value: []byte("x")}); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if _, err := cat.RequestRetention(ctx, 1, catalog.RetentionRequest{
+		Version:       catalog.RetentionRequestVersion,
+		PolicyVersion: 1,
+		BeforeLSN:     2,
+		CreatedUnixMS: 1,
+	}); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+
+	result, err := w.ApplyPendingRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
+	if !result.Applied || result.Snapshot.Head.OldestLSN != 2 || result.RequestedLSN != 2 || result.PolicyVersion != 1 {
+		t.Fatalf("retention result = %+v", result)
+	}
+	state := w.State()
+	if state.OptimisticNextLSN != 3 || state.Snapshot.Head.NextLSN != 3 || state.Snapshot.Head.SegmentCount != 3 {
+		t.Fatalf("writer state after retention = %+v", state)
+	}
+	if _, err := w.Append(ctx, Record{TimestampMS: 3, Value: []byte("next")}); err != nil {
+		t.Fatalf("Append(after retention) error = %v", err)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestWriterRetentionIsOptional(t *testing.T) {
+	t.Parallel()
+
+	w, err := New(testSessionOptions(newBlockingSession(1), newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.ApplyPendingRetention(context.Background()); !errors.Is(err, ErrRetentionUnsupported) {
+		t.Fatalf("ApplyPendingRetention() error = %v, want %v", err, ErrRetentionUnsupported)
+	}
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+}
+
+func TestWriterSerializesRetentionWithSegmentPublication(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	session := newSerializedRetentionSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.Append(ctx, Record{TimestampMS: 1, Value: []byte("x")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	select {
+	case <-session.publishEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment publication")
+	}
+
+	callStarted := make(chan struct{})
+	applyDone := make(chan error, 1)
+	go func() {
+		close(callStarted)
+		_, err := w.ApplyPendingRetention(ctx)
+		applyDone <- err
+	}()
+	<-callStarted
+	select {
+	case <-session.retentionEntered:
+		t.Fatal("retention entered session while segment publication was active")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(session.releasePublish)
+	select {
+	case <-session.retentionEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retention did not enter after publication completed")
+	}
+	if err := <-applyDone; err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestWriterCutSwapsAndAllowsContinuedAppend(t *testing.T) {
 	t.Parallel()
 
@@ -814,9 +922,28 @@ func newTestSegmentOptions(partition uint32) segwriter.Options {
 }
 
 type sessionStub struct {
-	mu       sync.Mutex
-	snapshot Snapshot
-	publish  func(ctx context.Context, req PublishRequest, current Snapshot) (Snapshot, error)
+	mu        sync.Mutex
+	snapshot  Snapshot
+	publish   func(ctx context.Context, req PublishRequest, current Snapshot) (Snapshot, error)
+	retention func(ctx context.Context, current Snapshot) (RetentionResult, error)
+}
+
+func (s *sessionStub) ApplyPendingRetention(ctx context.Context) (RetentionResult, error) {
+	s.mu.Lock()
+	current := s.snapshot
+	apply := s.retention
+	s.mu.Unlock()
+	if apply == nil {
+		return RetentionResult{}, ErrRetentionUnsupported
+	}
+	result, err := apply(ctx, current)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	s.mu.Lock()
+	s.snapshot = result.Snapshot
+	s.mu.Unlock()
+	return result, nil
 }
 
 func (s *sessionStub) Snapshot() Snapshot {
@@ -853,7 +980,7 @@ func newCatalogSession(t testing.TB, cat interface {
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
-	return &sessionStub{
+	session := &sessionStub{
 		snapshot: Snapshot{
 			Head: ws.Head(),
 			Identity: WriterIdentity{
@@ -878,12 +1005,99 @@ func newCatalogSession(t testing.TB, cat interface {
 			}, nil
 		},
 	}
+	if retention, ok := ws.(catalog.RetentionWriterSession); ok {
+		session.retention = func(ctx context.Context, current Snapshot) (RetentionResult, error) {
+			result, err := retention.ApplyPendingRetention(ctx)
+			if err != nil {
+				if errors.Is(err, catalog.ErrStaleWriter) {
+					return RetentionResult{}, fmt.Errorf("%w: %w", ErrStaleWriter, err)
+				}
+				return RetentionResult{}, err
+			}
+			return RetentionResult{
+				Snapshot:      Snapshot{Head: result.Head, Identity: current.Identity},
+				PolicyVersion: result.Request.PolicyVersion,
+				RequestedLSN:  result.Head.AppliedRetentionLSN,
+				Applied:       result.Applied,
+			}, nil
+		}
+	}
+	return session
 }
 
 type blockingSession struct {
 	mu       sync.Mutex
 	snapshot Snapshot
 	release  chan struct{}
+}
+
+type serializedRetentionSession struct {
+	mu               sync.Mutex
+	snapshot         Snapshot
+	publishEntered   chan struct{}
+	releasePublish   chan struct{}
+	retentionEntered chan struct{}
+	publishOnce      sync.Once
+	retentionOnce    sync.Once
+}
+
+func newSerializedRetentionSession(partition uint32) *serializedRetentionSession {
+	return &serializedRetentionSession{
+		snapshot: Snapshot{
+			Head: pmeta.PartitionHead{Partition: partition, WriterEpoch: 1},
+			Identity: WriterIdentity{
+				Epoch: 1,
+				Tag:   [16]byte{9, 8, 7},
+			},
+		},
+		publishEntered:   make(chan struct{}),
+		releasePublish:   make(chan struct{}),
+		retentionEntered: make(chan struct{}),
+	}
+}
+
+func (s *serializedRetentionSession) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot
+}
+
+func (s *serializedRetentionSession) PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error) {
+	s.publishOnce.Do(func() { close(s.publishEntered) })
+	select {
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
+	case <-s.releasePublish:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.snapshot
+	next.Head.NextLSN = req.Segment.NextLSN()
+	if !next.Head.HasLastSegment {
+		next.Head.OldestLSN = req.Segment.BaseLSN
+	}
+	next.Head.LastSegment = req.Segment
+	next.Head.HasLastSegment = true
+	next.Head.SegmentCount++
+	s.snapshot = next
+	return next, nil
+}
+
+func (s *serializedRetentionSession) ApplyPendingRetention(context.Context) (RetentionResult, error) {
+	s.retentionOnce.Do(func() { close(s.retentionEntered) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.snapshot
+	next.Head.AppliedRetentionVersion = 1
+	next.Head.AppliedRetentionLSN = next.Head.OldestLSN
+	s.snapshot = next
+	return RetentionResult{
+		Snapshot:      next,
+		PolicyVersion: 1,
+		RequestedLSN:  next.Head.AppliedRetentionLSN,
+		Applied:       true,
+	}, nil
 }
 
 func newBlockingSession(partition uint32) *blockingSession {

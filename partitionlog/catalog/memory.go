@@ -17,6 +17,7 @@ type MemoryCatalog struct {
 	mu         sync.RWMutex
 	streamID   string
 	partitions map[uint32]*memoryPartition
+	retention  map[uint32]RetentionRequest
 }
 
 type memoryPartition struct {
@@ -39,7 +40,10 @@ type memoryWriterSession struct {
 
 // NewMemoryCatalog returns an in-process catalog for tests and local tools.
 func NewMemoryCatalog() *MemoryCatalog {
-	return &MemoryCatalog{partitions: make(map[uint32]*memoryPartition)}
+	return &MemoryCatalog{
+		partitions: make(map[uint32]*memoryPartition),
+		retention:  make(map[uint32]RetentionRequest),
+	}
 }
 
 // NewMemory is the short constructor for the in-process catalog.
@@ -121,6 +125,88 @@ func (c *MemoryCatalog) LoadPartition(ctx context.Context, partition uint32) (pm
 		return pmeta.PartitionHead{StreamID: c.streamID, Partition: partition}, nil
 	}
 	return data.state, nil
+}
+
+func (c *MemoryCatalog) RequestRetention(ctx context.Context, partition uint32, request RetentionRequest) (RetentionRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return RetentionRequest{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return RetentionRequest{}, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retention == nil {
+		c.retention = make(map[uint32]RetentionRequest)
+	}
+	current, ok := c.retention[partition]
+	if ok {
+		switch {
+		case request.PolicyVersion == current.PolicyVersion && request.BeforeLSN == current.BeforeLSN:
+			return current, nil
+		case request.PolicyVersion <= current.PolicyVersion:
+			return RetentionRequest{}, fmt.Errorf("%w: policy_version=%d current=%d", ErrRetentionRegression, request.PolicyVersion, current.PolicyVersion)
+		case request.BeforeLSN < current.BeforeLSN:
+			return RetentionRequest{}, fmt.Errorf("%w: before_lsn=%d current=%d", ErrRetentionRegression, request.BeforeLSN, current.BeforeLSN)
+		}
+	}
+	c.retention[partition] = request
+	return request, nil
+}
+
+func (c *MemoryCatalog) LoadRetentionRequest(ctx context.Context, partition uint32) (RetentionRequest, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return RetentionRequest{}, false, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	request, ok := c.retention[partition]
+	return request, ok, nil
+}
+
+func (c *MemoryCatalog) applyPendingRetention(ctx context.Context, partition uint32, writerID [16]byte, writerEpoch uint64) (RetentionApplyResult, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return RetentionApplyResult{}, 0, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.partitions == nil {
+		c.partitions = make(map[uint32]*memoryPartition)
+	}
+	data := c.getOrCreateLocked(partition)
+	state := data.state
+	if state.WriterEpoch != writerEpoch || data.writerID != writerID {
+		return RetentionApplyResult{}, 0, fmt.Errorf("%w: writer fence moved", ErrStaleWriter)
+	}
+	request, ok := c.retention[partition]
+	if !ok || request.PolicyVersion <= state.AppliedRetentionVersion {
+		return RetentionApplyResult{Head: state, Request: request}, data.headVersion, nil
+	}
+	if request.BeforeLSN < state.AppliedRetentionLSN {
+		return RetentionApplyResult{}, 0, fmt.Errorf("%w: before_lsn=%d applied=%d", ErrRetentionRegression, request.BeforeLSN, state.AppliedRetentionLSN)
+	}
+
+	target := request.BeforeLSN
+	if target > state.NextLSN {
+		target = state.NextLSN
+	}
+	if target > state.OldestLSN && len(data.segments) > 0 {
+		start := firstSegmentAtOrAfter(data.segments, target)
+		if start == len(data.segments) {
+			data.segments = nil
+			state.OldestLSN = state.NextLSN
+		} else {
+			state.OldestLSN = data.segments[start].BaseLSN
+			data.segments = append([]pmeta.SegmentRef(nil), data.segments[start:]...)
+		}
+	}
+	state.AppliedRetentionLSN = target
+	state.AppliedRetentionVersion = request.PolicyVersion
+	data.state = state
+	data.headVersion++
+	return RetentionApplyResult{Head: state, Request: request, Applied: true}, data.headVersion, nil
 }
 
 func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, writerID [16]byte, writerEpoch uint64, expectedNextLSN uint64, segment pmeta.SegmentRef) (pmeta.PartitionHead, uint64, error) {
@@ -314,4 +400,17 @@ func (s *memoryWriterSession) AppendSegment(ctx context.Context, segment pmeta.S
 	s.headVersion = headVersion
 	s.mu.Unlock()
 	return state, nil
+}
+
+func (s *memoryWriterSession) ApplyPendingRetention(ctx context.Context) (RetentionApplyResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, headVersion, err := s.cat.applyPendingRetention(ctx, s.partition, s.writerID, s.writerEpoch)
+	if err != nil {
+		return RetentionApplyResult{}, err
+	}
+	s.state = result.Head
+	s.headVersion = headVersion
+	return result, nil
 }

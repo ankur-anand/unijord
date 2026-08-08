@@ -27,6 +27,12 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 	if head.WriterEpoch > 0 && head.WriterID == ([16]byte{}) {
 		return fmt.Errorf("%w: head has writer_epoch without writer_id", ErrCorruptCatalog)
 	}
+	if head.AppliedRetentionVersion == 0 && head.AppliedRetentionLSN != 0 {
+		return fmt.Errorf("%w: applied retention lsn without version", ErrCorruptCatalog)
+	}
+	if head.AppliedRetentionLSN > head.NextLSN {
+		return fmt.Errorf("%w: applied_retention_lsn=%d next_lsn=%d", ErrCorruptCatalog, head.AppliedRetentionLSN, head.NextLSN)
+	}
 	if !head.HasLastSegment {
 		if head.OldestLSN != head.NextLSN || head.SegmentCount != 0 || head.LeafFrontier != nil || len(head.IndexFrontier) != 0 || len(head.ActiveSegments) != 0 {
 			return fmt.Errorf("%w: empty head carries segment state", ErrCorruptCatalog)
@@ -51,7 +57,7 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 	if head.NextLSN != head.LastSegment.NextLSN() {
 		return fmt.Errorf("%w: head next_lsn=%d last next_lsn=%d", ErrCorruptCatalog, head.NextLSN, head.LastSegment.NextLSN())
 	}
-	if head.OldestLSN > head.LastSegment.BaseLSN {
+	if head.OldestLSN < head.NextLSN && head.OldestLSN > head.LastSegment.BaseLSN {
 		return fmt.Errorf("%w: head oldest_lsn=%d last base_lsn=%d", ErrCorruptCatalog, head.OldestLSN, head.LastSegment.BaseLSN)
 	}
 	for i, ref := range head.IndexFrontier {
@@ -73,6 +79,12 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 	}
 	if len(head.ActiveSegments) > int(csession.MaxSegmentPageLimit) {
 		return fmt.Errorf("%w: active segment count=%d", ErrCorruptCatalog, len(head.ActiveSegments))
+	}
+	if head.OldestLSN == head.NextLSN {
+		if head.LeafFrontier != nil || len(head.IndexFrontier) != 0 || len(head.ActiveSegments) != 0 {
+			return fmt.Errorf("%w: fully retained head carries reachable history", ErrCorruptCatalog)
+		}
+		return nil
 	}
 
 	roots := reachableRoots(head)

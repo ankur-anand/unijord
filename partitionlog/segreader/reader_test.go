@@ -119,6 +119,24 @@ func TestScannerStreamsBlockByBlock(t *testing.T) {
 	assertRecordsEqual(t, records, fixture.records[9:])
 }
 
+func TestScannerReturnsDetachedRecords(t *testing.T) {
+	t.Parallel()
+
+	fixture := buildSegment(t, segformat.CodecZstd, segformat.HashXXH64, 8, 1_000, 1_000_000, 64)
+	reader := openFixture(t, fixture, DefaultOptions())
+	records, err := reader.Read(context.Background(), fixture.ref.BaseLSN, 1)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	records[0].Value[0] ^= 0xff
+
+	again, err := reader.Read(context.Background(), fixture.ref.BaseLSN, 1)
+	if err != nil {
+		t.Fatalf("Read(again) error = %v", err)
+	}
+	assertRecordsEqual(t, again, fixture.records[:1])
+}
+
 func TestFindLSNByTimestamp(t *testing.T) {
 	t.Parallel()
 

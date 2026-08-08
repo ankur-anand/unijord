@@ -16,6 +16,7 @@ const (
 	MetricWriterFlush           MetricName = "writer.flush"
 	MetricWriterClose           MetricName = "writer.close"
 	MetricWriterAbort           MetricName = "writer.abort"
+	MetricWriterRetention       MetricName = "writer.retention"
 	MetricWriterSegmentFinalize MetricName = "writer.segment_finalize"
 	MetricWriterSegmentPublish  MetricName = "writer.segment_publish"
 

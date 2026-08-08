@@ -24,9 +24,10 @@ import (
 )
 
 store, err := pls3.New(pls3.Options{
-    Client: s3Client,
-    Bucket: "events",
-    Prefix: "prod",
+    Client:   s3Client,
+    Bucket:   "events",
+    Prefix:   "prod",
+    StreamID: "hosts/host-a/events",
 })
 if err != nil {
     return err
@@ -101,6 +102,31 @@ Use `Close` during graceful shutdown:
 ```go
 snapshot, err := writer.Close(ctx)
 ```
+
+## Retention
+
+Retention is an explicit two-step operation. A scheduler records monotonic
+intent without touching partition visibility:
+
+```go
+_, err := log.RequestRetention(ctx, partitionlog.RetentionRequest{
+    Partition:     7,
+    PolicyVersion: 42,
+    BeforeLSN:     1_000_000,
+})
+```
+
+The active partition writer applies the latest request through its existing
+fence and ordered catalog session:
+
+```go
+result, err := writer.ApplyRetention(ctx)
+```
+
+Records below `result.Snapshot.Head.OldestLSN` are no longer visible. Retention
+keeps a whole immutable segment when `BeforeLSN` falls inside it, so the
+effective `OldestLSN` can be lower than `result.RequestedLSN`. Physical object
+deletion is a separate grace-period GC operation.
 
 ## Read
 

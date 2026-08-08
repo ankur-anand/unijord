@@ -15,14 +15,21 @@ const (
 // PartitionHead is the bounded hot metadata for one stream partition. Full
 // history is read through paged segment refs, not embedded here.
 type PartitionHead struct {
-	StreamID       string
-	Partition      uint32
-	NextLSN        uint64
-	OldestLSN      uint64
-	WriterEpoch    uint64
-	SegmentCount   uint64
-	LastSegment    SegmentRef
-	HasLastSegment bool
+	StreamID  string
+	Partition uint32
+	NextLSN   uint64
+	OldestLSN uint64
+	// AppliedRetentionLSN is the highest requested retention boundary applied
+	// by the partition owner. OldestLSN may be lower when this boundary falls
+	// inside an immutable segment.
+	AppliedRetentionLSN uint64
+	// AppliedRetentionVersion identifies the latest retention policy request
+	// incorporated into catalog visibility.
+	AppliedRetentionVersion uint64
+	WriterEpoch             uint64
+	SegmentCount            uint64
+	LastSegment             SegmentRef
+	HasLastSegment          bool
 }
 
 func (h PartitionHead) Last() (SegmentRef, bool) {

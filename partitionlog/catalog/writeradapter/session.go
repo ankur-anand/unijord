@@ -18,6 +18,7 @@ type Session struct {
 }
 
 var _ writer.Session = (*Session)(nil)
+var _ writer.RetentionSession = (*Session)(nil)
 
 func New(inner catalog.WriterSession) (*Session, error) {
 	if inner == nil {
@@ -47,12 +48,14 @@ func (s *Session) PublishSegment(ctx context.Context, req writer.PublishRequest)
 		return writer.Snapshot{}, fmt.Errorf("%w: nil catalog session", writer.ErrInvalidSession)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	nextHead, err := s.inner.AppendSegment(ctx, req.Segment)
 	if err != nil {
 		return writer.Snapshot{}, mapCatalogError(err)
 	}
 
-	s.mu.Lock()
 	s.snapshot = writer.Snapshot{
 		Head: nextHead,
 		Identity: writer.WriterIdentity{
@@ -61,8 +64,37 @@ func (s *Session) PublishSegment(ctx context.Context, req writer.PublishRequest)
 		},
 	}
 	next := s.snapshot
-	s.mu.Unlock()
 	return next, nil
+}
+
+func (s *Session) ApplyPendingRetention(ctx context.Context) (writer.RetentionResult, error) {
+	if s == nil || s.inner == nil {
+		return writer.RetentionResult{}, fmt.Errorf("%w: nil catalog session", writer.ErrInvalidSession)
+	}
+	inner, ok := s.inner.(catalog.RetentionWriterSession)
+	if !ok {
+		return writer.RetentionResult{}, writer.ErrRetentionUnsupported
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result, err := inner.ApplyPendingRetention(ctx)
+	if err != nil {
+		return writer.RetentionResult{}, mapRetentionError(err)
+	}
+	s.snapshot = writer.Snapshot{
+		Head: result.Head,
+		Identity: writer.WriterIdentity{
+			Epoch: s.snapshot.Identity.Epoch,
+			Tag:   s.snapshot.Identity.Tag,
+		},
+	}
+	return writer.RetentionResult{
+		Snapshot:      s.snapshot,
+		PolicyVersion: result.Request.PolicyVersion,
+		RequestedLSN:  result.Head.AppliedRetentionLSN,
+		Applied:       result.Applied,
+	}, nil
 }
 
 func mapCatalogError(err error) error {
@@ -76,4 +108,17 @@ func mapCatalogError(err error) error {
 		return fmt.Errorf("%w: %w", writer.ErrPublishIndeterminate, err)
 	}
 	return fmt.Errorf("%w: %w", writer.ErrPublishFailed, err)
+}
+
+func mapRetentionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, catalog.ErrStaleWriter) {
+		return fmt.Errorf("%w: %w", writer.ErrStaleWriter, err)
+	}
+	if errors.Is(err, catalog.ErrRetentionUnsupported) {
+		return fmt.Errorf("%w: %w", writer.ErrRetentionUnsupported, err)
+	}
+	return fmt.Errorf("%w: %w", writer.ErrRetentionFailed, err)
 }

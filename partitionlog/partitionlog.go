@@ -6,6 +6,7 @@ import (
 	"time"
 
 	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	"github.com/ankur-anand/unijord/partitionlog/catalog/writeradapter"
 	"github.com/ankur-anand/unijord/partitionlog/reader"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
@@ -93,6 +94,33 @@ func (l *Log) InitializePartition(ctx context.Context, opts InitializePartition)
 		return InitializePartitionResult{}, err
 	}
 	return InitializePartitionResult{Head: head, Created: created}, nil
+}
+
+// RequestRetention stores a monotonic retention request. It does not change
+// reader visibility until the active partition writer applies it.
+func (l *Log) RequestRetention(ctx context.Context, request RetentionRequest) (RetentionRequestState, error) {
+	if l == nil || l.store == nil {
+		return RetentionRequestState{}, fmt.Errorf("partitionlog: nil log")
+	}
+	manager := l.store.RetentionManager()
+	if manager == nil {
+		return RetentionRequestState{}, fmt.Errorf("partitionlog: nil retention catalog")
+	}
+	durable, err := manager.RequestRetention(ctx, request.Partition, catalog.RetentionRequest{
+		Version:       catalog.RetentionRequestVersion,
+		PolicyVersion: request.PolicyVersion,
+		BeforeLSN:     request.BeforeLSN,
+		CreatedUnixMS: time.Now().UTC().UnixMilli(),
+	})
+	if err != nil {
+		return RetentionRequestState{}, err
+	}
+	return RetentionRequestState{
+		Partition:     request.Partition,
+		PolicyVersion: durable.PolicyVersion,
+		BeforeLSN:     durable.BeforeLSN,
+		CreatedUnixMS: durable.CreatedUnixMS,
+	}, nil
 }
 
 // OpenWriter opens one fenced writer for one partition.
@@ -238,6 +266,25 @@ func (w *Writer) State() WriterState {
 
 func (w *Writer) Err() error {
 	return w.inner.Err()
+}
+
+// ApplyRetention applies the latest pending retention request through this
+// writer's fence. Calls with no newer request are no-ops.
+func (w *Writer) ApplyRetention(ctx context.Context) (result RetentionResult, err error) {
+	start := time.Now()
+	defer func() {
+		w.observeWriterSnapshotOperation(MetricWriterRetention, result.Snapshot, time.Since(start), err)
+	}()
+	inner, err := w.inner.ApplyPendingRetention(ctx)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	return RetentionResult{
+		Snapshot:      snapshotFromWriter(inner.Snapshot),
+		PolicyVersion: inner.PolicyVersion,
+		RequestedLSN:  inner.RequestedLSN,
+		Applied:       inner.Applied,
+	}, nil
 }
 
 func (w *Writer) observeWriterOperation(name MetricName, duration time.Duration, err error) {

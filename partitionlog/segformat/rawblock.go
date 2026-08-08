@@ -5,6 +5,68 @@ import (
 	"fmt"
 )
 
+// RawBlockScanner decodes one record at a time from an uncompressed block.
+// Returned records alias raw until the scanner and raw bytes are released.
+// RawBlockScanner is not safe for concurrent use.
+type RawBlockScanner struct {
+	raw             []byte
+	block           BlockPreamble
+	offset          int
+	recordIndex     uint32
+	prevTimestampMS int64
+}
+
+// NewRawBlockScanner validates the block envelope and returns a scanner at the
+// first record. Record-envelope validation remains incremental as Next advances.
+func NewRawBlockScanner(raw []byte, block BlockPreamble) (RawBlockScanner, error) {
+	if err := validateRawBlockEnvelope(raw, block); err != nil {
+		return RawBlockScanner{}, err
+	}
+	return RawBlockScanner{raw: raw, block: block}, nil
+}
+
+// Next returns the next record. The returned headers and value alias the raw
+// block bytes supplied to NewRawBlockScanner.
+func (s *RawBlockScanner) Next() (Record, bool, error) {
+	if s == nil {
+		return Record{}, false, fmt.Errorf("%w: nil raw block scanner", ErrInvalidSegment)
+	}
+	if s.recordIndex >= s.block.RecordCount {
+		if s.offset != len(s.raw) {
+			return Record{}, false, fmt.Errorf("%w: raw block has %d trailing bytes", ErrInvalidSegment, len(s.raw)-s.offset)
+		}
+		return Record{}, false, nil
+	}
+	if len(s.raw)-s.offset < RecordHeaderSize {
+		return Record{}, false, fmt.Errorf("%w: truncated raw record header", ErrInvalidSegment)
+	}
+	rawRecord, next, err := scanRawRecord(s.raw, s.offset)
+	if err != nil {
+		return Record{}, false, err
+	}
+	timestampMS := rawRecord.TimestampMS
+	if timestampMS < s.block.MinTimestampMS || timestampMS > s.block.MaxTimestampMS {
+		return Record{}, false, fmt.Errorf("%w: timestamp=%d outside block range", ErrInvalidSegment, timestampMS)
+	}
+	if s.recordIndex > 0 && timestampMS < s.prevTimestampMS {
+		return Record{}, false, fmt.Errorf("%w: timestamp regression at record %d", ErrInvalidSegment, s.recordIndex)
+	}
+	if s.recordIndex+1 == s.block.RecordCount && next != len(s.raw) {
+		return Record{}, false, fmt.Errorf("%w: raw block has %d trailing bytes", ErrInvalidSegment, len(s.raw)-next)
+	}
+
+	record := Record{
+		LSN:         s.block.BaseLSN + uint64(s.recordIndex),
+		TimestampMS: timestampMS,
+		Headers:     rawRecord.Headers,
+		Value:       rawRecord.Value,
+	}
+	s.offset = next
+	s.recordIndex++
+	s.prevTimestampMS = timestampMS
+	return record, true, nil
+}
+
 func EncodeRawBlock(records []RawRecord) ([]byte, error) {
 	if len(records) == 0 {
 		return nil, fmt.Errorf("%w: raw block must contain at least one record", ErrInvalidSegment)
@@ -37,49 +99,56 @@ func EncodeRawBlock(records []RawRecord) ([]byte, error) {
 }
 
 func DecodeRawBlock(raw []byte, block BlockPreamble) ([]Record, error) {
-	if err := block.Validate(); err != nil {
+	if err := validateRawBlockEnvelope(raw, block); err != nil {
 		return nil, err
-	}
-	if _, err := lastLSN(block.BaseLSN, block.RecordCount); err != nil {
-		return nil, err
-	}
-	if len(raw) != int(block.RawSize) {
-		return nil, fmt.Errorf("%w: raw_size=%d want=%d", ErrInvalidSegment, len(raw), block.RawSize)
-	}
-	if block.RecordCount > uint32(len(raw)/RecordHeaderSize) {
-		return nil, fmt.Errorf("%w: record_count=%d cannot fit in raw_size=%d", ErrInvalidSegment, block.RecordCount, len(raw))
 	}
 	records := make([]Record, 0, block.RecordCount)
-	off := 0
-	var prevTS int64
+	offset := 0
+	var prevTimestampMS int64
 	for i := uint32(0); i < block.RecordCount; i++ {
-		if len(raw)-off < RecordHeaderSize {
+		if len(raw)-offset < RecordHeaderSize {
 			return nil, fmt.Errorf("%w: truncated raw record header", ErrInvalidSegment)
 		}
-		record, next, err := scanRawRecord(raw, off)
+		rawRecord, next, err := scanRawRecord(raw, offset)
 		if err != nil {
 			return nil, err
 		}
-		ts := record.TimestampMS
-		if ts < block.MinTimestampMS || ts > block.MaxTimestampMS {
-			return nil, fmt.Errorf("%w: timestamp=%d outside block range", ErrInvalidSegment, ts)
+		timestampMS := rawRecord.TimestampMS
+		if timestampMS < block.MinTimestampMS || timestampMS > block.MaxTimestampMS {
+			return nil, fmt.Errorf("%w: timestamp=%d outside block range", ErrInvalidSegment, timestampMS)
 		}
-		if i > 0 && ts < prevTS {
+		if i > 0 && timestampMS < prevTimestampMS {
 			return nil, fmt.Errorf("%w: timestamp regression at record %d", ErrInvalidSegment, i)
 		}
-		prevTS = ts
+		prevTimestampMS = timestampMS
 		records = append(records, Record{
 			LSN:         block.BaseLSN + uint64(i),
-			TimestampMS: ts,
-			Headers:     record.Headers,
-			Value:       record.Value,
+			TimestampMS: timestampMS,
+			Headers:     rawRecord.Headers,
+			Value:       rawRecord.Value,
 		})
-		off = next
+		offset = next
 	}
-	if off != len(raw) {
-		return nil, fmt.Errorf("%w: raw block has %d trailing bytes", ErrInvalidSegment, len(raw)-off)
+	if offset != len(raw) {
+		return nil, fmt.Errorf("%w: raw block has %d trailing bytes", ErrInvalidSegment, len(raw)-offset)
 	}
 	return records, nil
+}
+
+func validateRawBlockEnvelope(raw []byte, block BlockPreamble) error {
+	if err := block.Validate(); err != nil {
+		return err
+	}
+	if _, err := lastLSN(block.BaseLSN, block.RecordCount); err != nil {
+		return err
+	}
+	if len(raw) != int(block.RawSize) {
+		return fmt.Errorf("%w: raw_size=%d want=%d", ErrInvalidSegment, len(raw), block.RawSize)
+	}
+	if block.RecordCount > uint32(len(raw)/RecordHeaderSize) {
+		return fmt.Errorf("%w: record_count=%d cannot fit in raw_size=%d", ErrInvalidSegment, block.RecordCount, len(raw))
+	}
+	return nil
 }
 
 func RecordSize(headers []Header, value []byte) (int, error) {

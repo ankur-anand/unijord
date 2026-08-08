@@ -369,6 +369,8 @@ func sameHeadState(a, b headFile) bool {
 		a.Partition != b.Partition ||
 		a.NextLSN != b.NextLSN ||
 		a.OldestLSN != b.OldestLSN ||
+		a.AppliedRetentionLSN != b.AppliedRetentionLSN ||
+		a.AppliedRetentionVersion != b.AppliedRetentionVersion ||
 		a.WriterEpoch != b.WriterEpoch ||
 		a.WriterID != b.WriterID ||
 		a.SegmentCount != b.SegmentCount ||
@@ -496,14 +498,16 @@ func idempotentHeadRetry(head headFile, segment pmeta.SegmentRef) (pmeta.Partiti
 
 func stateFromHead(head headFile) pmeta.PartitionHead {
 	return pmeta.PartitionHead{
-		StreamID:       head.StreamID,
-		Partition:      head.Partition,
-		NextLSN:        head.NextLSN,
-		OldestLSN:      head.OldestLSN,
-		WriterEpoch:    head.WriterEpoch,
-		SegmentCount:   head.SegmentCount,
-		LastSegment:    head.LastSegment,
-		HasLastSegment: head.HasLastSegment,
+		StreamID:                head.StreamID,
+		Partition:               head.Partition,
+		NextLSN:                 head.NextLSN,
+		OldestLSN:               head.OldestLSN,
+		AppliedRetentionLSN:     head.AppliedRetentionLSN,
+		AppliedRetentionVersion: head.AppliedRetentionVersion,
+		WriterEpoch:             head.WriterEpoch,
+		SegmentCount:            head.SegmentCount,
+		LastSegment:             head.LastSegment,
+		HasLastSegment:          head.HasLastSegment,
 	}
 }
 

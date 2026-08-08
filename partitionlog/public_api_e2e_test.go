@@ -22,9 +22,83 @@ func TestPublicAPIEndToEndAcrossBlobStores(t *testing.T) {
 	}
 }
 
+func TestPublicAPIRetentionAcrossBlobStores(t *testing.T) {
+	for _, tc := range publicAPIStoreCases() {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runPublicAPIRetention(t, tc.open(t, "partitionlog-retention-"+tc.name))
+		})
+	}
+}
+
 type publicAPIStoreCase struct {
 	name string
 	open func(t *testing.T, prefix string) partitionlog.Store
+}
+
+func runPublicAPIRetention(t *testing.T, store partitionlog.Store) {
+	t.Helper()
+	ctx := context.Background()
+	const partition uint32 = 201
+
+	log, err := partitionlog.Open(partitionlog.Options{Store: store})
+	if err != nil {
+		t.Fatalf("partitionlog.Open() error = %v", err)
+	}
+	w, err := log.OpenWriter(ctx, partitionlog.WriterOptions{
+		Partition: partition,
+		WriterID:  [16]byte{2, 0, 1},
+		Batch:     partitionlog.BatchPolicy{MaxRecords: 2},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	defer func() { _ = w.Abort(context.Background()) }()
+	for i := 0; i < 4; i++ {
+		if _, err := w.Append(ctx, partitionlog.Record{TimestampMS: int64(i), Value: []byte{byte(i)}}); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if _, err := log.RequestRetention(ctx, partitionlog.RetentionRequest{
+		Partition:     partition,
+		PolicyVersion: 1,
+		BeforeLSN:     3,
+	}); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+	result, err := w.ApplyRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyRetention() error = %v", err)
+	}
+	if !result.Applied || result.RequestedLSN != 3 || result.Snapshot.Head.OldestLSN != 2 || result.Snapshot.Head.NextLSN != 4 {
+		t.Fatalf("retention result = %+v", result)
+	}
+
+	partitionReader := log.Reader().Partition(partition)
+	if _, err := partitionReader.Read(ctx, partitionlog.ReadRequest{
+		StartLSN:  1,
+		Limit:     1,
+		Freshness: partitionlog.FreshnessLatest,
+	}); !errors.As(err, new(partitionlog.LSNExpiredError)) {
+		t.Fatalf("Read(expired) error = %v, want LSNExpiredError", err)
+	}
+	read, err := partitionReader.Read(ctx, partitionlog.ReadRequest{
+		StartLSN:  2,
+		Limit:     4,
+		Freshness: partitionlog.FreshnessLatest,
+	})
+	if err != nil {
+		t.Fatalf("Read(retained) error = %v", err)
+	}
+	if len(read.Records) != 2 || read.Records[0].LSN != 2 || read.Records[1].LSN != 3 {
+		t.Fatalf("Read(retained) = %+v", read)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 }
 
 func publicAPIStoreCases() []publicAPIStoreCase {

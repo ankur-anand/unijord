@@ -52,6 +52,31 @@ type InitializePartitionResult struct {
 	Created bool
 }
 
+// RetentionRequest asks the partition owner to retire complete segments below
+// BeforeLSN. PolicyVersion must increase for every changed request.
+type RetentionRequest struct {
+	Partition     uint32
+	PolicyVersion uint64
+	BeforeLSN     uint64
+}
+
+// RetentionRequestState is the durable retention intent stored by the catalog.
+type RetentionRequestState struct {
+	Partition     uint32
+	PolicyVersion uint64
+	BeforeLSN     uint64
+	CreatedUnixMS int64
+}
+
+// RetentionResult reports whether the active writer incorporated a pending
+// request into partition visibility.
+type RetentionResult struct {
+	Snapshot      Snapshot
+	PolicyVersion uint64
+	RequestedLSN  uint64
+	Applied       bool
+}
+
 type WriterState struct {
 	Snapshot          Snapshot
 	OptimisticNextLSN uint64

@@ -205,6 +205,102 @@ func TestRawBlockEncodeDecode(t *testing.T) {
 	}
 }
 
+func TestRawBlockScanner(t *testing.T) {
+	raw, err := EncodeRawBlock([]RawRecord{
+		{TimestampMS: 10, Headers: []Header{{Key: []byte("kind"), Value: []byte("first")}}, Value: []byte("alpha")},
+		{TimestampMS: 11, Value: []byte("beta")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	block := BlockPreamble{
+		StoredSize:     uint32(len(raw)),
+		RawSize:        uint32(len(raw)),
+		RecordCount:    2,
+		BaseLSN:        50,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 11,
+		BlockHash:      1,
+	}
+	scanner, err := NewRawBlockScanner(raw, block)
+	if err != nil {
+		t.Fatalf("NewRawBlockScanner() error = %v", err)
+	}
+
+	first, ok, err := scanner.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next(first) = %+v, %v, %v", first, ok, err)
+	}
+	if first.LSN != 50 || first.TimestampMS != 10 || string(first.Value) != "alpha" || len(first.Headers) != 1 {
+		t.Fatalf("first record = %+v", first)
+	}
+	second, ok, err := scanner.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next(second) = %+v, %v, %v", second, ok, err)
+	}
+	if second.LSN != 51 || second.TimestampMS != 11 || string(second.Value) != "beta" {
+		t.Fatalf("second record = %+v", second)
+	}
+	if record, ok, err := scanner.Next(); err != nil || ok {
+		t.Fatalf("Next(eof) = %+v, %v, %v", record, ok, err)
+	}
+}
+
+func TestRawBlockScannerRejectsTrailingBytesBeforeLastRecord(t *testing.T) {
+	raw, err := EncodeRawBlock([]RawRecord{{TimestampMS: 10, Value: []byte("alpha")}})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	raw = append(raw, 0)
+	block := BlockPreamble{
+		StoredSize:     uint32(len(raw)),
+		RawSize:        uint32(len(raw)),
+		RecordCount:    1,
+		BaseLSN:        50,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	scanner, err := NewRawBlockScanner(raw, block)
+	if err != nil {
+		t.Fatalf("NewRawBlockScanner() error = %v", err)
+	}
+	if _, ok, err := scanner.Next(); !errors.Is(err, ErrInvalidSegment) || ok {
+		t.Fatalf("Next() ok=%v error=%v, want %v", ok, err, ErrInvalidSegment)
+	}
+}
+
+func TestRawBlockScannerReportsLaterTimestampRegression(t *testing.T) {
+	raw, err := EncodeRawBlock([]RawRecord{
+		{TimestampMS: 10, Value: []byte("a")},
+		{TimestampMS: 11, Value: []byte("b")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	secondOffset := RecordHeaderSize + 1
+	binary.BigEndian.PutUint64(raw[secondOffset:secondOffset+8], uint64(9))
+	block := BlockPreamble{
+		StoredSize:     uint32(len(raw)),
+		RawSize:        uint32(len(raw)),
+		RecordCount:    2,
+		BaseLSN:        50,
+		MinTimestampMS: 9,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	scanner, err := NewRawBlockScanner(raw, block)
+	if err != nil {
+		t.Fatalf("NewRawBlockScanner() error = %v", err)
+	}
+	if _, ok, err := scanner.Next(); err != nil || !ok {
+		t.Fatalf("Next(first) ok=%v error=%v", ok, err)
+	}
+	if _, ok, err := scanner.Next(); !errors.Is(err, ErrInvalidSegment) || ok {
+		t.Fatalf("Next(second) ok=%v error=%v, want %v", ok, err, ErrInvalidSegment)
+	}
+}
+
 func TestRecordCloneDetachesValue(t *testing.T) {
 	in := Record{
 		LSN:         7,

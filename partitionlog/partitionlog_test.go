@@ -58,6 +58,71 @@ func TestLogWriteAndReadWithMemoryStore(t *testing.T) {
 	}
 }
 
+func TestLogRetentionRequestIsAppliedByPartitionWriter(t *testing.T) {
+	ctx := context.Background()
+	log, err := Open(Options{Store: newTestStore(t)})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	w, err := log.OpenWriter(ctx, WriterOptions{
+		Partition: 1,
+		WriterID:  [16]byte{1},
+		Batch:     BatchPolicy{MaxRecords: 1},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := w.Append(ctx, Record{TimestampMS: int64(i), Value: []byte{byte(i)}}); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	request, err := log.RequestRetention(ctx, RetentionRequest{
+		Partition:     1,
+		PolicyVersion: 1,
+		BeforeLSN:     2,
+	})
+	if err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+	if request.PolicyVersion != 1 || request.BeforeLSN != 2 || request.CreatedUnixMS <= 0 {
+		t.Fatalf("retention request = %+v", request)
+	}
+	result, err := w.ApplyRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyRetention() error = %v", err)
+	}
+	if !result.Applied || result.Snapshot.Head.OldestLSN != 2 || result.Snapshot.Head.NextLSN != 3 {
+		t.Fatalf("retention result = %+v", result)
+	}
+
+	if _, err := log.Reader().Partition(1).Read(ctx, ReadRequest{
+		StartLSN:  1,
+		Limit:     1,
+		Freshness: FreshnessLatest,
+	}); !errors.As(err, new(LSNExpiredError)) {
+		t.Fatalf("Read(expired) error = %v, want LSNExpiredError", err)
+	}
+	read, err := log.Reader().Partition(1).Read(ctx, ReadRequest{
+		StartLSN:  2,
+		Limit:     1,
+		Freshness: FreshnessLatest,
+	})
+	if err != nil {
+		t.Fatalf("Read(retained) error = %v", err)
+	}
+	if len(read.Records) != 1 || read.Records[0].LSN != 2 {
+		t.Fatalf("Read(retained) = %+v", read)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestLogInitializePartitionAtCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -552,6 +617,10 @@ func newTestStore(t *testing.T) *testStore {
 }
 
 func (s *testStore) WriterManager() catalog.WriterManager {
+	return s.catalog
+}
+
+func (s *testStore) RetentionManager() catalog.RetentionManager {
 	return s.catalog
 }
 

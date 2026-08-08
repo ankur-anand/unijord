@@ -15,4 +15,6 @@ var (
 	ErrPublishFailed        = errors.New("writer: publish failed")
 	ErrPublishIndeterminate = errors.New("writer: publish outcome unknown")
 	ErrInvalidPublishResult = errors.New("writer: invalid publish result")
+	ErrRetentionUnsupported = errors.New("writer: retention unsupported")
+	ErrRetentionFailed      = errors.New("writer: retention failed")
 )

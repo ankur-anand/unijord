@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	DefaultSegmentPageLimit = pmeta.DefaultSegmentPageLimit
-	MaxSegmentPageLimit     = pmeta.MaxSegmentPageLimit
+	DefaultSegmentPageLimit        = pmeta.DefaultSegmentPageLimit
+	MaxSegmentPageLimit            = pmeta.MaxSegmentPageLimit
+	RetentionRequestVersion uint16 = 1
 )
 
 // Reader exposes the bounded read-only catalog surface.
@@ -41,6 +42,49 @@ type WriterSession interface {
 	Epoch() uint64
 	WriterID() [16]byte
 	AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error)
+}
+
+// RetentionManager stores the latest desired retention boundary for each
+// partition. It never changes partition visibility itself.
+type RetentionManager interface {
+	RequestRetention(ctx context.Context, partition uint32, request RetentionRequest) (RetentionRequest, error)
+	LoadRetentionRequest(ctx context.Context, partition uint32) (RetentionRequest, bool, error)
+}
+
+// RetentionWriterSession is implemented by writer sessions that can apply a
+// pending retention request through the same fenced head mutation path used
+// for segment publication.
+type RetentionWriterSession interface {
+	ApplyPendingRetention(ctx context.Context) (RetentionApplyResult, error)
+}
+
+// RetentionRequest is the latest monotonic retention command for one
+// partition. BeforeLSN means records below that LSN should be retired at
+// immutable-segment granularity.
+type RetentionRequest struct {
+	Version       uint16 `json:"version"`
+	PolicyVersion uint64 `json:"policy_version"`
+	BeforeLSN     uint64 `json:"before_lsn"`
+	CreatedUnixMS int64  `json:"created_unix_ms"`
+}
+
+func (r RetentionRequest) Validate() error {
+	if r.Version != RetentionRequestVersion {
+		return fmt.Errorf("%w: retention version=%d want=%d", ErrInvalidRequest, r.Version, RetentionRequestVersion)
+	}
+	if r.PolicyVersion == 0 {
+		return fmt.Errorf("%w: empty retention policy_version", ErrInvalidRequest)
+	}
+	if r.CreatedUnixMS < 0 {
+		return fmt.Errorf("%w: negative retention created_unix_ms=%d", ErrInvalidRequest, r.CreatedUnixMS)
+	}
+	return nil
+}
+
+type RetentionApplyResult struct {
+	Head    pmeta.PartitionHead
+	Request RetentionRequest
+	Applied bool
 }
 
 type ListSegmentsRequest struct {

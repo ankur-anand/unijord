@@ -13,6 +13,7 @@ import (
 // segment sink, and segment source.
 type Store interface {
 	WriterManager() catalog.WriterManager
+	RetentionManager() catalog.RetentionManager
 	ReaderCatalog() catalog.Reader
 	SinkFactory() writer.SinkFactory
 	SegmentStore() reader.SegmentStore

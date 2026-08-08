@@ -140,11 +140,21 @@ func (r *Reader) FindLSNByTimestamp(ctx context.Context, timestampMS int64) (uin
 		if timestampMS > entry.MaxTimestampMS {
 			continue
 		}
-		records, err := r.readBlock(ctx, block, entry.BaseLSN)
+		scanner, err := r.openBlockScanner(ctx, block)
 		if err != nil {
 			return 0, false, err
 		}
-		for _, record := range records {
+		for {
+			if err := ctx.Err(); err != nil {
+				return 0, false, err
+			}
+			record, ok, err := scanner.Next()
+			if err != nil {
+				return 0, false, fmt.Errorf("%w: decode raw block: %w", ErrCorruptData, err)
+			}
+			if !ok {
+				break
+			}
 			if record.TimestampMS >= timestampMS {
 				return record.LSN, true, nil
 			}
@@ -200,45 +210,32 @@ func (r *Reader) Scan(ctx context.Context, fromLSN uint64) (*Scanner, error) {
 	}, nil
 }
 
-func (r *Reader) readBlock(ctx context.Context, idx int, fromLSN uint64) ([]Record, error) {
+func (r *Reader) openBlockScanner(ctx context.Context, idx int) (segformat.RawBlockScanner, error) {
 	entry := r.index[idx]
 	length := uint64(segformat.BlockPreambleSize) + uint64(entry.StoredSize)
 	if length > r.opts.MaxBlockBytes {
-		return nil, fmt.Errorf("%w: block bytes=%d max=%d", ErrInvalidSegment, length, r.opts.MaxBlockBytes)
+		return segformat.RawBlockScanner{}, fmt.Errorf("%w: block bytes=%d max=%d", ErrInvalidSegment, length, r.opts.MaxBlockBytes)
 	}
 	blockBytes, err := readAtExact(ctx, r.store, r.ref.URI, entry.BlockOffset, length)
 	if err != nil {
-		return nil, err
+		return segformat.RawBlockScanner{}, err
 	}
 	blockPreamble, err := segformat.ParseBlockPreamble(blockBytes[:segformat.BlockPreambleSize])
 	if err != nil {
-		return nil, fmt.Errorf("%w: parse block preamble: %w", ErrCorruptData, err)
+		return segformat.RawBlockScanner{}, fmt.Errorf("%w: parse block preamble: %w", ErrCorruptData, err)
 	}
 	if err := segformat.MatchBlockIndexEntry(blockPreamble, entry); err != nil {
-		return nil, fmt.Errorf("%w: block/index mismatch: %w", ErrCorruptData, err)
+		return segformat.RawBlockScanner{}, fmt.Errorf("%w: block/index mismatch: %w", ErrCorruptData, err)
 	}
 	raw, err := segblock.Open(r.trailer.Codec, r.trailer.HashAlgo, blockPreamble, blockBytes[segformat.BlockPreambleSize:])
 	if err != nil {
-		return nil, fmt.Errorf("%w: open block: %w", ErrCorruptData, err)
+		return segformat.RawBlockScanner{}, fmt.Errorf("%w: open block: %w", ErrCorruptData, err)
 	}
-	rawRecords, err := segformat.DecodeRawBlock(raw, blockPreamble)
+	scanner, err := segformat.NewRawBlockScanner(raw, blockPreamble)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode raw block: %w", ErrCorruptData, err)
+		return segformat.RawBlockScanner{}, fmt.Errorf("%w: decode raw block: %w", ErrCorruptData, err)
 	}
-	records := make([]Record, 0, len(rawRecords))
-	for _, rawRecord := range rawRecords {
-		if rawRecord.LSN < fromLSN {
-			continue
-		}
-		records = append(records, Record{
-			Partition:   r.trailer.Partition,
-			LSN:         rawRecord.LSN,
-			TimestampMS: rawRecord.TimestampMS,
-			Headers:     segformat.CloneHeaders(rawRecord.Headers),
-			Value:       append([]byte(nil), rawRecord.Value...),
-		})
-	}
-	return records, nil
+	return scanner, nil
 }
 
 func blockLastLSN(entry segformat.BlockIndexEntry) uint64 {

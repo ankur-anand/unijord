@@ -146,6 +146,10 @@ func PagePrefix(prefix string, streamID string, partition uint32) string {
 	return fmt.Sprintf("%s/pages/", partitionPrefix(prefix, streamID, partition))
 }
 
+func RetentionRequestPath(prefix string, streamID string, partition uint32) string {
+	return fmt.Sprintf("%s/maintenance/retention.json", partitionPrefix(prefix, streamID, partition))
+}
+
 func LeafPagePath(prefix string, streamID string, partition uint32, seqLo, seqHi, generation uint64, pageID string) string {
 	return fmt.Sprintf(
 		"%s/pages/l00/leaf-%020d-%020d-%020d-%s.json",

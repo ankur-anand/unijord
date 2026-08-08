@@ -45,6 +45,17 @@ type Session interface {
 	PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error)
 }
 
+type RetentionSession interface {
+	ApplyPendingRetention(ctx context.Context) (RetentionResult, error)
+}
+
+type RetentionResult struct {
+	Snapshot      Snapshot
+	PolicyVersion uint64
+	RequestedLSN  uint64
+	Applied       bool
+}
+
 type RollPolicy struct {
 	MaxSegmentRecords  uint32
 	MaxSegmentRawBytes uint64
