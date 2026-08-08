@@ -1,33 +1,18 @@
-BUF ?= buf
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
-GOCACHE ?= $(CURDIR)/.gocache
-GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-lint-cache
-PROTO_PATH ?= proto/eventlake
 
-.PHONY: proto proto-build proto-gen proto-lint test vet lint check
-
-proto: proto-build proto-gen
-
-proto-build:
-	$(BUF) build
-
-proto-gen: proto-build
-	$(BUF) generate --path $(PROTO_PATH)
-
-proto-lint:
-	$(BUF) lint --path $(PROTO_PATH)
+.PHONY: test race vet lint check
 
 test:
-	mkdir -p $(GOCACHE)
-	GOCACHE=$(GOCACHE) $(GO) test -v -race ./...
+	$(GO) test ./partitionlog/...
+
+race:
+	$(GO) test -race ./partitionlog/...
 
 vet:
-	mkdir -p $(GOCACHE)
-	GOCACHE=$(GOCACHE) $(GO) vet ./...
+	$(GO) vet ./partitionlog/...
 
 lint:
-	mkdir -p $(GOCACHE) $(GOLANGCI_LINT_CACHE)
-	GOCACHE=$(GOCACHE) GOLANGCI_LINT_CACHE=$(GOLANGCI_LINT_CACHE) $(GOLANGCI_LINT) run
+	$(GOLANGCI_LINT) run ./partitionlog/...
 
 check: test vet lint
