@@ -90,10 +90,11 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 
 	segment, found, err := r.catalog.FindSegment(ctx, req.Partition, req.LSN)
 	if err != nil {
-		return FetchResult{}, err
+		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, err)
 	}
 	if !found {
-		return FetchResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
+		cause := fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
+		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, cause)
 	}
 	if segment.Partition != req.Partition {
 		return FetchResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, req.Partition)
@@ -104,10 +105,11 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 
 	records, err := r.readSegment(ctx, segment, req.LSN, 1, head.NextLSN)
 	if err != nil {
-		return FetchResult{}, err
+		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, err)
 	}
 	if len(records) == 0 {
-		return FetchResult{}, fmt.Errorf("%w: no record in segment uri=%s lsn=%d", ErrCorruptData, segment.URI, req.LSN)
+		cause := fmt.Errorf("%w: no record in segment uri=%s lsn=%d", ErrCorruptData, segment.URI, req.LSN)
+		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, cause)
 	}
 	if records[0].LSN != req.LSN {
 		return FetchResult{}, fmt.Errorf("%w: segment uri=%s returned lsn=%d for requested lsn=%d", ErrCorruptData, segment.URI, records[0].LSN, req.LSN)

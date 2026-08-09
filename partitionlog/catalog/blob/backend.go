@@ -1,22 +1,22 @@
 package blob
 
 import (
-	"context"
 	"errors"
-	"time"
+
+	"github.com/ankur-anand/unijord/internal/blobstore"
 )
 
 var (
-	ErrObjectNotFound    = errors.New("catalog/blob: object not found")
-	ErrImmutableConflict = errors.New("catalog/blob: immutable object conflict")
+	ErrObjectNotFound    = blobstore.ErrObjectNotFound
+	ErrImmutableConflict = blobstore.ErrImmutableConflict
+	ErrCorruptCatalog    = blobstore.ErrInvalidRequest
 	ErrIndexFull         = errors.New("catalog/blob: index full")
-	ErrCorruptCatalog    = errors.New("catalog/blob: corrupt catalog")
 )
 
 const (
-	DefaultObjectListLimit = 1024
-	MaxObjectListLimit     = 4096
-	ObjectContentType      = "application/json"
+	DefaultObjectListLimit = blobstore.DefaultListLimit
+	MaxObjectListLimit     = blobstore.MaxListLimit
+	ObjectContentType      = blobstore.JSONContentType
 )
 
 // Backend is the minimal blob/object-store protocol required by the catalog.
@@ -31,56 +31,8 @@ const (
 //
 // Delete is used by bounded catalog-page GC. It should be idempotent for
 // missing objects.
-type Backend interface {
-	Get(ctx context.Context, key string) (Object, error)
-	Put(ctx context.Context, key string, body []byte) (Object, error)
-	CompareAndSwap(ctx context.Context, key string, expectedToken string, body []byte) (Object, bool, error)
-	List(ctx context.Context, opts ListOptions) (ObjectPage, error)
-	Delete(ctx context.Context, key string) error
-}
-
-type Object struct {
-	Key       string
-	Body      []byte
-	Token     string
-	CreatedAt time.Time
-}
-
-type ObjectInfo struct {
-	Key       string
-	Token     string
-	SizeBytes int
-	CreatedAt time.Time
-}
-
-type ListOptions struct {
-	// Prefix restricts results to object keys with this prefix.
-	Prefix string
-
-	// Cursor is an opaque value previously returned as ObjectPage.NextCursor.
-	// Callers must not construct it themselves.
-	Cursor string
-
-	Limit int
-}
-
-func (o ListOptions) NormalizedLimit() int {
-	return o.normalizedLimit()
-}
-
-func (o ListOptions) normalizedLimit() int {
-	switch {
-	case o.Limit <= 0:
-		return DefaultObjectListLimit
-	case o.Limit > MaxObjectListLimit:
-		return MaxObjectListLimit
-	default:
-		return o.Limit
-	}
-}
-
-type ObjectPage struct {
-	Objects    []ObjectInfo
-	NextCursor string
-	HasMore    bool
-}
+type Backend = blobstore.Store
+type Object = blobstore.Object
+type ObjectInfo = blobstore.ObjectInfo
+type ListOptions = blobstore.ListOptions
+type ObjectPage = blobstore.ObjectPage

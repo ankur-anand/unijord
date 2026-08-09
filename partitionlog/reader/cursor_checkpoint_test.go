@@ -207,6 +207,47 @@ func TestCachedReadRechecksRetentionFloorOnlyOnAnomaly(t *testing.T) {
 	}
 }
 
+func TestFetchRechecksRetentionFloorOnCatalogMiss(t *testing.T) {
+	t.Parallel()
+
+	cat := &retentionRaceCatalog{
+		heads: []pmeta.PartitionHead{
+			{
+				StreamID:       "stream-a",
+				Partition:      3,
+				OldestLSN:      0,
+				NextLSN:        20,
+				HasLastSegment: true,
+				LastSegment:    validSegmentRef(3, 0, 19),
+			},
+			{
+				StreamID:       "stream-a",
+				Partition:      3,
+				OldestLSN:      10,
+				NextLSN:        20,
+				HasLastSegment: true,
+				LastSegment:    validSegmentRef(3, 10, 19),
+			},
+		},
+	}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = r.Fetch(context.Background(), FetchRequest{Partition: 3, LSN: 5})
+	if !errors.Is(err, ErrLSNExpired) {
+		t.Fatalf("Fetch() error = %v, want %v", err, ErrLSNExpired)
+	}
+	var expired LSNExpiredError
+	if !errors.As(err, &expired) || expired.Requested != 5 || expired.Oldest != 10 || expired.HeadNext != 20 {
+		t.Fatalf("expired = %+v", expired)
+	}
+	if cat.Loads() != 2 {
+		t.Fatalf("catalog loads = %d, want initial plus anomaly refresh", cat.Loads())
+	}
+}
+
 func TestCachedReadAtTailDoesNotRefresh(t *testing.T) {
 	t.Parallel()
 

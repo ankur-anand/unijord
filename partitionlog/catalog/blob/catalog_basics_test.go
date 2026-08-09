@@ -2,6 +2,7 @@ package blob
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestPathsAreSelfDescribing(t *testing.T) {
 	if got := HeadPath("/prod/catalog/", "", 7); got != "prod/catalog/661/p00000007/head.json" {
 		t.Fatalf("HeadPath(custom) = %q", got)
 	}
-	if got := HeadPath("/prod/catalog/", "hosts/host-a/events", 7); got != "prod/catalog/b78/streams/hosts/host-a/events/p00000007/head.json" {
+	if got := HeadPath("/prod/catalog/", "hosts/host-a/events", 7); got != "prod/catalog/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/head.json" {
 		t.Fatalf("HeadPath(stream) = %q", got)
 	}
 	if got := PagePrefix("", "", 7); got != "catalog/661/p00000007/pages/" {
@@ -71,6 +72,8 @@ func TestNormalizeOptionsRejectsInvalidValues(t *testing.T) {
 	t.Parallel()
 
 	cases := []Options{
+		{StreamID: string([]byte{0xff})},
+		{StreamID: strings.Repeat("x", 513)},
 		{LeafSegmentLimit: pcatalog.MaxSegmentPageLimit + 1},
 		{IndexRefLimit: pcatalog.MaxSegmentPageLimit + 1},
 		{WriterAcquireInitialBackoff: -time.Nanosecond},

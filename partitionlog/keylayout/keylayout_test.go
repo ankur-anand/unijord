@@ -1,6 +1,10 @@
 package keylayout
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestBucketVectors(t *testing.T) {
 	t.Parallel()
@@ -43,6 +47,30 @@ func TestBucketConstants(t *testing.T) {
 	if BucketCount != 4096 {
 		t.Fatalf("BucketCount = %d, want 4096", BucketCount)
 	}
+	if StreamKeyHexLen != 64 {
+		t.Fatalf("StreamKeyHexLen = %d, want 64", StreamKeyHexLen)
+	}
+	if MaxStreamIDBytes != 512 {
+		t.Fatalf("MaxStreamIDBytes = %d, want 512", MaxStreamIDBytes)
+	}
+}
+
+func TestCanonicalStreamID(t *testing.T) {
+	t.Parallel()
+
+	got, err := CanonicalStreamID("/hosts/host-a/events/")
+	if err != nil {
+		t.Fatalf("CanonicalStreamID() error = %v", err)
+	}
+	if got != "hosts/host-a/events" {
+		t.Fatalf("CanonicalStreamID() = %q", got)
+	}
+
+	for _, streamID := range []string{"", "///", string([]byte{0xff}), strings.Repeat("x", MaxStreamIDBytes+1)} {
+		if _, err := CanonicalStreamID(streamID); !errors.Is(err, ErrInvalidStreamID) {
+			t.Fatalf("CanonicalStreamID(%q) error = %v, want %v", streamID, err, ErrInvalidStreamID)
+		}
+	}
 }
 
 func TestBucketNormalizesStreamID(t *testing.T) {
@@ -57,5 +85,20 @@ func TestBucketNormalizesStreamID(t *testing.T) {
 	}
 	if got := NormalizeStreamID("/" + streamID + "/"); got != streamID {
 		t.Fatalf("NormalizeStreamID() = %q, want %q", got, streamID)
+	}
+}
+
+func TestStreamKey(t *testing.T) {
+	t.Parallel()
+
+	const want = "645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91"
+	if got := StreamKey("hosts/host-a/events"); got != want {
+		t.Fatalf("StreamKey() = %q, want %q", got, want)
+	}
+	if got := StreamKey("/hosts/host-a/events/"); got != want {
+		t.Fatalf("StreamKey() with slashes = %q, want %q", got, want)
+	}
+	if got := len(StreamKey("")); got != StreamKeyHexLen {
+		t.Fatalf("len(StreamKey(empty)) = %d, want %d", got, StreamKeyHexLen)
 	}
 }

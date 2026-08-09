@@ -464,14 +464,14 @@ Use:
 Example layout:
 
 ```text
-catalog/<bucket>/streams/<stream_id>/p00000003/head
-catalog/<bucket>/streams/<stream_id>/p00000003/pages/l00/<page-id>
-catalog/<bucket>/streams/<stream_id>/p00000003/pages/l01/<page-id>
-catalog/<bucket>/streams/<stream_id>/p00000003/pages/l02/<page-id>
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/head.json
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l00/<page-id>
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l01/<page-id>
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l02/<page-id>
 ```
 
-The exact naming scheme is not part of the public API, but page refs must be
-self-contained and immutable.
+The naming contract is defined in `partitionlog/OBJECT_LAYOUT.md`. Page refs
+must be self-contained and immutable.
 
 ### Cassandra / Scylla
 

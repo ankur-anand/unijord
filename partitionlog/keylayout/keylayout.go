@@ -6,10 +6,14 @@
 package keylayout
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -23,7 +27,16 @@ const (
 
 	// BucketCount is the number of distinct bucket values.
 	BucketCount = 1 << BucketBits
+
+	// StreamKeyHexLen is the fixed width of a SHA-256 stream key.
+	StreamKeyHexLen = sha256.Size * 2
+
+	// MaxStreamIDBytes bounds the logical stream identity copied into catalog
+	// and segment metadata.
+	MaxStreamIDBytes = 512
 )
+
+var ErrInvalidStreamID = errors.New("keylayout: invalid stream ID")
 
 const bucketMask uint32 = BucketCount - 1
 
@@ -64,6 +77,32 @@ func Checksum(streamID string, partition uint32) uint32 {
 	_, _ = h.Write(partitionBuf[:])
 
 	return h.Sum32()
+}
+
+// StreamKey returns the fixed-width object-key identity for a stream.
+//
+// The original stream ID remains in catalog and segment metadata. Object paths
+// use this key so arbitrary stream names cannot change path depth or make
+// listing and garbage-collection prefixes unbounded.
+func StreamKey(streamID string) string {
+	streamID = NormalizeStreamID(streamID)
+	sum := sha256.Sum256([]byte(streamID))
+	return hex.EncodeToString(sum[:])
+}
+
+// CanonicalStreamID normalizes and validates a public stream identity.
+func CanonicalStreamID(streamID string) (string, error) {
+	if !utf8.ValidString(streamID) {
+		return "", fmt.Errorf("%w: not valid UTF-8", ErrInvalidStreamID)
+	}
+	streamID = NormalizeStreamID(streamID)
+	if streamID == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidStreamID)
+	}
+	if len(streamID) > MaxStreamIDBytes {
+		return "", fmt.Errorf("%w: length=%d max=%d", ErrInvalidStreamID, len(streamID), MaxStreamIDBytes)
+	}
+	return streamID, nil
 }
 
 // NormalizeStreamID returns the canonical stream ID used by object-store key

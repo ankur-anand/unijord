@@ -56,7 +56,13 @@ type Options struct {
 
 func normalizeOptions(opts Options) (Options, error) {
 	opts.Prefix = normalizePrefix(opts.Prefix)
-	opts.StreamID = keylayout.NormalizeStreamID(opts.StreamID)
+	if opts.StreamID != "" {
+		streamID, err := keylayout.CanonicalStreamID(opts.StreamID)
+		if err != nil {
+			return Options{}, fmt.Errorf("%w: %w", csession.ErrInvalidRequest, err)
+		}
+		opts.StreamID = streamID
+	}
 	switch {
 	case opts.LeafSegmentLimit <= 0:
 		opts.LeafSegmentLimit = csession.DefaultSegmentPageLimit

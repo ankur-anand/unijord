@@ -15,7 +15,7 @@ Our Catalog History is like book:
 catalog/
     <bucket>/
       streams/
-        hosts/host-a/events/
+        <sha256-stream-key>/
           p00000001/
         head.json
 
@@ -112,7 +112,7 @@ LeafPagePath:
 - A leaf page is level l00
 - Leaf pages contain actual SegmentRef entries
 
-catalog/<bucket>/streams/hosts/host-a/events/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc123.json
+catalog/<bucket>/streams/<sha256-stream-key>/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc123.json
 seqLo      = 100
 seqHi      = 199
 generation = 18
@@ -123,7 +123,7 @@ Builds the object key for an index page
 Index pages start at l01
 They do not store SegmentRef directly
 They store pageRefs to lower-level pages
-catalog/<bucket>/streams/hosts/host-a/events/p00000007/pages/l01/index-l01-00000000000000000100-00000000000000000999-00000000000000000022-def456.json
+catalog/<bucket>/streams/<sha256-stream-key>/p00000007/pages/l01/index-l01-00000000000000000100-00000000000000000999-00000000000000000022-def456.json
 
 - l01: index level 1
   - index-l01: index page at level 1
@@ -170,7 +170,7 @@ func partitionPrefix(prefix string, streamID string, partition uint32) string {
 	if streamID == "" {
 		return fmt.Sprintf("%s/%s/p%08d", normalizePrefix(prefix), bucket, partition)
 	}
-	return fmt.Sprintf("%s/%s/streams/%s/p%08d", normalizePrefix(prefix), bucket, streamID, partition)
+	return fmt.Sprintf("%s/%s/streams/%s/p%08d", normalizePrefix(prefix), bucket, keylayout.StreamKey(streamID), partition)
 }
 
 func normalizePrefix(prefix string) string {

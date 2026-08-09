@@ -216,10 +216,10 @@ func TestLayoutUsesNormalizedPrefix(t *testing.T) {
 	if layout.Prefix() != "root" {
 		t.Fatalf("Prefix() = %q, want %q", layout.Prefix(), "root")
 	}
-	if got := layout.SegmentKey(info); got != "root/segments/b78/streams/hosts/host-a/events/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000.plseg" {
+	if got := layout.SegmentKey(info); got != "root/segments/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000.plseg" {
 		t.Fatalf("SegmentKey() = %q", got)
 	}
-	if got := layout.StagingPrefix(info); got != "root/staging/b78/streams/hosts/host-a/events/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000" {
+	if got := layout.StagingPrefix(info); got != "root/staging/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/seg-00000000000000000100-e00000000000000000003-01020300000000000000000000000000" {
 		t.Fatalf("StagingPrefix() = %q", got)
 	}
 }

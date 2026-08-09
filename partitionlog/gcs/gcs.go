@@ -85,9 +85,9 @@ func New(opts Options) (*Store, error) {
 }
 
 func normalizeStreamID(streamID string) (string, error) {
-	streamID = keylayout.NormalizeStreamID(streamID)
-	if streamID == "" {
-		return "", fmt.Errorf("partitionlog/gcs: empty stream_id")
+	streamID, err := keylayout.CanonicalStreamID(streamID)
+	if err != nil {
+		return "", fmt.Errorf("partitionlog/gcs: %w", err)
 	}
 	return streamID, nil
 }

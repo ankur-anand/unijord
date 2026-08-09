@@ -66,5 +66,5 @@ func appendStreamParts(parts []string, streamID string) []string {
 	if streamID == "" {
 		return parts
 	}
-	return append(parts, "streams", streamID)
+	return append(parts, "streams", keylayout.StreamKey(streamID))
 }
