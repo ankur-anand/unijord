@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ankur-anand/unijord/partitionlog"
 	plazure "github.com/ankur-anand/unijord/partitionlog/azure"
+	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	plgcs "github.com/ankur-anand/unijord/partitionlog/gcs"
 	pls3 "github.com/ankur-anand/unijord/partitionlog/s3"
 )
@@ -31,9 +34,193 @@ func TestPublicAPIRetentionAcrossBlobStores(t *testing.T) {
 	}
 }
 
+func TestPublicAPIWriterAndPhysicalReclamationAcrossBlobStores(t *testing.T) {
+	for _, tc := range publicAPIStoreCases() {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runPublicAPIWriterAndPhysicalReclamation(t, tc.open(t, "partitionlog-gc-"+tc.name))
+		})
+	}
+}
+
+func TestPublicAPIStaleWriterOrphanScrubAcrossBlobStores(t *testing.T) {
+	for _, tc := range publicAPIStoreCases() {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runPublicAPIStaleWriterOrphanScrub(t, tc.open(t, "partitionlog-orphan-"+tc.name))
+		})
+	}
+}
+
+type reclaimingStore interface {
+	partitionlog.Store
+	NewReclaimer(opts lifecycle.Options) (*lifecycle.Reclaimer, error)
+}
+
 type publicAPIStoreCase struct {
 	name string
-	open func(t *testing.T, prefix string) partitionlog.Store
+	open func(t *testing.T, prefix string) reclaimingStore
+}
+
+func runPublicAPIWriterAndPhysicalReclamation(t *testing.T, store reclaimingStore) {
+	t.Helper()
+	ctx := context.Background()
+	const partition uint32 = 301
+
+	log, err := partitionlog.Open(partitionlog.Options{Store: store})
+	if err != nil {
+		t.Fatalf("partitionlog.Open() error = %v", err)
+	}
+	w, err := log.OpenWriter(ctx, partitionlog.WriterOptions{
+		Partition: partition,
+		WriterID:  [16]byte{3, 0, 1},
+		Batch:     partitionlog.BatchPolicy{MaxRecords: 1},
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	defer func() { _ = w.Abort(context.Background()) }()
+
+	for i := 0; i < 6; i++ {
+		if _, err := w.Append(ctx, partitionlog.Record{TimestampMS: int64(i), Value: []byte{byte(i)}}); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	before, err := store.ReaderCatalog().ListSegments(ctx, catalog.ListSegmentsRequest{Partition: partition, Limit: 16})
+	if err != nil {
+		t.Fatalf("ListSegments(before retention) error = %v", err)
+	}
+	if len(before.Segments) != 6 {
+		t.Fatalf("segments before retention = %d, want 6", len(before.Segments))
+	}
+
+	if _, err := log.RequestRetention(ctx, partitionlog.RetentionRequest{Partition: partition, PolicyVersion: 1, BeforeLSN: 4}); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+	if result, err := w.ApplyRetention(ctx); err != nil || !result.Applied || result.Snapshot.Head.OldestLSN != 4 {
+		t.Fatalf("ApplyRetention() result=%+v error=%v", result, err)
+	}
+
+	reclaimer, err := store.NewReclaimer(lifecycle.Options{
+		OwnerID:          [16]byte{9},
+		DeleteDelay:      time.Millisecond,
+		ListPageSize:     2,
+		MaxObjectsPerRun: 64,
+		MaxDeletesPerRun: 64,
+		MaxDeleteBytes:   64 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewReclaimer() error = %v", err)
+	}
+	if _, err := reclaimer.RunPartition(ctx, partition); err != nil {
+		t.Fatalf("RunPartition(observe) error = %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	var appendErr, reclaimErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, appendErr = w.Append(ctx, partitionlog.Record{TimestampMS: 6, Value: []byte{6}})
+	}()
+	go func() {
+		defer wg.Done()
+		_, reclaimErr = reclaimer.RunPartition(ctx, partition)
+	}()
+	wg.Wait()
+	if appendErr != nil || reclaimErr != nil {
+		t.Fatalf("concurrent append error=%v reclaim error=%v", appendErr, reclaimErr)
+	}
+	if _, err := w.Flush(ctx); err != nil {
+		t.Fatalf("Flush(after GC) error = %v", err)
+	}
+
+	for _, segment := range before.Segments[:4] {
+		if _, err := store.SegmentStore().ReadAt(ctx, segment.URI, 0, 1); err == nil {
+			t.Fatalf("expired segment %q still readable", segment.URI)
+		}
+	}
+	for _, segment := range before.Segments[4:] {
+		if _, err := store.SegmentStore().ReadAt(ctx, segment.URI, 0, 1); err != nil {
+			t.Fatalf("retained segment %q ReadAt() error = %v", segment.URI, err)
+		}
+	}
+	read, err := log.Reader().Partition(partition).Read(ctx, partitionlog.ReadRequest{
+		StartLSN: 4, Limit: 8, Freshness: partitionlog.FreshnessLatest,
+	})
+	if err != nil {
+		t.Fatalf("Read(retained after GC) error = %v", err)
+	}
+	if len(read.Records) != 3 || read.Records[0].LSN != 4 || read.Records[2].LSN != 6 {
+		t.Fatalf("Read(retained after GC) = %+v", read)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func runPublicAPIStaleWriterOrphanScrub(t *testing.T, store reclaimingStore) {
+	t.Helper()
+	ctx := context.Background()
+	const partition uint32 = 302
+
+	log, err := partitionlog.Open(partitionlog.Options{Store: store})
+	if err != nil {
+		t.Fatalf("partitionlog.Open() error = %v", err)
+	}
+	stale, err := log.OpenWriter(ctx, partitionlog.WriterOptions{Partition: partition, WriterID: [16]byte{1}})
+	if err != nil {
+		t.Fatalf("OpenWriter(stale) error = %v", err)
+	}
+	defer func() { _ = stale.Abort(context.Background()) }()
+	if _, err := stale.Append(ctx, partitionlog.Record{TimestampMS: 1, Value: []byte("orphan")}); err != nil {
+		t.Fatalf("Append(stale) error = %v", err)
+	}
+
+	winner, err := log.OpenWriter(ctx, partitionlog.WriterOptions{Partition: partition, WriterID: [16]byte{2}})
+	if err != nil {
+		t.Fatalf("OpenWriter(winner) error = %v", err)
+	}
+	defer func() { _ = winner.Abort(context.Background()) }()
+	if _, err := stale.Flush(ctx); err == nil {
+		t.Fatal("Flush(stale) error = nil")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	reclaimer, err := store.NewReclaimer(lifecycle.Options{
+		OwnerID: [16]byte{10}, DeleteDelay: time.Millisecond,
+		ListPageSize: 2, MaxObjectsPerRun: 32, MaxDeletesPerRun: 32,
+	})
+	if err != nil {
+		t.Fatalf("NewReclaimer() error = %v", err)
+	}
+	result, err := reclaimer.ScrubPartition(ctx, partition)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if result.DeletedObjects != 1 || result.PendingQuarantine != 0 {
+		t.Fatalf("scrub result = %+v", result)
+	}
+
+	if appended, err := winner.Append(ctx, partitionlog.Record{TimestampMS: 2, Value: []byte("winner")}); err != nil || appended.LSN != 0 {
+		t.Fatalf("Append(winner) result=%+v error=%v", appended, err)
+	}
+	if _, err := winner.Flush(ctx); err != nil {
+		t.Fatalf("Flush(winner) error = %v", err)
+	}
+	read, err := log.Reader().Partition(partition).Read(ctx, partitionlog.ReadRequest{
+		StartLSN: 0, Limit: 1, Freshness: partitionlog.FreshnessLatest,
+	})
+	if err != nil {
+		t.Fatalf("Read(winner) error = %v", err)
+	}
+	if len(read.Records) != 1 || string(read.Records[0].Value) != "winner" {
+		t.Fatalf("Read(winner) = %+v", read)
+	}
 }
 
 func runPublicAPIRetention(t *testing.T, store partitionlog.Store) {
@@ -105,7 +292,7 @@ func publicAPIStoreCases() []publicAPIStoreCase {
 	return []publicAPIStoreCase{
 		{
 			name: "s3",
-			open: func(t *testing.T, prefix string) partitionlog.Store {
+			open: func(t *testing.T, prefix string) reclaimingStore {
 				t.Helper()
 				const bucket = "segments"
 				store, err := pls3.New(pls3.Options{
@@ -122,7 +309,7 @@ func publicAPIStoreCases() []publicAPIStoreCase {
 		},
 		{
 			name: "gcs",
-			open: func(t *testing.T, prefix string) partitionlog.Store {
+			open: func(t *testing.T, prefix string) reclaimingStore {
 				t.Helper()
 				const bucket = "segments"
 				store, err := plgcs.New(plgcs.Options{
@@ -139,7 +326,7 @@ func publicAPIStoreCases() []publicAPIStoreCase {
 		},
 		{
 			name: "azure",
-			open: func(t *testing.T, prefix string) partitionlog.Store {
+			open: func(t *testing.T, prefix string) reclaimingStore {
 				t.Helper()
 				server := newFakeAzureBlobServer(t)
 				store, err := plazure.New(plazure.Options{

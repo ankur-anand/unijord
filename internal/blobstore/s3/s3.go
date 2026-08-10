@@ -116,10 +116,10 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 		limit = maxListKeys
 	}
 	out, err := b.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
-		Bucket:            aws.String(b.bucket),
-		Prefix:            aws.String(opts.Prefix),
-		ContinuationToken: stringPtr(opts.Cursor),
-		MaxKeys:           aws.Int32(int32(limit)),
+		Bucket:     aws.String(b.bucket),
+		Prefix:     aws.String(opts.Prefix),
+		StartAfter: stringPtr(opts.AfterKey),
+		MaxKeys:    aws.Int32(int32(limit)),
 	})
 	if err != nil {
 		return blobstore.ObjectPage{}, mapError(err)
@@ -145,11 +145,11 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 			CreatedAt: aws.ToTime(item.LastModified),
 		})
 	}
-	return blobstore.ObjectPage{
-		Objects:    objects,
-		NextCursor: aws.ToString(out.NextContinuationToken),
-		HasMore:    aws.ToBool(out.IsTruncated),
-	}, nil
+	page := blobstore.ObjectPage{Objects: objects, HasMore: aws.ToBool(out.IsTruncated)}
+	if page.HasMore && len(page.Objects) > 0 {
+		page.NextAfterKey = page.Objects[len(page.Objects)-1].Key
+	}
+	return page, nil
 }
 
 func (b *Backend) Delete(ctx context.Context, key string) error {

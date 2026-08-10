@@ -111,14 +111,15 @@ func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken 
 
 func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobstore.ObjectPage, error) {
 	limit := opts.NormalizedLimit()
-	if limit > maxListResults {
-		limit = maxListResults
+	requestLimit := limit + 1
+	if requestLimit > maxListResults {
+		requestLimit = maxListResults
 	}
-	maxResults := int32(limit)
+	maxResults := int32(requestLimit)
 	pager := b.container.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
-		Marker:     stringPtr(opts.Cursor),
 		MaxResults: &maxResults,
 		Prefix:     stringPtr(opts.Prefix),
+		StartFrom:  stringPtr(opts.AfterKey),
 	})
 	if !pager.More() {
 		return blobstore.ObjectPage{}, nil
@@ -129,12 +130,14 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 	}
 
 	items := page.ListBlobsFlatSegmentResponse.Segment
-	objects := make([]blobstore.ObjectInfo, 0)
+	objects := make([]blobstore.ObjectInfo, 0, limit)
 	if items != nil {
-		objects = make([]blobstore.ObjectInfo, 0, len(items.BlobItems))
 		for _, item := range items.BlobItems {
-			if item == nil || item.Name == nil || *item.Name == "" {
+			if item == nil || item.Name == nil || *item.Name == "" || opts.AfterKey != "" && *item.Name <= opts.AfterKey {
 				continue
+			}
+			if len(objects) == limit {
+				break
 			}
 			info := blobstore.ObjectInfo{Key: *item.Name}
 			if props := item.Properties; props != nil {
@@ -153,15 +156,25 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 		}
 	}
 
-	nextCursor := ""
-	if page.NextMarker != nil {
-		nextCursor = *page.NextMarker
+	hasMore := page.NextMarker != nil && *page.NextMarker != "" || countAzureAfter(items, opts.AfterKey) > limit
+	result := blobstore.ObjectPage{Objects: objects, HasMore: hasMore}
+	if result.HasMore && len(result.Objects) > 0 {
+		result.NextAfterKey = result.Objects[len(result.Objects)-1].Key
 	}
-	return blobstore.ObjectPage{
-		Objects:    objects,
-		NextCursor: nextCursor,
-		HasMore:    nextCursor != "",
-	}, nil
+	return result, nil
+}
+
+func countAzureAfter(items *container.BlobFlatListSegment, afterKey string) int {
+	if items == nil {
+		return 0
+	}
+	count := 0
+	for _, item := range items.BlobItems {
+		if item != nil && item.Name != nil && *item.Name != "" && (afterKey == "" || *item.Name > afterKey) {
+			count++
+		}
+	}
+	return count
 }
 
 func (b *Backend) Delete(ctx context.Context, key string) error {

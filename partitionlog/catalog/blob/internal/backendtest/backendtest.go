@@ -168,7 +168,7 @@ func runListAndDelete(t *testing.T, backend blob.Backend) {
 	if err != nil {
 		t.Fatalf("List(first) error = %v", err)
 	}
-	if len(first.Objects) != 2 || !first.HasMore || first.NextCursor == "" {
+	if len(first.Objects) != 2 || !first.HasMore || first.NextAfterKey != keys[1] {
 		t.Fatalf("first page = %+v, want 2 objects with cursor", first)
 	}
 	if first.Objects[0].Key != keys[0] || first.Objects[1].Key != keys[1] {
@@ -180,11 +180,16 @@ func runListAndDelete(t *testing.T, backend blob.Backend) {
 		}
 	}
 
-	second, err := backend.List(ctx, blob.ListOptions{Prefix: "catalog/p00000001/", Cursor: first.NextCursor, Limit: 2})
+	// Delete the checkpoint key before resuming. Durable pagination must use the
+	// key value itself, not provider state tied to the previous object set.
+	if err := backend.Delete(ctx, first.NextAfterKey); err != nil {
+		t.Fatalf("Delete(checkpoint) error = %v", err)
+	}
+	second, err := backend.List(ctx, blob.ListOptions{Prefix: "catalog/p00000001/", AfterKey: first.NextAfterKey, Limit: 2})
 	if err != nil {
 		t.Fatalf("List(second) error = %v", err)
 	}
-	if len(second.Objects) != 1 || second.HasMore || second.NextCursor != "" || second.Objects[0].Key != keys[2] {
+	if len(second.Objects) != 1 || second.HasMore || second.NextAfterKey != "" || second.Objects[0].Key != keys[2] {
 		t.Fatalf("second page = %+v, want only %q", second, keys[2])
 	}
 
@@ -202,7 +207,7 @@ func runListAndDelete(t *testing.T, backend blob.Backend) {
 	if err != nil {
 		t.Fatalf("List(empty prefix) error = %v", err)
 	}
-	if len(empty.Objects) != 0 || empty.HasMore || empty.NextCursor != "" {
+	if len(empty.Objects) != 0 || empty.HasMore || empty.NextAfterKey != "" {
 		t.Fatalf("List(empty prefix) = %+v, want empty", empty)
 	}
 }

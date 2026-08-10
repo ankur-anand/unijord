@@ -32,6 +32,50 @@ func TestPathsAreSelfDescribing(t *testing.T) {
 	}
 }
 
+func TestPagePathRoundTripAndLowerBound(t *testing.T) {
+	t.Parallel()
+
+	const pageID = "0123456789abcdef0123456789abcdef"
+	leaf := LeafPagePath("catalog", "hosts/host-a/events", 7, 100, 199, 18, pageID)
+	parsed, err := ParsePagePath("catalog", "hosts/host-a/events", 7, leaf)
+	if err != nil {
+		t.Fatalf("ParsePagePath(leaf) error = %v", err)
+	}
+	if parsed.Kind != PageObjectLeaf || parsed.Level != 0 || parsed.SeqLo != 100 || parsed.SeqHi != 199 || parsed.Generation != 18 || parsed.PageID != pageID {
+		t.Fatalf("ParsePagePath(leaf) = %+v", parsed)
+	}
+	if lower := PageLowerBound("catalog", "hosts/host-a/events", 7, 0, 100); lower >= leaf {
+		t.Fatalf("leaf lower bound = %q, want below %q", lower, leaf)
+	}
+
+	index := IndexPagePath("catalog", "hosts/host-a/events", 7, 2, 100, 999, 22, pageID)
+	parsed, err = ParsePagePath("catalog", "hosts/host-a/events", 7, index)
+	if err != nil {
+		t.Fatalf("ParsePagePath(index) error = %v", err)
+	}
+	if parsed.Kind != PageObjectIndex || parsed.Level != 2 || parsed.SeqLo != 100 || parsed.SeqHi != 999 || parsed.Generation != 22 || parsed.PageID != pageID {
+		t.Fatalf("ParsePagePath(index) = %+v", parsed)
+	}
+	if lower := PageLowerBound("catalog", "hosts/host-a/events", 7, 2, 100); lower >= index {
+		t.Fatalf("index lower bound = %q, want below %q", lower, index)
+	}
+}
+
+func TestParsePagePathRejectsMalformedPath(t *testing.T) {
+	t.Parallel()
+
+	bad := []string{
+		"catalog/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/pages/l00/leaf-1-2-3-id.json",
+		LeafPagePath("catalog", "hosts/host-a/events", 7, 200, 100, 18, "0123456789abcdef0123456789abcdef"),
+		IndexPagePath("catalog", "hosts/host-a/events", 7, 1, 100, 999, 22, "0123456789abcdef0123456789abcdeG"),
+	}
+	for _, key := range bad {
+		if _, err := ParsePagePath("catalog", "hosts/host-a/events", 7, key); err == nil {
+			t.Fatalf("ParsePagePath(%q) error = nil", key)
+		}
+	}
+}
+
 func TestNormalizeOptionsDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -76,6 +120,7 @@ func TestNormalizeOptionsRejectsInvalidValues(t *testing.T) {
 		{StreamID: strings.Repeat("x", 513)},
 		{LeafSegmentLimit: pcatalog.MaxSegmentPageLimit + 1},
 		{IndexRefLimit: pcatalog.MaxSegmentPageLimit + 1},
+		{IndexRefLimit: 1},
 		{WriterAcquireInitialBackoff: -time.Nanosecond},
 		{WriterAcquireMaxBackoff: -time.Nanosecond},
 		{WriterAcquireInitialBackoff: 10 * time.Millisecond, WriterAcquireMaxBackoff: time.Millisecond},

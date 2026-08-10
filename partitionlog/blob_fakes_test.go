@@ -120,6 +120,8 @@ func (f *fakeAzureBlobServer) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		f.getProperties(w, key)
 	case r.Method == http.MethodGet:
 		f.getObject(w, r, key)
+	case r.Method == http.MethodDelete:
+		f.deleteObject(w, key)
 	default:
 		writeAzureError(w, http.StatusBadRequest, "UnsupportedOperation")
 	}
@@ -268,6 +270,7 @@ func (f *fakeAzureBlobServer) listObjects(w http.ResponseWriter, r *http.Request
 	query := r.URL.Query()
 	prefix := query.Get("prefix")
 	marker := query.Get("marker")
+	startFrom := query.Get("startFrom")
 	limit, _ := strconv.Atoi(query.Get("maxresults"))
 	if limit <= 0 {
 		limit = 5000
@@ -276,7 +279,7 @@ func (f *fakeAzureBlobServer) listObjects(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	keys := make([]string, 0, len(f.objects))
 	for key := range f.objects {
-		if strings.HasPrefix(key, prefix) && (marker == "" || key > marker) {
+		if strings.HasPrefix(key, prefix) && (marker == "" || key > marker) && (startFrom == "" || key >= startFrom) {
 			keys = append(keys, key)
 		}
 	}
@@ -307,6 +310,17 @@ func (f *fakeAzureBlobServer) listObjects(w http.ResponseWriter, r *http.Request
 			key, obj.lastModified.Format(http.TimeFormat), obj.etag, len(obj.body))
 	}
 	_, _ = fmt.Fprintf(w, `</Blobs><NextMarker>%s</NextMarker></EnumerationResults>`, nextMarker)
+}
+
+func (f *fakeAzureBlobServer) deleteObject(w http.ResponseWriter, key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.objects[key]; !ok {
+		writeAzureError(w, http.StatusNotFound, "BlobNotFound")
+		return
+	}
+	delete(f.objects, key)
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (f *fakeAzureBlobServer) object(key string) []byte {

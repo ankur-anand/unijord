@@ -52,6 +52,9 @@ func (c *Catalog) buildNextPageSet(ctx context.Context, head headFile, segment p
 }
 
 func (c *Catalog) carryPageRef(ctx context.Context, partition uint32, frontier []pageRef, child pageRef, generation uint64) ([]pageRef, error) {
+	if child.Level >= MaxIndexLevel {
+		return nil, fmt.Errorf("%w: index level=%d max=%d", ErrIndexFull, child.Level, MaxIndexLevel)
+	}
 	level := child.Level + 1
 	frontier = ensureFrontierLevel(frontier, level)
 	slot := int(level - 1)

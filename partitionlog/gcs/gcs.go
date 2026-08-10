@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
+	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
 	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
 	gcssink "github.com/ankur-anand/unijord/partitionlog/blob/sink/gcs"
 	gcssource "github.com/ankur-anand/unijord/partitionlog/blob/source/gcs"
@@ -43,9 +44,12 @@ type Options struct {
 
 // Store wires GCS catalog metadata, segment writes, and segment reads.
 type Store struct {
-	catalog *catalogblob.Catalog
-	sink    *segmentsink.Factory
-	source  *gcssource.Store
+	catalog       *catalogblob.Catalog
+	sink          *segmentsink.Factory
+	source        *gcssource.Store
+	admin         *gcscatalog.Backend
+	streamID      string
+	catalogPrefix string
 }
 
 // New builds a complete GCS-backed partitionlog store.
@@ -56,8 +60,13 @@ func New(opts Options) (*Store, error) {
 		return nil, err
 	}
 
-	cat, err := gcscatalog.New(opts.Client, opts.Bucket, gcscatalog.Options{
-		Prefix:   catalogPrefix(root, opts.CatalogPrefix),
+	admin, err := gcscatalog.NewBackend(opts.Client, opts.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	catPrefix := catalogPrefix(root, opts.CatalogPrefix)
+	cat, err := catalogblob.New(admin, catalogblob.Options{
+		Prefix:   catPrefix,
 		StreamID: streamID,
 	})
 	if err != nil {
@@ -81,7 +90,7 @@ func New(opts Options) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{catalog: cat, sink: sinkFactory, source: source}, nil
+	return &Store{catalog: cat, sink: sinkFactory, source: source, admin: admin, streamID: streamID, catalogPrefix: catPrefix}, nil
 }
 
 func normalizeStreamID(streamID string) (string, error) {
@@ -110,6 +119,13 @@ func (s *Store) SinkFactory() writer.SinkFactory {
 
 func (s *Store) SegmentStore() reader.SegmentStore {
 	return s.source
+}
+
+// NewReclaimer creates an explicitly scheduled object lifecycle worker.
+func (s *Store) NewReclaimer(opts lifecycle.Options) (*lifecycle.Reclaimer, error) {
+	opts.StreamID = s.streamID
+	opts.CatalogPrefix = s.catalogPrefix
+	return lifecycle.New(s.admin, s.catalog, s.sink.Layout(), opts)
 }
 
 func rootPrefix(prefix string) string {

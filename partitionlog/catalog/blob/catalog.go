@@ -57,6 +57,7 @@ type headFile struct {
 	IndexFrontier           []pageRef          `json:"index_frontier,omitempty"`
 	LeafFrontier            *pageRef           `json:"leaf_frontier,omitempty"`
 	ActiveSegments          []pmeta.SegmentRef `json:"active_segments,omitempty"`
+	MaxIndexLevel           uint8              `json:"max_index_level,omitempty"`
 	Generation              uint64             `json:"generation"`
 }
 

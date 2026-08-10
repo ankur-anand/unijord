@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/ankur-anand/unijord/partitionlog/blob/lifecycle"
 	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
 	s3sink "github.com/ankur-anand/unijord/partitionlog/blob/sink/s3"
 	s3source "github.com/ankur-anand/unijord/partitionlog/blob/source/s3"
@@ -44,9 +45,12 @@ type Options struct {
 
 // Store wires S3 catalog metadata, segment writes, and segment reads.
 type Store struct {
-	catalog *catalogblob.Catalog
-	sink    *segmentsink.Factory
-	source  *s3source.Store
+	catalog       *catalogblob.Catalog
+	sink          *segmentsink.Factory
+	source        *s3source.Store
+	admin         *s3catalog.Backend
+	streamID      string
+	catalogPrefix string
 }
 
 // New builds a complete S3-backed partitionlog store.
@@ -57,8 +61,13 @@ func New(opts Options) (*Store, error) {
 		return nil, err
 	}
 
-	cat, err := s3catalog.New(opts.Client, opts.Bucket, s3catalog.Options{
-		Prefix:   catalogPrefix(root, opts.CatalogPrefix),
+	admin, err := s3catalog.NewBackend(opts.Client, opts.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	catPrefix := catalogPrefix(root, opts.CatalogPrefix)
+	cat, err := catalogblob.New(admin, catalogblob.Options{
+		Prefix:   catPrefix,
 		StreamID: streamID,
 	})
 	if err != nil {
@@ -82,7 +91,7 @@ func New(opts Options) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{catalog: cat, sink: sinkFactory, source: source}, nil
+	return &Store{catalog: cat, sink: sinkFactory, source: source, admin: admin, streamID: streamID, catalogPrefix: catPrefix}, nil
 }
 
 func normalizeStreamID(streamID string) (string, error) {
@@ -111,6 +120,13 @@ func (s *Store) SinkFactory() writer.SinkFactory {
 
 func (s *Store) SegmentStore() reader.SegmentStore {
 	return s.source
+}
+
+// NewReclaimer creates an explicitly scheduled object lifecycle worker.
+func (s *Store) NewReclaimer(opts lifecycle.Options) (*lifecycle.Reclaimer, error) {
+	opts.StreamID = s.streamID
+	opts.CatalogPrefix = s.catalogPrefix
+	return lifecycle.New(s.admin, s.catalog, s.sink.Layout(), opts)
 }
 
 func rootPrefix(prefix string) string {

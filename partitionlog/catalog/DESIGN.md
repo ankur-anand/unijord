@@ -37,8 +37,8 @@ The catalog is not responsible for:
 - event-level compaction or segment rewrite;
 - cross-partition transactions.
 
-Detailed retention and orphan-GC behavior belongs in
-[`COMPACTOR.md`](/Users/ankur/code/private/git@ankur-anand/eventlake/partitionlog/catalog/COMPACTOR.md).
+Detailed retention and physical reclamation behavior is defined in
+[`partitionlog/LIFECYCLE.md`](../LIFECYCLE.md).
 
 ## Package Layout
 

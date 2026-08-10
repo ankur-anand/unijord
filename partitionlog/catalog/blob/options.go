@@ -9,7 +9,11 @@ import (
 )
 
 const (
-	DefaultIndexRefLimit               = 1024
+	DefaultIndexRefLimit = 1024
+	// MaxIndexLevel bounds catalog-tree depth and prevents uint8 level wrap.
+	// With the minimum fanout of two it represents more history than the
+	// uint64 LSN space can address at normal leaf sizes.
+	MaxIndexLevel                      = 63
 	DefaultWriterAcquireMaxAttempts    = 32
 	DefaultWriterAcquireInitialBackoff = 2 * time.Millisecond
 	DefaultWriterAcquireMaxBackoff     = 100 * time.Millisecond
@@ -70,8 +74,10 @@ func normalizeOptions(opts Options) (Options, error) {
 		return Options{}, fmt.Errorf("%w: leaf segment limit=%d max=%d", csession.ErrInvalidRequest, opts.LeafSegmentLimit, csession.MaxSegmentPageLimit)
 	}
 	switch {
-	case opts.IndexRefLimit <= 0:
+	case opts.IndexRefLimit == 0:
 		opts.IndexRefLimit = DefaultIndexRefLimit
+	case opts.IndexRefLimit < 2:
+		return Options{}, fmt.Errorf("%w: index ref limit=%d min=2", csession.ErrInvalidRequest, opts.IndexRefLimit)
 	case opts.IndexRefLimit > csession.MaxSegmentPageLimit:
 		return Options{}, fmt.Errorf("%w: index ref limit=%d max=%d", csession.ErrInvalidRequest, opts.IndexRefLimit, csession.MaxSegmentPageLimit)
 	}

@@ -33,6 +33,9 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 	if head.AppliedRetentionLSN > head.NextLSN {
 		return fmt.Errorf("%w: applied_retention_lsn=%d next_lsn=%d", ErrCorruptCatalog, head.AppliedRetentionLSN, head.NextLSN)
 	}
+	if head.MaxIndexLevel > MaxIndexLevel {
+		return fmt.Errorf("%w: max_index_level=%d max=%d", ErrCorruptCatalog, head.MaxIndexLevel, MaxIndexLevel)
+	}
 	if !head.HasLastSegment {
 		if head.OldestLSN != head.NextLSN || head.SegmentCount != 0 || head.LeafFrontier != nil || len(head.IndexFrontier) != 0 || len(head.ActiveSegments) != 0 {
 			return fmt.Errorf("%w: empty head carries segment state", ErrCorruptCatalog)
@@ -65,6 +68,9 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 			continue
 		}
 		wantLevel := uint8(i + 1)
+		if wantLevel > head.MaxIndexLevel {
+			return fmt.Errorf("%w: index level=%d exceeds observed max=%d", ErrCorruptCatalog, wantLevel, head.MaxIndexLevel)
+		}
 		if err := validatePageRef(ref, wantLevel); err != nil {
 			return err
 		}
@@ -132,6 +138,16 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 		return fmt.Errorf("%w: last active segment does not match head last segment", ErrCorruptCatalog)
 	}
 	return nil
+}
+
+func highestIndexLevel(frontier []pageRef) uint8 {
+	var highest uint8
+	for _, ref := range frontier {
+		if ref.Path != "" && ref.Level > highest {
+			highest = ref.Level
+		}
+	}
+	return highest
 }
 
 func validateActiveSegments(streamID string, partition uint32, segments []pmeta.SegmentRef) error {

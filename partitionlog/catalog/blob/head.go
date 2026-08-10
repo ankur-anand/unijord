@@ -243,6 +243,9 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 	next.IndexFrontier = pages.IndexFrontier
 	next.LeafFrontier = pages.LeafFrontier
 	next.ActiveSegments = pages.ActiveSegments
+	if level := highestIndexLevel(pages.IndexFrontier); level > next.MaxIndexLevel {
+		next.MaxIndexLevel = level
+	}
 	next.Generation = generation
 
 	body, err := marshalHead(next, s.cat.opts.StreamID, head.Partition)
@@ -371,6 +374,7 @@ func sameHeadState(a, b headFile) bool {
 		a.OldestLSN != b.OldestLSN ||
 		a.AppliedRetentionLSN != b.AppliedRetentionLSN ||
 		a.AppliedRetentionVersion != b.AppliedRetentionVersion ||
+		a.MaxIndexLevel != b.MaxIndexLevel ||
 		a.WriterEpoch != b.WriterEpoch ||
 		a.WriterID != b.WriterID ||
 		a.SegmentCount != b.SegmentCount ||

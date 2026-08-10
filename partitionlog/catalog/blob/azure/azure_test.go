@@ -243,6 +243,7 @@ func (f *fakeAzureBlobServer) listBlobs(w http.ResponseWriter, r *http.Request) 
 	}
 	start := 0
 	marker := r.URL.Query().Get("marker")
+	startFrom := r.URL.Query().Get("startFrom")
 	if marker != "" {
 		parsed, err := strconv.Atoi(marker)
 		if err != nil || parsed < 0 {
@@ -255,7 +256,7 @@ func (f *fakeAzureBlobServer) listBlobs(w http.ResponseWriter, r *http.Request) 
 	f.mu.Lock()
 	keys := make([]string, 0, len(f.objects))
 	for key := range f.objects {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(key, prefix) && (startFrom == "" || key >= startFrom) {
 			keys = append(keys, key)
 		}
 	}

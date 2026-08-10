@@ -128,6 +128,34 @@ keeps a whole immutable segment when `BeforeLSN` falls inside it, so the
 effective `OldestLSN` can be lower than `result.RequestedLSN`. Physical object
 deletion is a separate grace-period GC operation.
 
+Provider stores expose an explicit reclaimer from
+`partitionlog/blob/lifecycle`. Run retention cleanup regularly and the more
+expensive reachability scrub on a slower schedule:
+
+```go
+reclaimer, err := store.NewReclaimer(plifecycle.Options{
+    DeleteDelay:      24 * time.Hour,
+    MaxObjectsPerRun: 10_000,
+    MaxDeletesPerRun: 1_000,
+})
+if err != nil {
+    return err
+}
+
+retentionResult, err := reclaimer.RunPartition(ctx, 7)
+if err != nil {
+    return err
+}
+
+scrubResult, err := reclaimer.ScrubPartition(ctx, 7)
+```
+
+Both operations are bounded and checkpoint progress in object storage. They do
+not run implicitly inside writers or readers.
+
+The physical object lifecycle is defined in
+[`LIFECYCLE.md`](./LIFECYCLE.md).
+
 ## Read
 
 `Read` is passive. It does not start background polling and does not wait for

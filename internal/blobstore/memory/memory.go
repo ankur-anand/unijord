@@ -104,7 +104,7 @@ func (s *Store) List(ctx context.Context, opts blobstore.ListOptions) (blobstore
 	defer s.mu.Unlock()
 	objects := make([]blobstore.ObjectInfo, 0)
 	for key, stored := range s.objects {
-		if !strings.HasPrefix(key, opts.Prefix) || opts.Cursor != "" && key <= opts.Cursor {
+		if !strings.HasPrefix(key, opts.Prefix) || opts.AfterKey != "" && key <= opts.AfterKey {
 			continue
 		}
 		objects = append(objects, blobstore.ObjectInfo{
@@ -119,7 +119,7 @@ func (s *Store) List(ctx context.Context, opts blobstore.ListOptions) (blobstore
 	if limit := opts.NormalizedLimit(); len(page.Objects) > limit {
 		page.Objects = page.Objects[:limit]
 		page.HasMore = true
-		page.NextCursor = page.Objects[len(page.Objects)-1].Key
+		page.NextAfterKey = page.Objects[len(page.Objects)-1].Key
 	}
 	return page, nil
 }

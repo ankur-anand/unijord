@@ -130,7 +130,8 @@ func TestValidateHeadFileWithIndexFrontier(t *testing.T) {
 		IndexFrontier: []pageRef{
 			testPageRef(1, 100, 399, 4, "index", 3),
 		},
-		Generation: 5,
+		MaxIndexLevel: 1,
+		Generation:    5,
 	}
 	if err := validateHeadFile(head, "", 1); err != nil {
 		t.Fatalf("validateHeadFile(index frontier) error = %v", err)

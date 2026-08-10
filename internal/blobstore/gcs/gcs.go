@@ -111,10 +111,13 @@ func (b *Backend) CompareAndSwap(ctx context.Context, key string, expectedToken 
 func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobstore.ObjectPage, error) {
 	limit := opts.NormalizedLimit()
 	it := b.client.Bucket(b.bucket).Objects(ctx, &storage.Query{
-		Prefix:     opts.Prefix,
-		Projection: storage.ProjectionNoACL,
+		Prefix:      opts.Prefix,
+		StartOffset: opts.AfterKey,
+		Projection:  storage.ProjectionNoACL,
 	})
-	pager := iterator.NewPager(it, limit, opts.Cursor)
+	// GCS startOffset is inclusive. Request one extra result so filtering an
+	// existing AfterKey still returns a full exclusive page.
+	pager := iterator.NewPager(it, limit+1, "")
 
 	var attrs []*storage.ObjectAttrs
 	nextToken, err := pager.NextPage(&attrs)
@@ -122,10 +125,13 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 		return blobstore.ObjectPage{}, mapError(err)
 	}
 
-	objects := make([]blobstore.ObjectInfo, 0, len(attrs))
+	objects := make([]blobstore.ObjectInfo, 0, min(len(attrs), limit))
 	for _, attr := range attrs {
-		if attr == nil || attr.Name == "" {
+		if attr == nil || attr.Name == "" || opts.AfterKey != "" && attr.Name <= opts.AfterKey {
 			continue
+		}
+		if len(objects) == limit {
+			break
 		}
 		if attr.Size > int64(math.MaxInt) {
 			return blobstore.ObjectPage{}, fmt.Errorf("%w: object %s size=%d exceeds int", blobstore.ErrInvalidRequest, attr.Name, attr.Size)
@@ -141,11 +147,22 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 			CreatedAt: attr.Created,
 		})
 	}
-	return blobstore.ObjectPage{
-		Objects:    objects,
-		NextCursor: nextToken,
-		HasMore:    nextToken != "",
-	}, nil
+	hasMore := nextToken != "" || countAfter(attrs, opts.AfterKey) > limit
+	page := blobstore.ObjectPage{Objects: objects, HasMore: hasMore}
+	if page.HasMore && len(page.Objects) > 0 {
+		page.NextAfterKey = page.Objects[len(page.Objects)-1].Key
+	}
+	return page, nil
+}
+
+func countAfter(attrs []*storage.ObjectAttrs, afterKey string) int {
+	count := 0
+	for _, attr := range attrs {
+		if attr != nil && attr.Name != "" && (afterKey == "" || attr.Name > afterKey) {
+			count++
+		}
+	}
+	return count
 }
 
 func (b *Backend) Delete(ctx context.Context, key string) error {

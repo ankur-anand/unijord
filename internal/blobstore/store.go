@@ -15,8 +15,11 @@ var (
 )
 
 const (
-	DefaultListLimit = 1024
-	MaxListLimit     = 4096
+	// Object-store list APIs do not share one maximum page size. The common
+	// contract uses S3's 1,000-key ceiling so callers observe the same bounded
+	// behavior on every backend.
+	DefaultListLimit = 1000
+	MaxListLimit     = 1000
 	JSONContentType  = "application/json"
 )
 
@@ -54,8 +57,10 @@ type ObjectInfo struct {
 type ListOptions struct {
 	Prefix string
 
-	// Cursor is an opaque value previously returned as ObjectPage.NextCursor.
-	Cursor string
+	// AfterKey is an exclusive, lexicographic lower bound. It does not need to
+	// name an existing object. Unlike provider continuation tokens, it is safe
+	// to persist across process restarts and object deletions.
+	AfterKey string
 
 	Limit int
 }
@@ -72,7 +77,7 @@ func (o ListOptions) NormalizedLimit() int {
 }
 
 type ObjectPage struct {
-	Objects    []ObjectInfo
-	NextCursor string
-	HasMore    bool
+	Objects      []ObjectInfo
+	NextAfterKey string
+	HasMore      bool
 }
