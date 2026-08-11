@@ -16,7 +16,8 @@ import (
 
 const cleanupTimeout = 5 * time.Second
 
-// Writer owns one partition's append flow. It is not safe for concurrent use.
+// Writer owns one partition's append flow. Calls that mutate the writer must
+// be serialized. State, Err, and Committed may be used by observer goroutines.
 type Writer struct {
 	mu        sync.Mutex
 	sessionMu sync.Mutex
@@ -46,10 +47,12 @@ type Writer struct {
 	closed          bool
 	aborted         bool
 
-	stateWake    chan struct{}
-	finalizeWake chan struct{}
-	publishWake  chan struct{}
-	ageWake      chan struct{}
+	stateWake        chan struct{}
+	committedChanged chan struct{}
+	commitClosed     bool
+	finalizeWake     chan struct{}
+	publishWake      chan struct{}
+	ageWake          chan struct{}
 
 	workerCtx    context.Context
 	workerCancel context.CancelFunc
@@ -116,6 +119,7 @@ func New(opts Options) (*Writer, error) {
 		committed:         snapshot,
 		optimisticNextLSN: snapshot.Head.NextLSN,
 		stateWake:         make(chan struct{}, 1),
+		committedChanged:  make(chan struct{}),
 		finalizeWake:      make(chan struct{}, 1),
 		publishWake:       make(chan struct{}, 1),
 		ageWake:           make(chan struct{}, 1),
@@ -334,6 +338,19 @@ func (w *Writer) State() State {
 	}
 }
 
+// Committed returns a channel that is closed when the committed snapshot
+// changes or the writer becomes terminal. Obtain the channel before reading
+// State, then call Committed again after every wake. Inspect Err after a wake
+// before waiting again.
+//
+// Closing the channel broadcasts one coalescible notification to all waiters.
+// The channel remains closed after Close, Abort, or a terminal writer error.
+func (w *Writer) Committed() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.committedChanged
+}
+
 func (w *Writer) Err() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -377,6 +394,9 @@ func (w *Writer) ApplyPendingRetention(ctx context.Context) (RetentionResult, er
 	w.mu.Lock()
 	w.committed = result.Snapshot
 	w.signalStateLocked()
+	if result.Snapshot != current {
+		w.signalCommittedLocked()
+	}
 	w.mu.Unlock()
 	w.sessionMu.Unlock()
 	return result, nil
@@ -567,6 +587,7 @@ func (w *Writer) publishLoop() {
 		}
 		w.committed = next
 		w.signalStateLocked()
+		w.signalCommittedLocked()
 		stop := w.workerCtx.Err() != nil && w.inflightSegments == 0
 		w.mu.Unlock()
 		w.sessionMu.Unlock()
@@ -889,6 +910,22 @@ func (w *Writer) signalStateLocked() {
 	}
 }
 
+func (w *Writer) signalCommittedLocked() {
+	if w.commitClosed {
+		return
+	}
+	close(w.committedChanged)
+	w.committedChanged = make(chan struct{})
+}
+
+func (w *Writer) signalCommittedTerminalLocked() {
+	if w.commitClosed {
+		return
+	}
+	close(w.committedChanged)
+	w.commitClosed = true
+}
+
 func (w *Writer) signalFinalizeLocked() {
 	select {
 	case w.finalizeWake <- struct{}{}:
@@ -912,6 +949,7 @@ func (w *Writer) signalAgeLocked() {
 
 func (w *Writer) signalAllLocked() {
 	w.signalStateLocked()
+	w.signalCommittedTerminalLocked()
 	w.signalFinalizeLocked()
 	w.signalPublishLocked()
 	w.signalAgeLocked()

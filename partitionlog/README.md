@@ -97,6 +97,30 @@ _ = appendResult.LSN
 _ = snapshot.Head.NextLSN
 ```
 
+Services that acknowledge records asynchronously can wait for committed head
+advancement without polling each request:
+
+```go
+for {
+    changed := writer.Committed()
+    state := writer.State()
+    if state.Snapshot.Head.NextLSN > appendResult.LSN {
+        break
+    }
+    select {
+    case <-changed:
+        if err := writer.Err(); err != nil {
+            return err
+        }
+    case <-ctx.Done():
+        return ctx.Err()
+    }
+}
+```
+
+Obtain `Committed()` before reading `State()` so a commit cannot occur between
+the state check and registering the waiter.
+
 Use `Close` during graceful shutdown:
 
 ```go

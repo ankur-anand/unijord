@@ -179,7 +179,9 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 	return &Writer{inner: inner, partition: opts.Partition, metrics: l.metrics}, nil
 }
 
-// Writer appends records to one fenced partition.
+// Writer appends records to one fenced partition. Calls that mutate the writer
+// must be serialized. State, Err, and Committed may be used by observer
+// goroutines.
 type Writer struct {
 	inner     *lowwriter.Writer
 	partition uint32
@@ -262,6 +264,14 @@ func (w *Writer) Abort(ctx context.Context) (err error) {
 
 func (w *Writer) State() WriterState {
 	return stateFromWriter(w.inner.State())
+}
+
+// Committed returns a channel that is closed when the committed snapshot
+// changes or the writer becomes terminal. Obtain the channel before reading
+// State, then call Committed again after every wake. Inspect Err after a wake
+// before waiting again.
+func (w *Writer) Committed() <-chan struct{} {
+	return w.inner.Committed()
 }
 
 func (w *Writer) Err() error {

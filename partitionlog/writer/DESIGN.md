@@ -100,11 +100,13 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error)
 func (w *Writer) Abort(ctx context.Context) error
 
 func (w *Writer) State() State
+func (w *Writer) Committed() <-chan struct{}
 func (w *Writer) Err() error
 ```
 
-`Writer` is not safe for concurrent use. The intended runtime model is one
-serialized owner per partition, typically a partition actor or mailbox.
+Calls that mutate `Writer` are serialized by one owner per partition, typically
+a partition actor or mailbox. `State`, `Err`, and `Committed` may be used by
+observer goroutines.
 
 ## Session Contract
 
@@ -151,6 +153,12 @@ These may differ while cut segments are still being finalized or published.
 - the current committed snapshot;
 - the optimistic next LSN;
 - the count and bytes of in-flight segments.
+
+`Committed()` returns a broadcast notification channel. The channel closes
+when the committed snapshot changes or the writer becomes terminal. A caller
+obtains the channel before reading `State()` and obtains a new channel after
+every wake. Notifications may coalesce because committed state is monotonic.
+After a wake, callers inspect both `State()` and `Err()` before waiting again.
 
 ## Internal Pipeline
 

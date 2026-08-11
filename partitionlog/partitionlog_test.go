@@ -30,6 +30,7 @@ func TestLogWriteAndReadWithMemoryStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWriter() error = %v", err)
 	}
+	committed := w.Committed()
 	if _, err := w.Append(ctx, Record{TimestampMS: 10, Value: []byte("a")}); err != nil {
 		t.Fatalf("Append(0) error = %v", err)
 	}
@@ -38,6 +39,11 @@ func TestLogWriteAndReadWithMemoryStore(t *testing.T) {
 	}
 	if _, err := w.Flush(ctx); err != nil {
 		t.Fatalf("Flush() error = %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("public Writer.Committed() did not notify after flush")
 	}
 
 	got, err := log.Reader().Partition(1).Read(ctx, ReadRequest{

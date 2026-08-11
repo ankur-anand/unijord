@@ -52,6 +52,67 @@ func TestWriterFlushPublishesSegment(t *testing.T) {
 	}
 }
 
+func TestWriterCommittedNotifiesAfterPublicationAndOnClose(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	changed := w.Committed()
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 10, Value: []byte("alpha")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	select {
+	case <-changed:
+		t.Fatal("Committed() notified before catalog publication")
+	default:
+	}
+
+	session.ReleaseOne()
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for committed notification")
+	}
+	if got := w.State().Snapshot.Head.NextLSN; got != 1 {
+		t.Fatalf("committed NextLSN = %d, want 1", got)
+	}
+
+	// A closed generation channel broadcasts to every waiter.
+	select {
+	case <-changed:
+	default:
+		t.Fatal("committed generation channel is not closed")
+	}
+
+	next := w.Committed()
+	if next == changed {
+		t.Fatal("Committed() did not advance to a new generation channel")
+	}
+	select {
+	case <-next:
+		t.Fatal("next committed generation was already closed")
+	default:
+	}
+
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-next:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal writer did not close committed notification")
+	}
+	select {
+	case <-w.Committed():
+	default:
+		t.Fatal("Committed() must remain closed after Close")
+	}
+}
+
 func TestWriterAppliesRetentionWithoutChangingAppendPosition(t *testing.T) {
 	t.Parallel()
 
@@ -80,12 +141,18 @@ func TestWriterAppliesRetentionWithoutChangingAppendPosition(t *testing.T) {
 		t.Fatalf("RequestRetention() error = %v", err)
 	}
 
+	changed := w.Committed()
 	result, err := w.ApplyPendingRetention(ctx)
 	if err != nil {
 		t.Fatalf("ApplyPendingRetention() error = %v", err)
 	}
 	if !result.Applied || result.Snapshot.Head.OldestLSN != 2 || result.RequestedLSN != 2 || result.PolicyVersion != 1 {
 		t.Fatalf("retention result = %+v", result)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retention snapshot change did not notify Committed()")
 	}
 	state := w.State()
 	if state.OptimisticNextLSN != 3 || state.Snapshot.Head.NextLSN != 3 || state.Snapshot.Head.SegmentCount != 3 {
@@ -474,6 +541,7 @@ func TestWriterAsyncPublishFailureSurfacesOnce(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
+	changed := w.Committed()
 	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
 		t.Fatalf("Append(first) error = %v", err)
 	}
@@ -488,6 +556,16 @@ func TestWriterAsyncPublishFailureSurfacesOnce(t *testing.T) {
 	}
 	if !errors.Is(w.Err(), ErrPublishFailed) {
 		t.Fatalf("Err() = %v, want %v", w.Err(), ErrPublishFailed)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("async publish failure did not close committed notification")
+	}
+	select {
+	case <-w.Committed():
+	default:
+		t.Fatal("Committed() must remain closed after terminal publish failure")
 	}
 	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); !errors.Is(err, ErrPublishFailed) {
 		t.Fatalf("Append(after async failure) error = %v, want %v", err, ErrPublishFailed)
