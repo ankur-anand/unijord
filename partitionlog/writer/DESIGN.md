@@ -118,7 +118,8 @@ observer goroutines.
 
 - validate ownership and expected head position;
 - publish exactly one segment for the provided `ExpectedNextLSN`;
-- return the new committed snapshot on success.
+- return the new committed snapshot on success;
+- return promptly when its context is canceled.
 
 `writer` validates the returned snapshot before installing it.
 
@@ -138,6 +139,7 @@ type SegmentInfo struct {
 ```
 
 The sink factory owns storage key layout and provider-specific behavior.
+`SinkFactory.NewSegmentSink` must return promptly when its context is canceled.
 
 ## State Model
 

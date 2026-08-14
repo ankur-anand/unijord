@@ -246,6 +246,55 @@ func TestRawBlockScanner(t *testing.T) {
 	}
 }
 
+func TestRawBlockScannerAliasesCannotAppendIntoAdjacentData(t *testing.T) {
+	t.Parallel()
+
+	records := []RawRecord{
+		{TimestampMS: 10, Headers: []Header{{Key: []byte("kind"), Value: []byte("first")}}, Value: []byte("alpha")},
+		{TimestampMS: 11, Headers: []Header{{Key: []byte("kind"), Value: []byte("second")}}, Value: []byte("beta")},
+	}
+	raw, err := EncodeRawBlock(records)
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	block := BlockPreamble{
+		RawSize:        uint32(len(raw)),
+		StoredSize:     uint32(len(raw)),
+		RecordCount:    uint32(len(records)),
+		BaseLSN:        100,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 11,
+	}
+	scanner, err := NewRawBlockScanner(raw, block)
+	if err != nil {
+		t.Fatalf("NewRawBlockScanner() error = %v", err)
+	}
+	first, ok, err := scanner.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next(first) = ok=%v err=%v", ok, err)
+	}
+	if cap(first.Value) != len(first.Value) {
+		t.Fatalf("first value cap=%d len=%d", cap(first.Value), len(first.Value))
+	}
+	if cap(first.Headers[0].Key) != len(first.Headers[0].Key) {
+		t.Fatalf("first header key cap=%d len=%d", cap(first.Headers[0].Key), len(first.Headers[0].Key))
+	}
+	if cap(first.Headers[0].Value) != len(first.Headers[0].Value) {
+		t.Fatalf("first header value cap=%d len=%d", cap(first.Headers[0].Value), len(first.Headers[0].Value))
+	}
+
+	_ = append(first.Value, '!')
+	_ = append(first.Headers[0].Key, '!')
+	_ = append(first.Headers[0].Value, '!')
+	second, ok, err := scanner.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next(second) = ok=%v err=%v", ok, err)
+	}
+	if second.TimestampMS != 11 || string(second.Value) != "beta" || string(second.Headers[0].Value) != "second" {
+		t.Fatalf("second record corrupted: %+v", second)
+	}
+}
+
 func TestRawBlockScannerRejectsTrailingBytesBeforeLastRecord(t *testing.T) {
 	raw, err := EncodeRawBlock([]RawRecord{{TimestampMS: 10, Value: []byte("alpha")}})
 	if err != nil {

@@ -67,7 +67,7 @@ func (s *Store) ReadAt(ctx context.Context, uri string, off uint64, n uint64) ([
 		return []byte{}, nil
 	}
 	key := Key{URI: uri, Off: off, N: n}
-	if body, ok := s.cache.Get(key); ok {
+	if body, ok := s.cache.Get(key); ok && uint64(len(body)) == n {
 		return body, nil
 	}
 
@@ -85,6 +85,9 @@ func (s *Store) ReadAt(ctx context.Context, uri string, off uint64, n uint64) ([
 	}
 
 	body, err := s.inner.ReadAt(ctx, uri, off, n)
+	if err == nil && uint64(len(body)) != n {
+		err = fmt.Errorf("blob/cache: short range read uri=%q offset=%d length=%d got=%d", uri, off, n, len(body))
+	}
 	if err == nil {
 		s.cache.Set(key, body)
 	}

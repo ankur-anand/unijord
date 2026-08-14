@@ -5,8 +5,15 @@ import (
 	"fmt"
 	"time"
 
+	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 )
+
+type segmentScrubObject struct {
+	object ObjectInfo
+	parsed segmentsink.SegmentObjectKey
+}
 
 // ScrubPartition performs bounded orphan discovery and quarantine work for
 // one partition. It is intentionally separate from normal retention GC
@@ -77,6 +84,46 @@ func (r *Reclaimer) processPageQuarantine(ctx context.Context, state *stateFile,
 		return nil
 	}
 	now := r.now().UTC()
+	remainingBudget := r.opts.MaxObjectsPerRun - budget.result.ScannedObjects
+	if remainingBudget <= 0 {
+		budget.exhausted = true
+		return nil
+	}
+	type quarantineCheck struct {
+		parsed catalogblob.PageObjectKey
+	}
+	checksByLevel := make(map[uint8][]catalogPageScrubObject)
+	checks := make(map[int]quarantineCheck)
+	for i, candidate := range state.PageQuarantine {
+		if len(checks) >= remainingBudget {
+			break
+		}
+		if now.Before(timeFromUnixMilli(candidate.ObservedMS).Add(r.opts.DeleteDelay)) {
+			continue
+		}
+		parsed, err := catalogblob.ParsePagePath(r.opts.CatalogPrefix, r.opts.StreamID, state.Partition, candidate.Key)
+		if err != nil {
+			return fmt.Errorf("%w: quarantine page: %v", ErrCorruptState, err)
+		}
+		checks[i] = quarantineCheck{parsed: parsed}
+		checksByLevel[parsed.Level] = append(checksByLevel[parsed.Level], catalogPageScrubObject{
+			object: ObjectInfo{Key: candidate.Key},
+			parsed: parsed,
+		})
+	}
+	type levelReachability struct {
+		snapshot  catalogblob.MaintenanceSnapshot
+		reachable map[string]struct{}
+	}
+	levels := make(map[uint8]levelReachability, len(checksByLevel))
+	for level, objects := range checksByLevel {
+		snapshot, reachable, err := r.reachablePagesForObjectPage(ctx, state.Partition, level, objects)
+		if err != nil {
+			return err
+		}
+		levels[level] = levelReachability{snapshot: snapshot, reachable: reachable}
+	}
+
 	remaining := make([]quarantineObject, 0, len(state.PageQuarantine))
 	changed := false
 	for i, candidate := range state.PageQuarantine {
@@ -84,38 +131,29 @@ func (r *Reclaimer) processPageQuarantine(ctx context.Context, state *stateFile,
 			remaining = append(remaining, candidate)
 			continue
 		}
-		if !budget.available() {
-			remaining = append(remaining, state.PageQuarantine[i:]...)
-			break
+		check, selected := checks[i]
+		if !selected || !budget.available() {
+			remaining = append(remaining, candidate)
+			continue
 		}
 		budget.recordScan(1)
-		parsed, err := catalogblob.ParsePagePath(r.opts.CatalogPrefix, r.opts.StreamID, state.Partition, candidate.Key)
-		if err != nil {
-			return fmt.Errorf("%w: quarantine page: %v", ErrCorruptState, err)
-		}
-		snapshot, reachable, err := r.catalog.IsPageReachable(ctx, state.Partition, candidate.Key)
-		if err != nil {
-			return err
-		}
-		if err := r.validateSnapshot(snapshot, state.Partition); err != nil {
-			return err
-		}
+		level := levels[check.parsed.Level]
+		snapshot := level.snapshot
 		if snapshot.Generation < candidate.ObservedGeneration {
 			return fmt.Errorf("lifecycle: catalog generation regressed current=%d observed=%d", snapshot.Generation, candidate.ObservedGeneration)
 		}
-		if reachable {
+		if _, reachable := level.reachable[candidate.Key]; reachable {
 			changed = true
 			continue
 		}
-		if parsed.Generation >= snapshot.Generation {
+		if check.parsed.Generation >= snapshot.Generation {
 			remaining = append(remaining, candidate)
 			continue
 		}
 		budget.recordCandidate()
 		if !budget.canDelete(candidate.SizeBytes) {
 			remaining = append(remaining, candidate)
-			remaining = append(remaining, state.PageQuarantine[i+1:]...)
-			break
+			continue
 		}
 		if r.opts.DryRun {
 			remaining = append(remaining, candidate)
@@ -155,23 +193,35 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 			return false, r.completeOrphanSegments(ctx, state, token)
 		}
 
-		lastProcessed := afterKey
+		parsedObjects := make([]segmentScrubObject, 0, len(page.Objects))
 		for _, object := range page.Objects {
 			parsed, err := r.layout.ParseSegmentKey(r.opts.StreamID, state.Partition, object.Key)
 			if err != nil {
 				budget.invalid()
-				lastProcessed = object.Key
 				continue
 			}
-			if !orphanSegmentEligible(parsed.BaseLSN, parsed.WriterEpoch, snapshot) || !oldEnough(object.CreatedAt, now, r.opts.DeleteDelay) {
-				lastProcessed = object.Key
-				continue
-			}
-			reachable, err := r.segmentReferenced(ctx, state.Partition, object.Key, parsed.BaseLSN)
+			parsedObjects = append(parsedObjects, segmentScrubObject{object: object, parsed: parsed})
+		}
+
+		fresh := snapshot
+		referenced := map[string]struct{}{}
+		if len(parsedObjects) > 0 {
+			var err error
+			fresh, referenced, err = r.referencedSegmentsForObjectPage(ctx, state.Partition, parsedObjects)
 			if err != nil {
 				return false, err
 			}
-			if reachable {
+		}
+
+		lastProcessed := afterKey
+		for _, candidate := range parsedObjects {
+			object := candidate.object
+			parsed := candidate.parsed
+			if !oldEnough(object.CreatedAt, now, r.opts.DeleteDelay) || !orphanSegmentEligible(parsed.BaseLSN, parsed.WriterEpoch, state.SafeFloorLSN, fresh) {
+				lastProcessed = object.Key
+				continue
+			}
+			if _, ok := referenced[object.Key]; ok {
 				lastProcessed = object.Key
 				continue
 			}
@@ -180,35 +230,17 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 			if !budget.canDelete(size) {
 				return true, r.checkpointOrphanSegment(ctx, state, token, lastProcessed)
 			}
-			if r.opts.DryRun {
-				lastProcessed = object.Key
-				continue
+			if !r.opts.DryRun {
+				if err := r.backend.Delete(ctx, object.Key); err != nil {
+					_ = r.checkpointOrphanSegment(ctx, state, token, lastProcessed)
+					return false, err
+				}
+				budget.recordDelete(size)
 			}
-			fresh, err := r.catalog.LoadMaintenanceSnapshot(ctx, state.Partition)
-			if err != nil {
-				return false, err
-			}
-			if err := r.validateSnapshot(fresh, state.Partition); err != nil {
-				return false, err
-			}
-			if !orphanSegmentEligible(parsed.BaseLSN, parsed.WriterEpoch, fresh) {
-				lastProcessed = object.Key
-				continue
-			}
-			reachable, err = r.segmentReferenced(ctx, state.Partition, object.Key, parsed.BaseLSN)
-			if err != nil {
-				return false, err
-			}
-			if reachable {
-				lastProcessed = object.Key
-				continue
-			}
-			if err := r.backend.Delete(ctx, object.Key); err != nil {
-				_ = r.checkpointOrphanSegment(ctx, state, token, lastProcessed)
-				return false, err
-			}
-			budget.recordDelete(size)
 			lastProcessed = object.Key
+		}
+		if len(page.Objects) > 0 && lastProcessed < page.Objects[len(page.Objects)-1].Key {
+			lastProcessed = page.Objects[len(page.Objects)-1].Key
 		}
 
 		afterKey = lastProcessed
@@ -229,19 +261,71 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 	return true, nil
 }
 
-func orphanSegmentEligible(baseLSN, writerEpoch uint64, snapshot catalogblob.MaintenanceSnapshot) bool {
+func (r *Reclaimer) referencedSegmentsForObjectPage(ctx context.Context, partition uint32, objects []segmentScrubObject) (catalogblob.MaintenanceSnapshot, map[string]struct{}, error) {
+	fromLSN := objects[0].parsed.BaseLSN
+	throughLSN := fromLSN
+	for _, object := range objects[1:] {
+		if object.parsed.BaseLSN < fromLSN {
+			fromLSN = object.parsed.BaseLSN
+		}
+		if object.parsed.BaseLSN > throughLSN {
+			throughLSN = object.parsed.BaseLSN
+		}
+	}
+	physicalKeys := make(map[string]struct{}, len(objects))
+	for _, object := range objects {
+		physicalKeys[object.object.Key] = struct{}{}
+	}
+	referenced := make(map[string]struct{}, len(objects))
+	var observed catalogblob.MaintenanceSnapshot
+	hasObserved := false
+	for next := fromLSN; ; {
+		snapshot, page, err := r.catalog.ListMaintenanceSegments(ctx, catalog.ListSegmentsRequest{
+			Partition: partition,
+			FromLSN:   next,
+			Limit:     catalog.MaxSegmentPageLimit,
+		})
+		if err != nil {
+			return catalogblob.MaintenanceSnapshot{}, nil, err
+		}
+		if err := r.validateSnapshot(snapshot, partition); err != nil {
+			return catalogblob.MaintenanceSnapshot{}, nil, err
+		}
+		if !hasObserved {
+			observed = snapshot
+			hasObserved = true
+		} else if snapshot.Generation != observed.Generation {
+			return catalogblob.MaintenanceSnapshot{}, nil, fmt.Errorf("lifecycle: catalog changed during segment scrub generation=%d current=%d", observed.Generation, snapshot.Generation)
+		}
+		for _, segment := range page.Segments {
+			if segment.BaseLSN > throughLSN {
+				break
+			}
+			if _, ok := physicalKeys[segment.URI]; ok {
+				referenced[segment.URI] = struct{}{}
+			}
+		}
+		if !page.HasMore || page.NextLSN > throughLSN {
+			return observed, referenced, nil
+		}
+		if page.NextLSN <= next {
+			return catalogblob.MaintenanceSnapshot{}, nil, fmt.Errorf("lifecycle: non-advancing catalog segment page next_lsn=%d from_lsn=%d", page.NextLSN, next)
+		}
+		next = page.NextLSN
+	}
+}
+
+func orphanSegmentEligible(baseLSN, writerEpoch, safeFloorLSN uint64, snapshot catalogblob.MaintenanceSnapshot) bool {
+	// Retained-history reclamation owns this range because it waits for the
+	// delayed safe floor. Treating old retained objects as ordinary orphans
+	// would let object creation age bypass that read-safety delay.
+	if baseLSN < snapshot.Head.OldestLSN && baseLSN >= safeFloorLSN {
+		return false
+	}
 	if writerEpoch > snapshot.Head.WriterEpoch {
 		return false
 	}
 	return baseLSN < snapshot.Head.NextLSN || writerEpoch < snapshot.Head.WriterEpoch
-}
-
-func (r *Reclaimer) segmentReferenced(ctx context.Context, partition uint32, key string, baseLSN uint64) (bool, error) {
-	segment, found, err := r.catalog.FindSegment(ctx, partition, baseLSN)
-	if err != nil || !found {
-		return false, err
-	}
-	return segment.BaseLSN == baseLSN && segment.URI == key, nil
 }
 
 func (r *Reclaimer) checkpointOrphanSegment(ctx context.Context, state *stateFile, token *string, afterKey string) error {
@@ -293,15 +377,31 @@ func (r *Reclaimer) scrubPageOrphans(ctx context.Context, snapshot catalogblob.M
 			continue
 		}
 
-		lastProcessed := afterKey
+		parsedObjects := make([]catalogPageScrubObject, 0, len(page.Objects))
 		for _, object := range page.Objects {
 			parsed, err := catalogblob.ParsePagePath(r.opts.CatalogPrefix, r.opts.StreamID, state.Partition, object.Key)
 			if err != nil || parsed.Level != level {
 				budget.invalid()
-				lastProcessed = object.Key
 				continue
 			}
-			if parsed.Generation >= snapshot.Generation {
+			parsedObjects = append(parsedObjects, catalogPageScrubObject{object: object, parsed: parsed})
+		}
+
+		fresh := snapshot
+		reachable := map[string]struct{}{}
+		if len(parsedObjects) > 0 {
+			var err error
+			fresh, reachable, err = r.reachablePagesForObjectPage(ctx, state.Partition, level, parsedObjects)
+			if err != nil {
+				return false, err
+			}
+		}
+
+		lastProcessed := afterKey
+		for _, candidate := range parsedObjects {
+			object := candidate.object
+			parsed := candidate.parsed
+			if parsed.Generation >= fresh.Generation {
 				lastProcessed = object.Key
 				continue
 			}
@@ -309,14 +409,7 @@ func (r *Reclaimer) scrubPageOrphans(ctx context.Context, snapshot catalogblob.M
 				lastProcessed = object.Key
 				continue
 			}
-			fresh, reachable, err := r.catalog.IsPageReachable(ctx, state.Partition, object.Key)
-			if err != nil {
-				return false, err
-			}
-			if err := r.validateSnapshot(fresh, state.Partition); err != nil {
-				return false, err
-			}
-			if reachable || parsed.Generation >= fresh.Generation {
+			if _, ok := reachable[object.Key]; ok {
 				lastProcessed = object.Key
 				continue
 			}
@@ -334,6 +427,9 @@ func (r *Reclaimer) scrubPageOrphans(ctx context.Context, snapshot catalogblob.M
 			}
 			budget.result.QuarantinedObjects++
 			lastProcessed = object.Key
+		}
+		if len(page.Objects) > 0 && lastProcessed < page.Objects[len(page.Objects)-1].Key {
+			lastProcessed = page.Objects[len(page.Objects)-1].Key
 		}
 
 		afterKey = lastProcessed
@@ -356,6 +452,61 @@ func (r *Reclaimer) scrubPageOrphans(ctx context.Context, snapshot catalogblob.M
 		}
 	}
 	return budget.exhausted, nil
+}
+
+type catalogPageScrubObject struct {
+	object ObjectInfo
+	parsed catalogblob.PageObjectKey
+}
+
+func (r *Reclaimer) reachablePagesForObjectPage(ctx context.Context, partition uint32, level uint8, objects []catalogPageScrubObject) (catalogblob.MaintenanceSnapshot, map[string]struct{}, error) {
+	fromSeqLo := objects[0].parsed.SeqLo
+	throughSeqLo := fromSeqLo
+	physicalKeys := make(map[string]struct{}, len(objects))
+	for _, object := range objects {
+		physicalKeys[object.object.Key] = struct{}{}
+		if object.parsed.SeqLo < fromSeqLo {
+			fromSeqLo = object.parsed.SeqLo
+		}
+		if object.parsed.SeqLo > throughSeqLo {
+			throughSeqLo = object.parsed.SeqLo
+		}
+	}
+	reachable := make(map[string]struct{}, len(objects))
+	var observed catalogblob.MaintenanceSnapshot
+	hasObserved := false
+	for next := fromSeqLo; ; {
+		snapshot, page, err := r.catalog.ListMaintenancePages(ctx, catalogblob.MaintenancePageRequest{
+			Partition: partition,
+			Level:     level,
+			FromSeqLo: next,
+			Limit:     catalog.MaxSegmentPageLimit,
+		})
+		if err != nil {
+			return catalogblob.MaintenanceSnapshot{}, nil, err
+		}
+		if err := r.validateSnapshot(snapshot, partition); err != nil {
+			return catalogblob.MaintenanceSnapshot{}, nil, err
+		}
+		if !hasObserved {
+			observed = snapshot
+			hasObserved = true
+		} else if snapshot.Generation != observed.Generation {
+			return catalogblob.MaintenanceSnapshot{}, nil, fmt.Errorf("lifecycle: catalog changed during page scrub generation=%d current=%d", observed.Generation, snapshot.Generation)
+		}
+		for _, path := range page.Paths {
+			if _, ok := physicalKeys[path]; ok {
+				reachable[path] = struct{}{}
+			}
+		}
+		if !page.HasMore || page.NextSeqLo > throughSeqLo {
+			return observed, reachable, nil
+		}
+		if page.NextSeqLo <= next {
+			return catalogblob.MaintenanceSnapshot{}, nil, fmt.Errorf("lifecycle: non-advancing catalog page next_seq_lo=%d from_seq_lo=%d", page.NextSeqLo, next)
+		}
+		next = page.NextSeqLo
+	}
 }
 
 func (r *Reclaimer) checkpointOrphanPage(ctx context.Context, state *stateFile, token *string, level uint8, afterKey string) error {

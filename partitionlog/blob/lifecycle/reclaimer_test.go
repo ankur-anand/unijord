@@ -1,9 +1,11 @@
 package lifecycle
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/ankur-anand/unijord/internal/blobstore"
 	blobmemory "github.com/ankur-anand/unijord/internal/blobstore/memory"
 	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
@@ -281,6 +284,70 @@ func TestScrubPartitionDeletesOnlyProvenSegmentOrphansAndQuarantinedPages(t *tes
 	assertExists(t, backend, committed, inFlight, reachablePage, currentPage)
 }
 
+func TestScrubPartitionDoesNotBypassDelayedRetentionFloor(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Now().UTC().Add(48 * time.Hour))
+	catalog := &fakeCatalog{snapshot: maintenanceSnapshot(100, 200, 2, 0)}
+	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{})
+	expired := putSegmentInfo(t, backend, layout, plwriter.SegmentInfo{
+		StreamID: testStreamID, Partition: 7, BaseLSN: 0, WriterEpoch: 1, SegmentUUID: [16]byte{1},
+	})
+
+	result, err := r.ScrubPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if result.DeletedObjects != 0 || result.CandidateObjects != 0 {
+		t.Fatalf("ScrubPartition() result = %+v, want no retention deletion", result)
+	}
+	assertExists(t, backend, expired)
+
+	if _, err := r.RunPartition(ctx, 7); err != nil {
+		t.Fatalf("RunPartition(observe) error = %v", err)
+	}
+	assertExists(t, backend, expired)
+	clock.Advance(DefaultDeleteDelay + time.Millisecond)
+	if _, err := r.RunPartition(ctx, 7); err != nil {
+		t.Fatalf("RunPartition(reclaim) error = %v", err)
+	}
+	assertMissing(t, backend, expired)
+}
+
+func TestScrubPartitionReclaimsLateObjectBelowSafeFloor(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Now().UTC())
+	catalog := &fakeCatalog{snapshot: maintenanceSnapshot(100, 200, 2, 0)}
+	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{})
+
+	if _, err := r.RunPartition(ctx, 7); err != nil {
+		t.Fatalf("RunPartition(observe) error = %v", err)
+	}
+	clock.Advance(DefaultDeleteDelay + time.Millisecond)
+	if _, err := r.RunPartition(ctx, 7); err != nil {
+		t.Fatalf("RunPartition(promote safe floor) error = %v", err)
+	}
+	late := putSegmentInfo(t, backend, layout, plwriter.SegmentInfo{
+		StreamID: testStreamID, Partition: 7, BaseLSN: 0, WriterEpoch: 1, SegmentUUID: [16]byte{2},
+	})
+
+	result, err := r.ScrubPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if result.DeletedObjects != 1 {
+		t.Fatalf("ScrubPartition() result = %+v, want one late orphan deleted", result)
+	}
+	assertMissing(t, backend, late)
+}
+
 func newTestReclaimer(t testing.TB, backend Backend, catalog Catalog, layout segmentsink.Layout, clock *fakeClock, extra Options) *Reclaimer {
 	t.Helper()
 	extra.StreamID = testStreamID
@@ -413,21 +480,76 @@ func (c *fakeCatalog) LoadMaintenanceSnapshot(context.Context, uint32) (catalogb
 	return snapshot, nil
 }
 
-func (c *fakeCatalog) FindSegment(_ context.Context, _ uint32, lsn uint64) (pmeta.SegmentRef, bool, error) {
+func (c *fakeCatalog) ListMaintenanceSegments(_ context.Context, req catalog.ListSegmentsRequest) (catalogblob.MaintenanceSnapshot, pmeta.SegmentPage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.loads++
+	snapshot := c.snapshot
+	if c.onLoad != nil {
+		c.onLoad(c.loads, &snapshot)
+	}
+	segments := make([]pmeta.SegmentRef, 0, len(c.segments))
 	for _, segment := range c.segments {
-		if lsn >= segment.BaseLSN && lsn <= segment.LastLSN {
-			return segment, true, nil
+		if segment.LastLSN >= req.FromLSN {
+			segments = append(segments, segment)
 		}
 	}
-	return pmeta.SegmentRef{}, false, nil
+	slices.SortFunc(segments, func(a, b pmeta.SegmentRef) int {
+		return cmp.Compare(a.BaseLSN, b.BaseLSN)
+	})
+	limit := req.NormalizedLimit()
+	page := pmeta.SegmentPage{Segments: segments}
+	if len(page.Segments) > limit {
+		page.Segments = page.Segments[:limit]
+		page.NextLSN = page.Segments[len(page.Segments)-1].NextLSN()
+		page.HasMore = true
+	}
+	return snapshot, page, nil
 }
 
-func (c *fakeCatalog) IsPageReachable(_ context.Context, _ uint32, path string) (catalogblob.MaintenanceSnapshot, bool, error) {
+func (c *fakeCatalog) ListMaintenancePages(_ context.Context, req catalogblob.MaintenancePageRequest) (catalogblob.MaintenanceSnapshot, catalogblob.MaintenancePage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.snapshot, c.reachablePages[path], nil
+	c.loads++
+	snapshot := c.snapshot
+	if c.onLoad != nil {
+		c.onLoad(c.loads, &snapshot)
+	}
+	type reachablePage struct {
+		path  string
+		seqLo uint64
+	}
+	pages := make([]reachablePage, 0, len(c.reachablePages))
+	for path, reachable := range c.reachablePages {
+		if !reachable {
+			continue
+		}
+		parsed, err := catalogblob.ParsePagePath("root/catalog", testStreamID, req.Partition, path)
+		if err != nil || parsed.Level != req.Level || parsed.SeqHi < req.FromSeqLo {
+			continue
+		}
+		pages = append(pages, reachablePage{path: path, seqLo: parsed.SeqLo})
+	}
+	slices.SortFunc(pages, func(a, b reachablePage) int {
+		if order := cmp.Compare(a.seqLo, b.seqLo); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.path, b.path)
+	})
+	limit := req.Limit
+	if limit <= 0 || limit > catalog.MaxSegmentPageLimit {
+		limit = catalog.MaxSegmentPageLimit
+	}
+	page := catalogblob.MaintenancePage{Paths: make([]string, 0, min(len(pages), limit))}
+	for i, candidate := range pages {
+		if i == limit {
+			page.NextSeqLo = candidate.seqLo
+			page.HasMore = true
+			break
+		}
+		page.Paths = append(page.Paths, candidate.path)
+	}
+	return snapshot, page, nil
 }
 
 type faultBackend struct {

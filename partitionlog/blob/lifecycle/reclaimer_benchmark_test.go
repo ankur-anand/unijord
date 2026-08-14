@@ -102,6 +102,123 @@ func BenchmarkScrubSegmentOrphansHighLSN(b *testing.B) {
 	}
 }
 
+func TestScrubSegmentCatalogReadsArePageBounded(t *testing.T) {
+	t.Parallel()
+
+	const objects = uint64(2_500)
+	r, _ := newSyntheticScrubber(t, 1_000_000_000, objects)
+	result, err := r.ScrubPartition(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if result.DeletedObjects != int(objects) {
+		t.Fatalf("deleted=%d want=%d", result.DeletedObjects, objects)
+	}
+	cat := r.catalog.(*fakeCatalog)
+	cat.mu.Lock()
+	loads := cat.loads
+	cat.mu.Unlock()
+	// One initial maintenance snapshot plus one catalog page read for each
+	// physical LIST page. The empty catalog does not add history pages.
+	if loads != 4 {
+		t.Fatalf("catalog loads=%d want=4 for %d objects", loads, objects)
+	}
+}
+
+func TestScrubPageCatalogReadsArePageBounded(t *testing.T) {
+	t.Parallel()
+
+	const objects = 2_500
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Unix(1_800_000_000, 0).UTC())
+	snapshot := maintenanceSnapshot(0, 0, 2, 0)
+	snapshot.Generation = 10
+	cat := &fakeCatalog{snapshot: snapshot, reachablePages: make(map[string]bool)}
+	r := newTestReclaimer(t, backend, cat, layout, clock, Options{
+		DryRun:           true,
+		ListPageSize:     1_000,
+		MaxObjectsPerRun: objects,
+	})
+	keys := make([]string, objects)
+	for i := range keys {
+		base := uint64(i * 10)
+		keys[i] = catalogblob.LeafPagePath("root/catalog", testStreamID, 7, base, base+9, 1, fmt.Sprintf("%032x", i+1))
+	}
+	putKeys(t, backend, keys)
+
+	result, err := r.ScrubPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if result.ScannedObjects != objects || result.CandidateObjects != objects {
+		t.Fatalf("result=%+v want scanned/candidates=%d", result, objects)
+	}
+	cat.mu.Lock()
+	loads := cat.loads
+	cat.mu.Unlock()
+	// One initial maintenance snapshot plus one reachable-page query for each
+	// physical LIST page.
+	if loads != 4 {
+		t.Fatalf("catalog loads=%d want=4 for %d objects", loads, objects)
+	}
+}
+
+func TestQuarantineRecheckCatalogReadsArePageBounded(t *testing.T) {
+	t.Parallel()
+
+	const candidates = 256
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Unix(1_800_000_000, 0).UTC())
+	snapshot := maintenanceSnapshot(0, 0, 2, 0)
+	snapshot.Generation = 10
+	cat := &fakeCatalog{snapshot: snapshot, reachablePages: make(map[string]bool)}
+	r := newTestReclaimer(t, backend, cat, layout, clock, Options{
+		MaxObjectsPerRun: candidates,
+		MaxDeletesPerRun: candidates,
+		MaxDeleteBytes:   ^uint64(0),
+		MaxQuarantine:    candidates,
+	})
+	state := stateFile{
+		Version: stateVersion, StreamID: testStreamID, Partition: 7,
+		UpdatedMS: clock.Now().UnixMilli(),
+	}
+	for i := 0; i < candidates; i++ {
+		base := uint64(i * 10)
+		key := catalogblob.LeafPagePath("root/catalog", testStreamID, 7, base, base+9, 1, fmt.Sprintf("%032x", i+1))
+		putKeys(t, backend, []string{key})
+		state.PageQuarantine = append(state.PageQuarantine, quarantineObject{
+			Key: key, SizeBytes: 1, ObservedGeneration: 9,
+			ObservedMS: clock.Now().Add(-DefaultDeleteDelay - time.Second).UnixMilli(),
+		})
+	}
+	body, err := marshalState(state, testStreamID, 7)
+	if err != nil {
+		t.Fatalf("marshalState() error = %v", err)
+	}
+	statePath := catalogblob.GCStatePath("root/catalog", testStreamID, 7)
+	if _, swapped, err := backend.CompareAndSwap(ctx, statePath, "", body); err != nil || !swapped {
+		t.Fatalf("seed state swapped=%v error=%v", swapped, err)
+	}
+
+	result, err := r.ScrubPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if result.DeletedObjects != candidates || result.PendingQuarantine != 0 {
+		t.Fatalf("result=%+v want deleted=%d pending=0", result, candidates)
+	}
+	cat.mu.Lock()
+	loads := cat.loads
+	cat.mu.Unlock()
+	if loads != 2 {
+		t.Fatalf("catalog loads=%d want=2 for %d quarantine candidates", loads, candidates)
+	}
+}
+
 func newSyntheticReclaimer(t testing.TB, startLSN, expired uint64) (*Reclaimer, *syntheticSegmentBackend) {
 	t.Helper()
 	layout := segmentsink.NewLayout("root")
@@ -146,7 +263,7 @@ func newSyntheticScrubber(t testing.TB, startLSN, objects uint64) (*Reclaimer, *
 		retainedLSN: startLSN + objects - 1, writerEpoch: 1,
 	}
 	clock := newFakeClock(time.Unix(1_800_000_000, 0).UTC())
-	snapshot := maintenanceSnapshot(0, 0, 2, 0)
+	snapshot := maintenanceSnapshot(startLSN, startLSN, 2, 0)
 	snapshot.Generation = 10
 	catalog := &fakeCatalog{snapshot: snapshot}
 	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{

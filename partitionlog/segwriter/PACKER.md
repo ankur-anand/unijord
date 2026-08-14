@@ -65,7 +65,9 @@ type Txn interface {
 
 `UploadPart` must be concurrency-safe and must fully consume or copy
 `part.Bytes` before returning. `Complete` receives sorted contiguous receipts.
-`Abort` must be idempotent.
+`Abort` must be idempotent, safe while uploads are running, and must interrupt
+in-flight uploads. Every blocking transaction method must return after its
+context is canceled.
 
 ## Part Splitting
 
@@ -131,7 +133,7 @@ caller while it is enqueueing a part or waiting for completion.
 Once a part has been accepted by the upload queue, the upload worker uses the
 packer lifetime context created by `newPacker`. Canceling a single write call
 does not cancel an already-enqueued upload. `Abort` cancels the packer lifetime
-context and calls `Txn.Abort`.
+context and calls `Txn.Abort` before waiting for upload workers to exit.
 
 ## Backpressure
 

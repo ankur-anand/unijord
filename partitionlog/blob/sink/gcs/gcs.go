@@ -131,7 +131,7 @@ func (u *upload) Complete(ctx context.Context, receipts []multipart.Receipt) (mu
 	cleanup := append([]gcsObject(nil), u.temps...)
 	cleanup = append(cleanup, sources...)
 	u.mu.Unlock()
-	_ = deleteGCSObjects(context.Background(), u.bucket, cleanup)
+	_ = deleteGCSObjects(ctx, u.bucket, cleanup)
 
 	return multipart.ObjectAttrs{
 		Key:       final.key,
@@ -257,6 +257,12 @@ func (u *upload) composeTo(ctx context.Context, dstKey string, sources []gcsObje
 func deleteGCSObjects(ctx context.Context, bucket *storage.BucketHandle, objects []gcsObject) error {
 	var firstErr error
 	for _, obj := range objects {
+		if err := ctx.Err(); err != nil {
+			if firstErr != nil {
+				return firstErr
+			}
+			return err
+		}
 		if err := deleteGCSObject(ctx, bucket, obj); err != nil && firstErr == nil {
 			firstErr = err
 		}

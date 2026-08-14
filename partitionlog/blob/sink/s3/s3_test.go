@@ -119,9 +119,13 @@ func TestStoreRejectsBadInputs(t *testing.T) {
 func TestMapErrorPreconditionFailure(t *testing.T) {
 	t.Parallel()
 
-	err := mapError(&smithy.GenericAPIError{Code: "PreconditionFailed", Message: "exists"})
-	if !errors.Is(err, multipart.ErrPreconditionFailed) {
-		t.Fatalf("mapError() = %v, want %v", err, multipart.ErrPreconditionFailed)
+	for _, code := range []string{"PreconditionFailed", "ConditionalRequestConflict"} {
+		t.Run(code, func(t *testing.T) {
+			err := mapError(&smithy.GenericAPIError{Code: code, Message: "conditional write lost"})
+			if !errors.Is(err, multipart.ErrPreconditionFailed) {
+				t.Fatalf("mapError() = %v, want %v", err, multipart.ErrPreconditionFailed)
+			}
+		})
 	}
 }
 

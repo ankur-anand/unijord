@@ -55,19 +55,23 @@ func (c *Catalog) ListSegments(ctx context.Context, req csession.ListSegmentsReq
 	if err != nil {
 		return pmeta.SegmentPage{}, err
 	}
-	if !head.HasLastSegment || req.FromLSN >= head.NextLSN {
+	return c.listSegmentsInHead(ctx, head, req.FromLSN, req.NormalizedLimit())
+}
+
+func (c *Catalog) listSegmentsInHead(ctx context.Context, head headFile, fromLSN uint64, limit int) (pmeta.SegmentPage, error) {
+	if !head.HasLastSegment || fromLSN >= head.NextLSN {
 		return pmeta.SegmentPage{}, nil
 	}
 
 	collector := segmentCollector{
-		from:  req.FromLSN,
-		limit: req.NormalizedLimit(),
+		from:  fromLSN,
+		limit: limit,
 	}
 	for _, root := range reachableRoots(head) {
 		if collector.done() {
 			break
 		}
-		if root.SeqHi < req.FromLSN {
+		if root.SeqHi < fromLSN {
 			continue
 		}
 		if err := c.collectFromPageRef(ctx, root, head.StreamID, head.Partition, &collector); err != nil {

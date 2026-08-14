@@ -10,6 +10,7 @@ import (
 
 	"github.com/ankur-anand/unijord/internal/blobstore"
 	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
 	"github.com/ankur-anand/unijord/partitionlog/keylayout"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
@@ -50,8 +51,8 @@ type Backend interface {
 // Catalog supplies one validated, bounded head snapshot per observation.
 type Catalog interface {
 	LoadMaintenanceSnapshot(ctx context.Context, partition uint32) (catalogblob.MaintenanceSnapshot, error)
-	FindSegment(ctx context.Context, partition uint32, lsn uint64) (pmeta.SegmentRef, bool, error)
-	IsPageReachable(ctx context.Context, partition uint32, path string) (catalogblob.MaintenanceSnapshot, bool, error)
+	ListMaintenanceSegments(ctx context.Context, req catalog.ListSegmentsRequest) (catalogblob.MaintenanceSnapshot, pmeta.SegmentPage, error)
+	ListMaintenancePages(ctx context.Context, req catalogblob.MaintenancePageRequest) (catalogblob.MaintenanceSnapshot, catalogblob.MaintenancePage, error)
 }
 
 type Options struct {

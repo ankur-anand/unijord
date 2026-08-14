@@ -21,7 +21,8 @@ Rules:
 - receipts passed to `Complete` are contiguous starting at 1
 - `Complete` commits parts in receipt order
 - final object creation must be conditional on non-existence
-- `Abort` is idempotent
+- blocking methods return when their context is canceled
+- `Abort` is idempotent, safe during part uploads, and interrupts in-flight uploads
 - provider precondition failures map to `ErrPreconditionFailed`
 
 ## Provider Mapping

@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "segment_format_version": 2,
+  "vectors": [
+    {
+      "name": "v2-none-crc32c",
+      "file": "v2-none-crc32c.plseg",
+      "file_sha256": "06aa5022a719c69c361eb8e421ae33539a3bdc40968e1e87ee2bf843fa902b80",
+      "writer_byte_stable": true,
+      "writer": {
+        "target_block_size": 80,
+        "created_unix_ms": 1776263000000,
+        "segment_uuid": "101112131415161718191a1b1c1d1e1f",
+        "writer_tag": "404142434445464748494a4b4c4d4e4f"
+      },
+      "segment_ref": {
+        "uri": "corpus://segformat/v2/v2-none-crc32c.plseg",
+        "stream_id": "compatibility/v2",
+        "partition": 7,
+        "writer_epoch": "9",
+        "segment_uuid": "101112131415161718191a1b1c1d1e1f",
+        "writer_tag": "404142434445464748494a4b4c4d4e4f",
+        "base_lsn": "9007199254740993",
+        "last_lsn": "9007199254740996",
+        "min_timestamp_ms": 1776263000001,
+        "max_timestamp_ms": 1776263000011,
+        "record_count": 4,
+        "block_count": 3,
+        "size_bytes": "847",
+        "block_index_offset": "399",
+        "block_index_length": 256,
+        "codec": {
+          "id": 0,
+          "name": "none"
+        },
+        "hash_algorithm": {
+          "id": 0,
+          "name": "crc32c"
+        },
+        "record_format": {
+          "id": 1,
+          "name": "v1"
+        },
+        "segment_hash": "000000008280117d",
+        "trailer_hash": "000000008b371065"
+      },
+      "blocks": [
+        {
+          "offset": "64",
+          "stored_size": 21,
+          "raw_size": 21,
+          "record_count": 1,
+          "base_lsn": "9007199254740993",
+          "min_timestamp_ms": 1776263000001,
+          "max_timestamp_ms": 1776263000001,
+          "block_hash": "00000000850746ee"
+        },
+        {
+          "offset": "149",
+          "stored_size": 72,
+          "raw_size": 72,
+          "record_count": 1,
+          "base_lsn": "9007199254740994",
+          "min_timestamp_ms": 1776263000001,
+          "max_timestamp_ms": 1776263000001,
+          "block_hash": "00000000e31f9af0"
+        },
+        {
+          "offset": "285",
+          "stored_size": 50,
+          "raw_size": 50,
+          "record_count": 2,
+          "base_lsn": "9007199254740995",
+          "min_timestamp_ms": 1776263000010,
+          "max_timestamp_ms": 1776263000011,
+          "block_hash": "000000007303a051"
+        }
+      ],
+      "records": [
+        {
+          "lsn": "9007199254740993",
+          "timestamp_ms": 1776263000001,
+          "headers": [],
+          "value_base64": "YWxwaGE="
+        },
+        {
+          "lsn": "9007199254740994",
+          "timestamp_ms": 1776263000001,
+          "headers": [
+            {
+              "key_base64": "Y29udGVudC10eXBl",
+              "value_base64": "YXBwbGljYXRpb24vanNvbg=="
+            },
+            {
+              "key_base64": "AH//",
+              "value_base64": "AAH+/w=="
+            }
+          ],
+          "value_base64": "eyJvayI6dHJ1ZX0="
+        },
+        {
+          "lsn": "9007199254740995",
+          "timestamp_ms": 1776263000010,
+          "headers": [
+            {
+              "key_base64": "ZW1wdHk=",
+              "value_base64": ""
+            }
+          ],
+          "value_base64": ""
+        },
+        {
+          "lsn": "9007199254740996",
+          "timestamp_ms": 1776263000011,
+          "headers": [],
+          "value_base64": "AAECf4D+/w=="
+        }
+      ]
+    },
+    {
+      "name": "v2-zstd-xxh64",
+      "file": "v2-zstd-xxh64.plseg",
+      "file_sha256": "7cbcff439ee78f99587781a34510d19832842ed8804915012cc8b38cd90aeae5",
+      "writer_byte_stable": false,
+      "writer": {
+        "target_block_size": 320,
+        "created_unix_ms": 1776263100000,
+        "segment_uuid": "707172737475767778797a7b7c7d7e7f",
+        "writer_tag": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+      },
+      "segment_ref": {
+        "uri": "corpus://segformat/v2/v2-zstd-xxh64.plseg",
+        "stream_id": "compatibility/v2",
+        "partition": 11,
+        "writer_epoch": "10",
+        "segment_uuid": "707172737475767778797a7b7c7d7e7f",
+        "writer_tag": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+        "base_lsn": "500",
+        "last_lsn": "505",
+        "min_timestamp_ms": 1776263100001,
+        "max_timestamp_ms": 1776263100016,
+        "record_count": 6,
+        "block_count": 6,
+        "size_bytes": "1516",
+        "block_index_offset": "876",
+        "block_index_length": 448,
+        "codec": {
+          "id": 1,
+          "name": "zstd"
+        },
+        "hash_algorithm": {
+          "id": 1,
+          "name": "xxh64"
+        },
+        "record_format": {
+          "id": 1,
+          "name": "v1"
+        },
+        "segment_hash": "2d006b20208b1992",
+        "trailer_hash": "771943d2ebb6c3c5"
+      },
+      "blocks": [
+        {
+          "offset": "64",
+          "stored_size": 70,
+          "raw_size": 228,
+          "record_count": 1,
+          "base_lsn": "500",
+          "min_timestamp_ms": 1776263100001,
+          "max_timestamp_ms": 1776263100001,
+          "block_hash": "54ab282e748d024c"
+        },
+        {
+          "offset": "198",
+          "stored_size": 70,
+          "raw_size": 245,
+          "record_count": 1,
+          "base_lsn": "501",
+          "min_timestamp_ms": 1776263100004,
+          "max_timestamp_ms": 1776263100004,
+          "block_hash": "49ffe75a41d8cf52"
+        },
+        {
+          "offset": "332",
+          "stored_size": 72,
+          "raw_size": 262,
+          "record_count": 1,
+          "base_lsn": "502",
+          "min_timestamp_ms": 1776263100007,
+          "max_timestamp_ms": 1776263100007,
+          "block_hash": "0387e7d41daf14c4"
+        },
+        {
+          "offset": "468",
+          "stored_size": 72,
+          "raw_size": 279,
+          "record_count": 1,
+          "base_lsn": "503",
+          "min_timestamp_ms": 1776263100010,
+          "max_timestamp_ms": 1776263100010,
+          "block_hash": "1f7410afee88cfef"
+        },
+        {
+          "offset": "604",
+          "stored_size": 72,
+          "raw_size": 296,
+          "record_count": 1,
+          "base_lsn": "504",
+          "min_timestamp_ms": 1776263100013,
+          "max_timestamp_ms": 1776263100013,
+          "block_hash": "90d78d455ae62ded"
+        },
+        {
+          "offset": "740",
+          "stored_size": 72,
+          "raw_size": 313,
+          "record_count": 1,
+          "base_lsn": "505",
+          "min_timestamp_ms": 1776263100016,
+          "max_timestamp_ms": 1776263100016,
+          "block_hash": "3280f7ba95442e07"
+        }
+      ],
+      "records": [
+        {
+          "lsn": "500",
+          "timestamp_ms": 1776263100001,
+          "headers": [
+            {
+              "key_base64": "a2luZA==",
+              "value_base64": "Y29tcHJlc3NlZA=="
+            },
+            {
+              "key_base64": "b3JkaW5hbA==",
+              "value_base64": "MA=="
+            }
+          ],
+          "value_base64": "QUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNE"
+        },
+        {
+          "lsn": "501",
+          "timestamp_ms": 1776263100004,
+          "headers": [
+            {
+              "key_base64": "a2luZA==",
+              "value_base64": "Y29tcHJlc3NlZA=="
+            },
+            {
+              "key_base64": "b3JkaW5hbA==",
+              "value_base64": "MQ=="
+            }
+          ],
+          "value_base64": "QkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUI="
+        },
+        {
+          "lsn": "502",
+          "timestamp_ms": 1776263100007,
+          "headers": [
+            {
+              "key_base64": "a2luZA==",
+              "value_base64": "Y29tcHJlc3NlZA=="
+            },
+            {
+              "key_base64": "b3JkaW5hbA==",
+              "value_base64": "Mg=="
+            }
+          ],
+          "value_base64": "Q0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDRA=="
+        },
+        {
+          "lsn": "503",
+          "timestamp_ms": 1776263100010,
+          "headers": [
+            {
+              "key_base64": "a2luZA==",
+              "value_base64": "Y29tcHJlc3NlZA=="
+            },
+            {
+              "key_base64": "b3JkaW5hbA==",
+              "value_base64": "Mw=="
+            }
+          ],
+          "value_base64": "REFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFC"
+        },
+        {
+          "lsn": "504",
+          "timestamp_ms": 1776263100013,
+          "headers": [
+            {
+              "key_base64": "a2luZA==",
+              "value_base64": "Y29tcHJlc3NlZA=="
+            },
+            {
+              "key_base64": "b3JkaW5hbA==",
+              "value_base64": "NA=="
+            }
+          ],
+          "value_base64": "QUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0Q="
+        },
+        {
+          "lsn": "505",
+          "timestamp_ms": 1776263100016,
+          "headers": [
+            {
+              "key_base64": "a2luZA==",
+              "value_base64": "Y29tcHJlc3NlZA=="
+            },
+            {
+              "key_base64": "b3JkaW5hbA==",
+              "value_base64": "NQ=="
+            }
+          ],
+          "value_base64": "QkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQkNEQUJDREFCQ0RBQg=="
+        }
+      ]
+    }
+  ]
+}

@@ -20,12 +20,18 @@ var (
 )
 
 type Store interface {
+	// BeginMultipart must return promptly when ctx is canceled.
 	BeginMultipart(ctx context.Context, key string, opts Options) (Upload, error)
 }
 
 type Upload interface {
+	// UploadPart must be safe for concurrent calls and return promptly when ctx
+	// is canceled or Abort interrupts the upload.
 	UploadPart(context.Context, Part) (Receipt, error)
+	// Complete must return promptly when its context is canceled.
 	Complete(context.Context, []Receipt) (ObjectAttrs, error)
+	// Abort must be idempotent, safe while UploadPart is running, and cause
+	// in-flight uploads to return.
 	Abort(context.Context) error
 }
 

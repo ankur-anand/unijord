@@ -2,6 +2,9 @@
 
 Byte format for one immutable partition segment.
 
+Versioned binary fixtures and language-neutral expected values are defined in
+[`COMPATIBILITY.md`](./COMPATIBILITY.md).
+
 All integers are big-endian. Timestamps are signed 64-bit milliseconds since
 the Unix epoch.
 
@@ -80,10 +83,16 @@ decompressed size equals `raw_size`.
 
 | Value | Name | Meaning |
 | ---: | --- | --- |
-| `0` | `crc32c` | CRC-32C Castagnoli polynomial `0x1EDC6F41`, zero-extended to `u64` |
+| `0` | `crc32c` | CRC-32C Castagnoli, zero-extended to `u64` |
 | `1` | `xxh64` | XXH64, seed `0` |
 
 The hash algorithm is segment-wide.
+
+CRC32C uses the reflected Castagnoli polynomial `0x82F63B78` (normal form
+`0x1EDC6F41`), initial value `0xFFFFFFFF`, reflected input and output, and
+final XOR `0xFFFFFFFF`. The check value for ASCII `123456789` is `0xE3069283`.
+This is the same convention as Go's `crc32.Checksum` with
+`crc32.MakeTable(crc32.Castagnoli)`.
 
 ## File Preamble
 

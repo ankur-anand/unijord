@@ -286,6 +286,86 @@ func TestPackerAbortIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPackerAbortInterruptsUploadBeforeWaitingForWorker(t *testing.T) {
+	t.Parallel()
+
+	txn := newAbortReleasedTxn()
+	p := newTestPacker(t, txn, packerOptions{PartSize: 1, UploadParallelism: 1, UploadQueueSize: 1})
+
+	if err := p.WriteBody(context.Background(), []byte("a")); err != nil {
+		t.Fatalf("WriteBody() error = %v", err)
+	}
+	txn.waitStarted(t)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Abort(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Abort() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Abort waited for an upload before aborting its transaction")
+	}
+	if got, want := txn.abortCount(), 1; got != want {
+		t.Fatalf("Abort calls = %d, want %d", got, want)
+	}
+}
+
+func TestPackerCompleteCancellationAbortsBeforeWaitingForWorker(t *testing.T) {
+	t.Parallel()
+
+	txn := newAbortReleasedTxn()
+	p := newTestPacker(t, txn, packerOptions{PartSize: 1, UploadParallelism: 1, UploadQueueSize: 1})
+
+	if err := p.WriteBody(context.Background(), []byte("a")); err != nil {
+		t.Fatalf("WriteBody() error = %v", err)
+	}
+	txn.waitStarted(t)
+	_ = p.BodyHash()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Complete(ctx)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Complete() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Complete waited for an upload before aborting its transaction")
+	}
+	if got, want := txn.abortCount(), 1; got != want {
+		t.Fatalf("Abort calls = %d, want %d", got, want)
+	}
+}
+
+func TestPackerAbortDoesNotStartQueuedUploads(t *testing.T) {
+	t.Parallel()
+
+	txn := newAbortReleasedTxn()
+	p := newTestPacker(t, txn, packerOptions{PartSize: 1, UploadParallelism: 1, UploadQueueSize: 2})
+
+	if err := p.WriteBody(context.Background(), []byte("ab")); err != nil {
+		t.Fatalf("WriteBody() error = %v", err)
+	}
+	txn.waitStarted(t)
+	if err := p.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+	if got, want := txn.uploadCount(), 1; got != want {
+		t.Fatalf("UploadPart calls = %d, want %d", got, want)
+	}
+}
+
 func TestPackerRejectsWritesAfterComplete(t *testing.T) {
 	t.Parallel()
 
@@ -628,6 +708,65 @@ type blockingUploadTxn struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type abortReleasedTxn struct {
+	started   chan struct{}
+	aborted   chan struct{}
+	startOnce sync.Once
+	abortOnce sync.Once
+	mu        sync.Mutex
+	uploads   int
+	aborts    int
+}
+
+func newAbortReleasedTxn() *abortReleasedTxn {
+	return &abortReleasedTxn{
+		started: make(chan struct{}),
+		aborted: make(chan struct{}),
+	}
+}
+
+func (t *abortReleasedTxn) UploadPart(context.Context, Part) (PartReceipt, error) {
+	t.mu.Lock()
+	t.uploads++
+	t.mu.Unlock()
+	t.startOnce.Do(func() { close(t.started) })
+	<-t.aborted
+	return PartReceipt{}, ErrTxnAborted
+}
+
+func (t *abortReleasedTxn) Complete(context.Context, []PartReceipt) (CommittedObject, error) {
+	return CommittedObject{}, errors.New("unexpected complete")
+}
+
+func (t *abortReleasedTxn) Abort(context.Context) error {
+	t.mu.Lock()
+	t.aborts++
+	t.mu.Unlock()
+	t.abortOnce.Do(func() { close(t.aborted) })
+	return nil
+}
+
+func (t *abortReleasedTxn) waitStarted(tb testing.TB) {
+	tb.Helper()
+	select {
+	case <-t.started:
+	case <-time.After(2 * time.Second):
+		tb.Fatal("timed out waiting for upload to start")
+	}
+}
+
+func (t *abortReleasedTxn) abortCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.aborts
+}
+
+func (t *abortReleasedTxn) uploadCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.uploads
 }
 
 func newBlockingUploadTxn() *blockingUploadTxn {

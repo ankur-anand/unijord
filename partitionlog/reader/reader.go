@@ -73,7 +73,22 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 	if err != nil {
 		return FetchResult{}, err
 	}
-	result = FetchResult{Head: head}
+	result, err = r.fetchFromHead(ctx, head, req)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, ErrLSNExpired) {
+		return FetchResult{}, err
+	}
+	fresh, retryErr := r.refreshAfterReadAnomaly(ctx, req.Partition, req.LSN, err)
+	if retryErr != nil {
+		return FetchResult{}, retryErr
+	}
+	return r.fetchFromHead(ctx, fresh, req)
+}
+
+func (r *Reader) fetchFromHead(ctx context.Context, head pmeta.PartitionHead, req FetchRequest) (FetchResult, error) {
+	result := FetchResult{Head: head}
 	if req.LSN < head.OldestLSN {
 		return FetchResult{}, LSNExpiredError{
 			Requested: req.LSN,
@@ -90,11 +105,10 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 
 	segment, found, err := r.catalog.FindSegment(ctx, req.Partition, req.LSN)
 	if err != nil {
-		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, err)
+		return FetchResult{}, err
 	}
 	if !found {
-		cause := fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
-		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, cause)
+		return FetchResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, req.LSN, head.NextLSN)
 	}
 	if segment.Partition != req.Partition {
 		return FetchResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, req.Partition)
@@ -105,11 +119,10 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 
 	records, err := r.readSegment(ctx, segment, req.LSN, 1, head.NextLSN)
 	if err != nil {
-		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, err)
+		return FetchResult{}, err
 	}
 	if len(records) == 0 {
-		cause := fmt.Errorf("%w: no record in segment uri=%s lsn=%d", ErrCorruptData, segment.URI, req.LSN)
-		return FetchResult{}, r.classifyReadAnomaly(ctx, req.Partition, req.LSN, cause)
+		return FetchResult{}, fmt.Errorf("%w: no record in segment uri=%s lsn=%d", ErrCorruptData, segment.URI, req.LSN)
 	}
 	if records[0].LSN != req.LSN {
 		return FetchResult{}, fmt.Errorf("%w: segment uri=%s returned lsn=%d for requested lsn=%d", ErrCorruptData, segment.URI, records[0].LSN, req.LSN)
@@ -191,7 +204,22 @@ func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimest
 	if err != nil {
 		return ConsumeResult{}, err
 	}
-	result = ConsumeResult{
+	result, err = r.consumeFromTimestampFromHead(ctx, head, req, limit)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ConsumeResult{}, err
+	}
+	fresh, refreshErr := r.refresh.refresh(ctx, req.Partition)
+	if refreshErr != nil {
+		return ConsumeResult{}, errors.Join(err, fmt.Errorf("refresh catalog after timestamp read anomaly: %w", refreshErr))
+	}
+	return r.consumeFromTimestampFromHead(ctx, fresh, req, limit)
+}
+
+func (r *Reader) consumeFromTimestampFromHead(ctx context.Context, head pmeta.PartitionHead, req ConsumeFromTimestampRequest, limit int) (ConsumeResult, error) {
+	result := ConsumeResult{
 		Head:    head,
 		NextLSN: head.NextLSN,
 	}
@@ -243,7 +271,7 @@ func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimest
 			if startLSN >= head.NextLSN {
 				return result, nil
 			}
-			return r.consumeFromHead(ctx, head, req.Partition, startLSN, limit)
+			return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
 		}
 		if page.HasMore {
 			if page.NextLSN <= from {
@@ -260,6 +288,21 @@ func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimest
 }
 
 func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {
+	result, err := r.consumeFromHeadOnce(ctx, head, partition, startLSN, limit)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, ErrLSNExpired) {
+		return ConsumeResult{}, err
+	}
+	fresh, retryErr := r.refreshAfterReadAnomaly(ctx, partition, startLSN, err)
+	if retryErr != nil {
+		return ConsumeResult{}, retryErr
+	}
+	return r.consumeFromHeadOnce(ctx, fresh, partition, startLSN, limit)
+}
+
+func (r *Reader) consumeFromHeadOnce(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {
 	result := ConsumeResult{
 		Head:    head,
 		NextLSN: startLSN,
@@ -289,11 +332,10 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 			Limit:     catalog.MaxSegmentPageLimit,
 		})
 		if err != nil {
-			return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
+			return ConsumeResult{}, err
 		}
 		if len(page.Segments) == 0 {
-			err := fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
-			return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
+			return ConsumeResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, partition, next, head.NextLSN)
 		}
 
 		advanced := false
@@ -308,18 +350,16 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 				continue
 			}
 			if segment.BaseLSN > next {
-				err := fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
-				return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
+				return ConsumeResult{}, fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, next)
 			}
 
 			remaining := limit - len(result.Records)
 			records, err := r.readSegment(ctx, segment, next, remaining, head.NextLSN)
 			if err != nil {
-				return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
+				return ConsumeResult{}, err
 			}
 			if len(records) == 0 {
-				err := fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, next)
-				return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
+				return ConsumeResult{}, fmt.Errorf("%w: no records in segment uri=%s from_lsn=%d", ErrCorruptData, segment.URI, next)
 			}
 			result.Records = append(result.Records, records...)
 			next = result.Records[len(result.Records)-1].LSN + 1
@@ -327,29 +367,28 @@ func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, 
 			advanced = true
 		}
 		if !advanced {
-			err := fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
-			return ConsumeResult{}, r.classifyReadAnomaly(ctx, partition, next, err)
+			return ConsumeResult{}, fmt.Errorf("%w: reader made no progress at lsn=%d", ErrCorruptData, next)
 		}
 	}
 	return result, nil
 }
 
-func (r *Reader) classifyReadAnomaly(ctx context.Context, partition uint32, requested uint64, cause error) error {
+func (r *Reader) refreshAfterReadAnomaly(ctx context.Context, partition uint32, requested uint64, cause error) (pmeta.PartitionHead, error) {
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
-		return cause
+		return pmeta.PartitionHead{}, cause
 	}
 	head, err := r.refresh.refresh(ctx, partition)
 	if err != nil {
-		return errors.Join(cause, fmt.Errorf("refresh retention floor: %w", err))
+		return pmeta.PartitionHead{}, errors.Join(cause, fmt.Errorf("refresh retention floor: %w", err))
 	}
 	if requested < head.OldestLSN {
-		return LSNExpiredError{
+		return pmeta.PartitionHead{}, LSNExpiredError{
 			Requested: requested,
 			Oldest:    head.OldestLSN,
 			HeadNext:  head.NextLSN,
 		}
 	}
-	return cause
+	return head, nil
 }
 
 func (r *Reader) findTimestampStart(ctx context.Context, segment pmeta.SegmentRef, timestampMS int64) (uint64, bool, error) {

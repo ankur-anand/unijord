@@ -42,6 +42,7 @@ type PublishRequest struct {
 
 type Session interface {
 	Snapshot() Snapshot
+	// PublishSegment must return promptly when ctx is canceled.
 	PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error)
 }
 
@@ -127,6 +128,7 @@ type SegmentInfo struct {
 }
 
 type SinkFactory interface {
+	// NewSegmentSink must return promptly when ctx is canceled.
 	NewSegmentSink(ctx context.Context, info SegmentInfo) (segwriter.Sink, error)
 }
 

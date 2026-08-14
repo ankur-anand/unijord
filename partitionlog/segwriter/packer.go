@@ -42,6 +42,7 @@ type packer struct {
 	bodySealed bool
 	completed  bool
 	aborted    bool
+	txnAborted bool
 	partsClose bool
 
 	hasher digest64
@@ -140,16 +141,16 @@ func (p *packer) Complete(ctx context.Context) (CommittedObject, error) {
 		return CommittedObject{}, ErrEmptyObject
 	}
 	if err := p.pollResults(); err != nil {
-		p.stopWorkers()
+		p.abortAfterFailure()
 		return CommittedObject{}, err
 	}
 	if err := p.flushPart(ctx); err != nil {
-		p.stopWorkers()
+		p.abortAfterFailure()
 		return CommittedObject{}, err
 	}
 	p.closeParts()
 	if err := p.collectUntilDone(ctx); err != nil {
-		p.stopWorkers()
+		p.abortAfterFailure()
 		return CommittedObject{}, err
 	}
 	p.wg.Wait()
@@ -173,13 +174,15 @@ func (p *packer) Abort(ctx context.Context) error {
 		return nil
 	}
 	p.aborted = true
-	p.stopWorkers()
-	return p.txn.Abort(ctx)
+	return p.abortAndWait(ctx)
 }
 
 func (p *packer) write(ctx context.Context, b []byte, hashBody bool) error {
 	if p.completed {
 		return ErrPackerClosed
+	}
+	if p.firstErr != nil {
+		return p.firstErr
 	}
 	if p.aborted {
 		return ErrPackerAborted
@@ -264,6 +267,9 @@ func (p *packer) uploadWorker() {
 			if !ok {
 				return
 			}
+			if p.ctx.Err() != nil {
+				return
+			}
 			receipt, err := p.uploadPart(part)
 			result := uploadResult{receipt: receipt, err: err}
 			select {
@@ -333,10 +339,23 @@ func (p *packer) setFirstErr(err error) {
 	}
 }
 
-func (p *packer) stopWorkers() {
+func (p *packer) abortAfterFailure() {
+	p.aborted = true
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_ = p.abortAndWait(ctx)
+}
+
+func (p *packer) abortAndWait(ctx context.Context) error {
 	p.cancel()
 	p.closeParts()
+	var err error
+	if !p.txnAborted {
+		p.txnAborted = true
+		err = p.txn.Abort(ctx)
+	}
 	p.wg.Wait()
+	return err
 }
 
 func (p *packer) closeParts() {

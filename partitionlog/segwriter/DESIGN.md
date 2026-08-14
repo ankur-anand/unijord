@@ -121,7 +121,9 @@ type Txn interface {
 `Txn.UploadPart` must be safe for concurrent calls and must fully consume or
 copy `part.Bytes` before returning. `Txn.Complete` receives receipts sorted by
 part number with a contiguous range starting at `1`. `Txn.Abort` must be
-idempotent.
+idempotent and safe to call while uploads are running. All blocking sink calls
+must return when their context is canceled. `Abort` must interrupt in-flight
+uploads so the writer can join its upload workers without a liveness cycle.
 
 `New` does not call `sink.Begin`. The sink transaction is opened lazily when the
 first sealed block is emitted, which keeps segment rotation off the sink setup

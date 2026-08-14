@@ -63,6 +63,60 @@ func TestStoreDoesNotCacheErrors(t *testing.T) {
 	}
 }
 
+func TestStoreDoesNotCacheShortSuccessfulRead(t *testing.T) {
+	t.Parallel()
+
+	inner := &shortThenExactStore{body: []byte("abcdef")}
+	store, err := NewStore(inner, NewLRU(1024))
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+
+	if _, err := store.ReadAt(context.Background(), "segment", 1, 3); err == nil {
+		t.Fatal("ReadAt(short) error = nil")
+	}
+	got, err := store.ReadAt(context.Background(), "segment", 1, 3)
+	if err != nil {
+		t.Fatalf("ReadAt(retry) error = %v", err)
+	}
+	if string(got) != "bcd" {
+		t.Fatalf("ReadAt(retry) = %q, want bcd", got)
+	}
+	if _, err := store.ReadAt(context.Background(), "segment", 1, 3); err != nil {
+		t.Fatalf("ReadAt(cached) error = %v", err)
+	}
+	if got, want := inner.reads(), 2; got != want {
+		t.Fatalf("inner reads = %d, want %d", got, want)
+	}
+}
+
+func TestStoreRepairsWrongLengthCacheEntry(t *testing.T) {
+	t.Parallel()
+
+	key := Key{URI: "segment", Off: 1, N: 3}
+	cache := NewLRU(1024)
+	cache.Set(key, []byte("bc"))
+	inner := newCountingStore(map[string][]byte{"segment": []byte("abcdef")})
+	store, err := NewStore(inner, cache)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+
+	got, err := store.ReadAt(context.Background(), key.URI, key.Off, key.N)
+	if err != nil {
+		t.Fatalf("ReadAt() error = %v", err)
+	}
+	if string(got) != "bcd" {
+		t.Fatalf("ReadAt() = %q, want bcd", got)
+	}
+	if got := inner.count(key); got != 1 {
+		t.Fatalf("inner reads = %d, want 1", got)
+	}
+	if cached, ok := cache.Get(key); !ok || string(cached) != "bcd" {
+		t.Fatalf("repaired cache = %q ok=%v, want bcd true", cached, ok)
+	}
+}
+
 func TestStoreCoalescesConcurrentReads(t *testing.T) {
 	t.Parallel()
 
@@ -191,6 +245,33 @@ type flakyStore struct {
 	body  []byte
 	errs  []error
 	count int
+}
+
+type shortThenExactStore struct {
+	mu    sync.Mutex
+	body  []byte
+	count int
+}
+
+func (s *shortThenExactStore) ReadAt(ctx context.Context, _ string, off uint64, n uint64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.count++
+	count := s.count
+	body := append([]byte(nil), s.body...)
+	s.mu.Unlock()
+	if count == 1 {
+		n--
+	}
+	return append([]byte(nil), body[off:off+n]...), nil
+}
+
+func (s *shortThenExactStore) reads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
 }
 
 func (s *flakyStore) ReadAt(ctx context.Context, _ string, off uint64, n uint64) ([]byte, error) {

@@ -91,6 +91,15 @@ const (
 	RecordFormatV1 RecordFormat = 1
 )
 
+func (f RecordFormat) String() string {
+	switch f {
+	case RecordFormatV1:
+		return "v1"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint16(f))
+	}
+}
+
 func (f RecordFormat) Validate() error {
 	switch f {
 	case RecordFormatV1:

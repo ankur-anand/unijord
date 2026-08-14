@@ -8,19 +8,23 @@ import (
 )
 
 type Sink interface {
+	// Begin must return promptly when ctx is canceled.
 	Begin(ctx context.Context, plan Plan) (Txn, error)
 }
 
 type Txn interface {
 	// UploadPart must be safe for concurrent calls. Implementations must fully
-	// consume or copy part.Bytes before returning.
+	// consume or copy part.Bytes before returning. It must return promptly when
+	// ctx is canceled or Abort interrupts the transaction.
 	UploadPart(ctx context.Context, part Part) (PartReceipt, error)
 
 	// Complete receives exactly one receipt per uploaded part, sorted by part
-	// number with a contiguous range starting at 1.
+	// number with a contiguous range starting at 1. It must return promptly when
+	// ctx is canceled.
 	Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
 
-	// Abort discards staged parts. It must be idempotent.
+	// Abort discards staged parts. It must be idempotent, safe to call while
+	// UploadPart is running, and must cause in-flight uploads to return.
 	Abort(ctx context.Context) error
 }
 

@@ -248,6 +248,183 @@ func TestFetchRechecksRetentionFloorOnCatalogMiss(t *testing.T) {
 	}
 }
 
+func TestExpiredReadsDoNotRefreshTwice(t *testing.T) {
+	t.Parallel()
+
+	cat := &checkpointCatalog{head: pmeta.PartitionHead{
+		StreamID:  "stream-a",
+		Partition: 3,
+		OldestLSN: 10,
+		NextLSN:   20,
+	}}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := r.Fetch(context.Background(), FetchRequest{Partition: 3, LSN: 9}); !errors.Is(err, ErrLSNExpired) {
+		t.Fatalf("Fetch() error = %v, want %v", err, ErrLSNExpired)
+	}
+	if cat.Loads() != 1 {
+		t.Fatalf("Fetch() catalog loads = %d, want 1", cat.Loads())
+	}
+
+	cat.mu.Lock()
+	cat.loads = 0
+	cat.mu.Unlock()
+	if _, err := r.Consume(context.Background(), ConsumeRequest{Partition: 3, StartLSN: 9, Limit: 1}); !errors.Is(err, ErrLSNExpired) {
+		t.Fatalf("Consume() error = %v, want %v", err, ErrLSNExpired)
+	}
+	if cat.Loads() != 1 {
+		t.Fatalf("Consume() catalog loads = %d, want 1", cat.Loads())
+	}
+}
+
+func TestCachedReadRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 5)
+	head, err := fixture.catalog.LoadPartition(context.Background(), fixture.partition)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	cat := &topologyRetryCatalog{
+		head:             head,
+		segment:          segment,
+		listFailuresLeft: 1,
+		listErr:          errors.New("stale leaf page"),
+	}
+	r, err := New(cat, fixture.store, Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	partition := r.Partition(fixture.partition)
+	if _, err := partition.Head(context.Background()); err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+
+	result, err := partition.Read(context.Background(), ReadRequest{
+		StartLSN:  0,
+		Limit:     1,
+		Freshness: FreshnessCached,
+	})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	assertRecordsEqual(t, result.Records, fixture.records[:1])
+	loads, lists, _ := cat.Calls()
+	if loads != 2 || lists != 2 {
+		t.Fatalf("catalog calls = loads:%d lists:%d, want loads:2 lists:2", loads, lists)
+	}
+}
+
+func TestFetchRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 5)
+	head, err := fixture.catalog.LoadPartition(context.Background(), fixture.partition)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	cat := &topologyRetryCatalog{
+		head:           head,
+		segment:        segment,
+		findMissesLeft: 1,
+	}
+	r, err := New(cat, fixture.store, Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := r.Fetch(context.Background(), FetchRequest{Partition: fixture.partition, LSN: 2})
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if !result.Found {
+		t.Fatal("Fetch() found=false, want true")
+	}
+	assertRecordsEqual(t, []Record{result.Record}, fixture.records[2:3])
+	loads, _, finds := cat.Calls()
+	if loads != 2 || finds != 2 {
+		t.Fatalf("catalog calls = loads:%d finds:%d, want loads:2 finds:2", loads, finds)
+	}
+}
+
+func TestTimestampReadRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
+	t.Parallel()
+
+	fixture := newReaderFixture(t)
+	segment := fixture.appendSegment(t, 0, 5)
+	head, err := fixture.catalog.LoadPartition(context.Background(), fixture.partition)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	cat := &topologyRetryCatalog{
+		head:             head,
+		segment:          segment,
+		listFailuresLeft: 1,
+		listErr:          errors.New("stale timestamp index page"),
+	}
+	r, err := New(cat, fixture.store, Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := r.ConsumeFromTimestamp(context.Background(), ConsumeFromTimestampRequest{
+		Partition:   fixture.partition,
+		TimestampMS: fixture.records[2].TimestampMS,
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("ConsumeFromTimestamp() error = %v", err)
+	}
+	assertRecordsEqual(t, result.Records, fixture.records[2:3])
+	loads, lists, _ := cat.Calls()
+	if loads != 2 || lists != 3 {
+		t.Fatalf("catalog calls = loads:%d lists:%d, want loads:2 lists:3", loads, lists)
+	}
+}
+
+func TestCachedReadRetriesCatalogAnomalyAtMostOnce(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("catalog page unavailable")
+	cat := &topologyRetryCatalog{
+		head: pmeta.PartitionHead{
+			StreamID:       "stream-a",
+			Partition:      3,
+			NextLSN:        10,
+			HasLastSegment: true,
+			LastSegment:    validSegmentRef(3, 0, 9),
+		},
+		listFailuresLeft: 2,
+		listErr:          wantErr,
+	}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	partition := r.Partition(3)
+	if _, err := partition.Head(context.Background()); err != nil {
+		t.Fatalf("Head() error = %v", err)
+	}
+
+	_, err = partition.Read(context.Background(), ReadRequest{
+		StartLSN:  0,
+		Limit:     1,
+		Freshness: FreshnessCached,
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Read() error = %v, want %v", err, wantErr)
+	}
+	loads, lists, _ := cat.Calls()
+	if loads != 2 || lists != 2 {
+		t.Fatalf("catalog calls = loads:%d lists:%d, want loads:2 lists:2", loads, lists)
+	}
+}
+
 func TestCachedReadAtTailDoesNotRefresh(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +485,62 @@ type retentionRaceCatalog struct {
 	heads []pmeta.PartitionHead
 	loads int
 	page  pmeta.SegmentPage
+}
+
+type topologyRetryCatalog struct {
+	mu sync.Mutex
+
+	head    pmeta.PartitionHead
+	segment pmeta.SegmentRef
+
+	listFailuresLeft int
+	listErr          error
+	findMissesLeft   int
+
+	loads int
+	lists int
+	finds int
+}
+
+func (c *topologyRetryCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loads++
+	return c.head, nil
+}
+
+func (c *topologyRetryCatalog) FindSegment(_ context.Context, _ uint32, lsn uint64) (pmeta.SegmentRef, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.finds++
+	if c.findMissesLeft > 0 {
+		c.findMissesLeft--
+		return pmeta.SegmentRef{}, false, nil
+	}
+	if lsn < c.segment.BaseLSN || lsn > c.segment.LastLSN {
+		return pmeta.SegmentRef{}, false, nil
+	}
+	return c.segment, true, nil
+}
+
+func (c *topologyRetryCatalog) ListSegments(_ context.Context, req catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lists++
+	if c.listFailuresLeft > 0 {
+		c.listFailuresLeft--
+		return pmeta.SegmentPage{}, c.listErr
+	}
+	if req.FromLSN > c.segment.LastLSN {
+		return pmeta.SegmentPage{}, nil
+	}
+	return pmeta.SegmentPage{Segments: []pmeta.SegmentRef{c.segment}}, nil
+}
+
+func (c *topologyRetryCatalog) Calls() (loads int, lists int, finds int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.loads, c.lists, c.finds
 }
 
 func (c *retentionRaceCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {

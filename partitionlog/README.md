@@ -6,6 +6,10 @@ Durable partitioned event streams on object storage.
 Google Cloud Storage, or Azure Blob Storage, and keeps bounded catalog metadata
 for readers.
 
+The binary format specification, checked-in compatibility corpus, and
+cross-language verification contract are documented in
+[`segformat/COMPATIBILITY.md`](./segformat/COMPATIBILITY.md).
+
 ## Open A Log
 
 Create a provider store first. The store wires the catalog, segment writer, and

@@ -203,7 +203,7 @@ func scanRawRecord(raw []byte, off int) (RawRecord, int, error) {
 	if err != nil {
 		return RawRecord{}, 0, err
 	}
-	return RawRecord{TimestampMS: ts, Headers: headers, Value: raw[valueOff:next]}, next, nil
+	return RawRecord{TimestampMS: ts, Headers: headers, Value: raw[valueOff:next:next]}, next, nil
 }
 
 func encodedHeadersLen(headers []Header) (int, error) {
@@ -285,9 +285,11 @@ func decodeHeaders(buf []byte) ([]Header, error) {
 		if len(buf)-off < keyLen+valueLen {
 			return nil, fmt.Errorf("%w: truncated record header bytes", ErrInvalidSegment)
 		}
+		keyEnd := off + keyLen
+		valueEnd := keyEnd + valueLen
 		headers[i] = Header{
-			Key:   buf[off : off+keyLen],
-			Value: buf[off+keyLen : off+keyLen+valueLen],
+			Key:   buf[off:keyEnd:keyEnd],
+			Value: buf[keyEnd:valueEnd:valueEnd],
 		}
 		off += keyLen + valueLen
 	}
