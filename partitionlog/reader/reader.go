@@ -228,9 +228,10 @@ func (r *Reader) consumeFromTimestampFromHead(ctx context.Context, head pmeta.Pa
 
 	from := head.OldestLSN
 	for from < head.NextLSN {
+		pageStart := from
 		page, err := r.catalog.ListSegments(ctx, catalog.ListSegmentsRequest{
 			Partition: req.Partition,
-			FromLSN:   from,
+			FromLSN:   pageStart,
 			Limit:     catalog.MaxSegmentPageLimit,
 		})
 		if err != nil {
@@ -273,10 +274,12 @@ func (r *Reader) consumeFromTimestampFromHead(ctx context.Context, head pmeta.Pa
 			return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
 		}
 		if page.HasMore {
-			if page.NextLSN <= from {
-				return ConsumeResult{}, fmt.Errorf("%w: non-advancing page next_lsn=%d from_lsn=%d", ErrCorruptData, page.NextLSN, from)
+			if page.NextLSN <= pageStart {
+				return ConsumeResult{}, fmt.Errorf("%w: non-advancing page next_lsn=%d from_lsn=%d", ErrCorruptData, page.NextLSN, pageStart)
 			}
-			from = page.NextLSN
+			if page.NextLSN > from {
+				from = page.NextLSN
+			}
 			advanced = true
 		}
 		if !advanced {

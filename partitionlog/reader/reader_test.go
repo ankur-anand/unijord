@@ -422,6 +422,85 @@ func TestConsumeFromTimestampAfterHeadReturnsEmptyAtHead(t *testing.T) {
 	}
 }
 
+func TestConsumeFromTimestampCrossesCatalogPageBoundary(t *testing.T) {
+	t.Parallel()
+
+	const partition = 7
+	segmentCount := catalog.MaxSegmentPageLimit + 6
+	segments := make([]pmeta.SegmentRef, segmentCount)
+	for i := range segments {
+		lsn := uint64(i)
+		segments[i] = validSegmentRef(partition, lsn, lsn)
+	}
+	cat := &timestampPagingCatalog{
+		head: pmeta.PartitionHead{
+			Partition:      partition,
+			OldestLSN:      0,
+			NextLSN:        uint64(segmentCount),
+			WriterEpoch:    1,
+			SegmentCount:   uint64(segmentCount),
+			LastSegment:    segments[len(segments)-1],
+			HasLastSegment: true,
+		},
+		segments: segments,
+	}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := r.ConsumeFromTimestamp(context.Background(), ConsumeFromTimestampRequest{
+		Partition:   partition,
+		TimestampMS: int64(segmentCount + 1),
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("ConsumeFromTimestamp() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.NextLSN != uint64(segmentCount) {
+		t.Fatalf("ConsumeFromTimestamp(after head) = %+v", result)
+	}
+	if cat.listCalls != 2 {
+		t.Fatalf("ListSegments() calls = %d, want 2", cat.listCalls)
+	}
+}
+
+func TestConsumeFromTimestampRejectsNonAdvancingCatalogPage(t *testing.T) {
+	t.Parallel()
+
+	const partition = 7
+	segment := validSegmentRef(partition, 0, 0)
+	head := pmeta.PartitionHead{
+		Partition:      partition,
+		NextLSN:        2,
+		WriterEpoch:    1,
+		SegmentCount:   2,
+		LastSegment:    validSegmentRef(partition, 1, 1),
+		HasLastSegment: true,
+	}
+	cat := &stubCatalog{
+		head: head,
+		pages: []pmeta.SegmentPage{{
+			Segments: []pmeta.SegmentRef{segment},
+			HasMore:  true,
+			NextLSN:  0,
+		}},
+	}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = r.consumeFromTimestampFromHead(context.Background(), head, ConsumeFromTimestampRequest{
+		Partition:   partition,
+		TimestampMS: 1,
+		Limit:       1,
+	}, 1)
+	if !errors.Is(err, ErrCorruptData) {
+		t.Fatalf("consumeFromTimestampFromHead() error = %v, want %v", err, ErrCorruptData)
+	}
+}
+
 func TestConsumeFromTimestampRejectsNegativeLimit(t *testing.T) {
 	t.Parallel()
 
@@ -889,5 +968,42 @@ func (s *stubCatalog) ListSegments(_ context.Context, _ catalog.ListSegmentsRequ
 	}
 	page := s.pages[0]
 	s.pages = s.pages[1:]
+	return page, nil
+}
+
+type timestampPagingCatalog struct {
+	head      pmeta.PartitionHead
+	segments  []pmeta.SegmentRef
+	listCalls int
+}
+
+func (c *timestampPagingCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {
+	return c.head, nil
+}
+
+func (c *timestampPagingCatalog) FindSegment(_ context.Context, _ uint32, _ uint64) (pmeta.SegmentRef, bool, error) {
+	return pmeta.SegmentRef{}, false, nil
+}
+
+func (c *timestampPagingCatalog) ListSegments(_ context.Context, req catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
+	c.listCalls++
+	start := 0
+	for start < len(c.segments) && c.segments[start].LastLSN < req.FromLSN {
+		start++
+	}
+	if start == len(c.segments) {
+		return pmeta.SegmentPage{}, nil
+	}
+	end := start + req.NormalizedLimit()
+	if end > len(c.segments) {
+		end = len(c.segments)
+	}
+	page := pmeta.SegmentPage{
+		Segments: append([]pmeta.SegmentRef(nil), c.segments[start:end]...),
+		HasMore:  end < len(c.segments),
+	}
+	if page.HasMore {
+		page.NextLSN = c.segments[end].BaseLSN
+	}
 	return page, nil
 }
