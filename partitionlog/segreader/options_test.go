@@ -17,6 +17,18 @@ func TestNormalizeOptionsDefaultsMaxBlockBytes(t *testing.T) {
 	if opts.MaxBlockBytes != DefaultMaxBlockBytes {
 		t.Fatalf("MaxBlockBytes = %d, want %d", opts.MaxBlockBytes, DefaultMaxBlockBytes)
 	}
+	if opts.MaxIndexBytes != DefaultMaxIndexBytes {
+		t.Fatalf("MaxIndexBytes = %d, want %d", opts.MaxIndexBytes, DefaultMaxIndexBytes)
+	}
+}
+
+func TestNormalizeOptionsRejectsTooSmallMaxIndexBytes(t *testing.T) {
+	t.Parallel()
+
+	_, err := normalizeOptions(Options{MaxIndexBytes: segformat.IndexPreambleSize})
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("normalizeOptions() error = %v, want %v", err, ErrInvalidOptions)
+	}
 }
 
 func TestNormalizeOptionsRejectsTooSmallMaxBlockBytes(t *testing.T) {
@@ -34,6 +46,9 @@ func TestDefaultOptions(t *testing.T) {
 	opts := DefaultOptions()
 	if opts.MaxBlockBytes != DefaultMaxBlockBytes {
 		t.Fatalf("MaxBlockBytes = %d, want %d", opts.MaxBlockBytes, DefaultMaxBlockBytes)
+	}
+	if opts.MaxIndexBytes != DefaultMaxIndexBytes {
+		t.Fatalf("MaxIndexBytes = %d, want %d", opts.MaxIndexBytes, DefaultMaxIndexBytes)
 	}
 	if opts.ValidateSegmentHash {
 		t.Fatal("ValidateSegmentHash = true, want false")

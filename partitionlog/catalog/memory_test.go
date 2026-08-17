@@ -94,6 +94,25 @@ func TestMemoryCatalogRejectsTimestampRegressionAcrossSegments(t *testing.T) {
 	}
 }
 
+func TestMemoryCatalogRejectsSegmentFromDifferentWriterIdentity(t *testing.T) {
+	t.Parallel()
+
+	cat := NewMemoryCatalog()
+	ws := mustOpenWriter(t, cat, 1, 1)
+	segment := testSegment(1, 0, 2, ws.Epoch())
+	segment.WriterTag = [16]byte{2}
+	if _, err := ws.AppendSegment(context.Background(), segment); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("AppendSegment(wrong writer tag) error = %v, want %v", err, ErrInvalidRequest)
+	}
+	state, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if state.SegmentCount != 0 || state.NextLSN != 0 {
+		t.Fatalf("state after rejected segment = %+v", state)
+	}
+}
+
 func TestMemoryCatalogWriterEpochFence(t *testing.T) {
 	t.Parallel()
 
@@ -141,6 +160,29 @@ func TestMemoryCatalogIdempotentRetryOfLastAppend(t *testing.T) {
 	mutated.SizeBytes++
 	if _, err := ws.AppendSegment(context.Background(), mutated); !errors.Is(err, ErrConflict) {
 		t.Fatalf("AppendSegment(mutated retry) error = %v, want %v", err, ErrConflict)
+	}
+}
+
+func TestMemoryCatalogRejectsIdempotentRetryAfterFenceMoves(t *testing.T) {
+	t.Parallel()
+
+	cat := NewMemoryCatalog()
+	first := mustOpenWriter(t, cat, 1, 1)
+	segment := testSegment(1, 0, 2, first.Epoch())
+	if _, err := first.AppendSegment(context.Background(), segment); err != nil {
+		t.Fatalf("AppendSegment(first) error = %v", err)
+	}
+	second := mustOpenWriter(t, cat, 1, 2)
+
+	if _, err := first.AppendSegment(context.Background(), segment); !errors.Is(err, ErrStaleWriter) {
+		t.Fatalf("AppendSegment(stale retry) error = %v, want %v", err, ErrStaleWriter)
+	}
+	state, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if state.WriterEpoch != second.Epoch() || state.NextLSN != 3 || state.SegmentCount != 1 {
+		t.Fatalf("state after stale retry = %+v", state)
 	}
 }
 
@@ -351,7 +393,7 @@ func testSegment(partition uint32, baseLSN uint64, lastLSN uint64, epoch uint64)
 		Partition:        partition,
 		WriterEpoch:      epoch,
 		SegmentUUID:      uuid,
-		WriterTag:        [16]byte{9, 8, 7},
+		WriterTag:        [16]byte{byte(epoch)},
 		BaseLSN:          baseLSN,
 		LastLSN:          lastLSN,
 		MinTimestampMS:   int64(baseLSN),

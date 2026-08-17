@@ -3,6 +3,7 @@ package blob
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
@@ -152,6 +153,28 @@ func TestBlobCatalogRetentionMailboxIsMonotonicAndFenced(t *testing.T) {
 	}
 }
 
+func TestBlobCatalogStaleWriterCannotReportRetentionNoOp(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cat, err := NewMemory(Options{})
+	if err != nil {
+		t.Fatalf("NewMemory() error = %v", err)
+	}
+	first, err := cat.OpenWriter(ctx, 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter(first) error = %v", err)
+	}
+	if _, err := cat.OpenWriter(ctx, 1, [16]byte{2}); err != nil {
+		t.Fatalf("OpenWriter(second) error = %v", err)
+	}
+
+	_, err = first.(pcatalog.RetentionWriterSession).ApplyPendingRetention(ctx)
+	if !errors.Is(err, pcatalog.ErrStaleWriter) {
+		t.Fatalf("ApplyPendingRetention(stale no-op) error = %v, want %v", err, pcatalog.ErrStaleWriter)
+	}
+}
+
 func TestBlobCatalogRetentionRequestRecoversLostCASResponse(t *testing.T) {
 	t.Parallel()
 
@@ -206,6 +229,56 @@ func TestBlobCatalogRetentionApplyRecoversLostHeadCASResponse(t *testing.T) {
 	}
 	if calls, _ := backend.stats(); calls != 2 {
 		t.Fatalf("head CAS calls = %d, want 2", calls)
+	}
+}
+
+func TestBlobCatalogRetentionReconcilesHistoricalCommitAfterFenceMoves(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	backend := &casFaultBackend{Backend: NewMemoryBackend()}
+	cat, err := New(backend, commitRecoveryTestOptions())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	first, err := cat.OpenWriter(ctx, 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter(first) error = %v", err)
+	}
+	if _, err := first.AppendSegment(ctx, testSegmentRef(1, 0, 9, first.Epoch())); err != nil {
+		t.Fatalf("AppendSegment() error = %v", err)
+	}
+	request := pcatalog.RetentionRequest{Version: pcatalog.RetentionRequestVersion, PolicyVersion: 1, BeforeLSN: 5, CreatedUnixMS: 1}
+	if _, err := cat.RequestRetention(ctx, 1, request); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+
+	backend.arm(casFaultAfterApplyOnce, false, func() error {
+		_, err := cat.OpenWriter(ctx, 1, [16]byte{2})
+		if err != nil {
+			return fmt.Errorf("open replacement writer: %w", err)
+		}
+		return nil
+	})
+	result, err := first.(pcatalog.RetentionWriterSession).ApplyPendingRetention(ctx)
+	if err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
+	if !result.Applied || result.Head.WriterEpoch != first.Epoch() || result.Head.AppliedRetentionVersion != 1 || result.Head.AppliedRetentionLSN != 5 {
+		t.Fatalf("historical retention result = %+v", result)
+	}
+	if _, callbackErr := backend.stats(); callbackErr != nil {
+		t.Fatalf("advance fence callback error = %v", callbackErr)
+	}
+	loaded, err := cat.LoadPartition(ctx, 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if loaded.WriterEpoch <= first.Epoch() || loaded.AppliedRetentionVersion != 1 || loaded.AppliedRetentionLSN != 5 {
+		t.Fatalf("authoritative head = %+v", loaded)
+	}
+	if _, err := first.(pcatalog.RetentionWriterSession).ApplyPendingRetention(ctx); !errors.Is(err, pcatalog.ErrStaleWriter) {
+		t.Fatalf("ApplyPendingRetention(stale retry) error = %v, want %v", err, pcatalog.ErrStaleWriter)
 	}
 }
 

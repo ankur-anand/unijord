@@ -53,6 +53,23 @@ func TestReadAtExactWrapsStoreError(t *testing.T) {
 	}
 }
 
+func TestReadAtExactRejectsOverflowBeforeStoreCall(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	store := SegmentStoreFunc(func(context.Context, string, uint64, uint64) ([]byte, error) {
+		called = true
+		return nil, nil
+	})
+	_, err := readAtExact(context.Background(), store, "segment", ^uint64(0), 2)
+	if !errors.Is(err, ErrStoreRead) {
+		t.Fatalf("readAtExact(overflow) error = %v, want %v", err, ErrStoreRead)
+	}
+	if called {
+		t.Fatal("store called for overflowed range")
+	}
+}
+
 func TestMemoryStoreReadAtAndDefensiveCopy(t *testing.T) {
 	t.Parallel()
 

@@ -126,6 +126,8 @@ func (r *Reclaimer) processPageQuarantine(ctx context.Context, state *stateFile,
 
 	remaining := make([]quarantineObject, 0, len(state.PageQuarantine))
 	changed := false
+	deleteCandidates := make([]deleteCandidate, 0, len(checks))
+	var scheduledBytes uint64
 	for i, candidate := range state.PageQuarantine {
 		if now.Before(timeFromUnixMilli(candidate.ObservedMS).Add(r.opts.DeleteDelay)) {
 			remaining = append(remaining, candidate)
@@ -151,7 +153,7 @@ func (r *Reclaimer) processPageQuarantine(ctx context.Context, state *stateFile,
 			continue
 		}
 		budget.recordCandidate()
-		if !budget.canDelete(candidate.SizeBytes) {
+		if !r.opts.DryRun && !budget.canScheduleDelete(candidate.SizeBytes, uint64(len(deleteCandidates)), scheduledBytes) {
 			remaining = append(remaining, candidate)
 			continue
 		}
@@ -159,10 +161,15 @@ func (r *Reclaimer) processPageQuarantine(ctx context.Context, state *stateFile,
 			remaining = append(remaining, candidate)
 			continue
 		}
-		if err := r.backend.Delete(ctx, candidate.Key); err != nil {
+		deleteCandidates = append(deleteCandidates, deleteCandidate{
+			key: candidate.Key, size: candidate.SizeBytes,
+		})
+		scheduledBytes += candidate.SizeBytes
+	}
+	if len(deleteCandidates) > 0 {
+		if _, err := r.executeDeletes(ctx, deleteCandidates, budget); err != nil {
 			return err
 		}
-		budget.recordDelete(candidate.SizeBytes)
 		changed = true
 	}
 	if r.opts.DryRun || !changed {
@@ -214,6 +221,9 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 		}
 
 		lastProcessed := afterKey
+		candidates := make([]deleteCandidate, 0, len(parsedObjects))
+		var scheduledBytes uint64
+		budgetStopped := false
 		for _, candidate := range parsedObjects {
 			object := candidate.object
 			parsed := candidate.parsed
@@ -227,17 +237,27 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 			}
 			budget.recordCandidate()
 			size := objectSize(object)
-			if !budget.canDelete(size) {
-				return true, r.checkpointOrphanSegment(ctx, state, token, lastProcessed)
+			if !r.opts.DryRun && !budget.canScheduleDelete(size, uint64(len(candidates)), scheduledBytes) {
+				budgetStopped = true
+				break
 			}
-			if !r.opts.DryRun {
-				if err := r.backend.Delete(ctx, object.Key); err != nil {
-					_ = r.checkpointOrphanSegment(ctx, state, token, lastProcessed)
-					return false, err
-				}
-				budget.recordDelete(size)
+			if r.opts.DryRun {
+				lastProcessed = object.Key
+				continue
 			}
+			candidates = append(candidates, deleteCandidate{key: object.Key, size: size, beforeKey: lastProcessed})
+			scheduledBytes += size
 			lastProcessed = object.Key
+		}
+		if len(candidates) > 0 {
+			checkpoint, err := r.executeDeletes(ctx, candidates, budget)
+			if err != nil {
+				_ = r.checkpointOrphanSegment(ctx, state, token, checkpoint)
+				return false, err
+			}
+		}
+		if budgetStopped {
+			return true, r.checkpointOrphanSegment(ctx, state, token, lastProcessed)
 		}
 		if len(page.Objects) > 0 && lastProcessed < page.Objects[len(page.Objects)-1].Key {
 			lastProcessed = page.Objects[len(page.Objects)-1].Key

@@ -204,18 +204,21 @@ func (s *writerSession) AppendSegment(ctx context.Context, segment pmeta.Segment
 
 func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error) {
 	head := s.head
+	if segment.WriterTag != s.writerID {
+		return pmeta.PartitionHead{}, fmt.Errorf("%w: segment writer_tag does not match writer_id", csession.ErrInvalidRequest)
+	}
 	if _, ok := idempotentHeadRetry(head, segment); ok {
 		current, token, err := s.cat.loadHead(ctx, head.Partition)
 		if err != nil {
 			return pmeta.PartitionHead{}, err
 		}
+		if current.WriterEpoch != s.writerEpoch || current.WriterID != s.writerID {
+			return pmeta.PartitionHead{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, head.Partition)
+		}
 		if retry, ok := idempotentHeadRetry(current, segment); ok {
 			s.head = current
 			s.token = token
 			return retry, nil
-		}
-		if current.WriterEpoch != head.WriterEpoch || current.WriterID != head.WriterID {
-			return pmeta.PartitionHead{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, head.Partition)
 		}
 		return pmeta.PartitionHead{}, fmt.Errorf("%w: idempotent retry no longer matches head partition=%d", csession.ErrConflict, head.Partition)
 	}
@@ -474,6 +477,9 @@ func validateAppend(head headFile, segment pmeta.SegmentRef) error {
 	}
 	if segment.WriterEpoch != head.WriterEpoch {
 		return fmt.Errorf("%w: head writer_epoch=%d segment writer_epoch=%d", csession.ErrStaleWriter, head.WriterEpoch, segment.WriterEpoch)
+	}
+	if segment.WriterTag != head.WriterID {
+		return fmt.Errorf("%w: segment writer_tag does not match writer_id", csession.ErrInvalidRequest)
 	}
 	if segment.BaseLSN != head.NextLSN {
 		return fmt.Errorf("%w: expected_next_lsn=%d segment base_lsn=%d", csession.ErrConflict, head.NextLSN, segment.BaseLSN)

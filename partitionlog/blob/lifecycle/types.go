@@ -24,15 +24,17 @@ var (
 )
 
 const (
-	DefaultDeleteDelay      = 24 * time.Hour
-	DefaultLeaseDuration    = time.Minute
-	DefaultListPageSize     = 1000
-	DefaultMaxObjectsPerRun = 10_000
-	DefaultMaxDeletesPerRun = 1_000
-	DefaultMaxDeleteBytes   = uint64(1 << 30)
-	DefaultMaxQuarantine    = 256
-	DefaultCASAttempts      = 8
-	maxQuarantineEntries    = 1000
+	DefaultDeleteDelay       = 24 * time.Hour
+	DefaultLeaseDuration     = time.Minute
+	DefaultListPageSize      = 1000
+	DefaultMaxObjectsPerRun  = 10_000
+	DefaultMaxDeletesPerRun  = 1_000
+	DefaultMaxDeleteBytes    = uint64(1 << 30)
+	DefaultDeleteBatchSize   = 1000
+	DefaultDeleteConcurrency = 16
+	DefaultMaxQuarantine     = 256
+	DefaultCASAttempts       = 8
+	maxQuarantineEntries     = 1000
 )
 
 type Object = blobstore.Object
@@ -55,6 +57,13 @@ type Catalog interface {
 	ListMaintenancePages(ctx context.Context, req catalogblob.MaintenancePageRequest) (catalogblob.MaintenanceSnapshot, catalogblob.MaintenancePage, error)
 }
 
+// DeleteRateLimiter coordinates physical delete throughput across reclaimers.
+// The objects count is the number of keys in the provider request. Implementations
+// must be safe for concurrent use.
+type DeleteRateLimiter interface {
+	Wait(ctx context.Context, objects int) error
+}
+
 type Options struct {
 	// StreamID identifies the stream scoped by this reclaimer.
 	StreamID string
@@ -70,9 +79,17 @@ type Options struct {
 	MaxObjectsPerRun int
 	MaxDeletesPerRun int
 	MaxDeleteBytes   uint64
-	MaxQuarantine    int
-	CASAttempts      int
-	DryRun           bool
+	// DeleteBatchSize bounds one provider batch or parallel delete wave.
+	DeleteBatchSize int
+	// DeleteConcurrency bounds individual Delete calls when the backend does
+	// not expose native batch deletion.
+	DeleteConcurrency int
+	// DeleteRateLimiter optionally coordinates object delete throughput across
+	// multiple reclaimers. Share one instance at the service level.
+	DeleteRateLimiter DeleteRateLimiter
+	MaxQuarantine     int
+	CASAttempts       int
+	DryRun            bool
 }
 
 type Result struct {
@@ -144,6 +161,18 @@ func newReclaimer(backend Backend, catalog Catalog, layout segmentsink.Layout, o
 	}
 	if opts.MaxDeleteBytes == 0 {
 		opts.MaxDeleteBytes = DefaultMaxDeleteBytes
+	}
+	if opts.DeleteBatchSize < 0 || opts.DeleteBatchSize > blobstore.MaxListLimit {
+		return nil, fmt.Errorf("%w: delete batch size=%d range=0..%d", ErrInvalidOptions, opts.DeleteBatchSize, blobstore.MaxListLimit)
+	}
+	if opts.DeleteBatchSize == 0 {
+		opts.DeleteBatchSize = DefaultDeleteBatchSize
+	}
+	if opts.DeleteConcurrency < 0 {
+		return nil, fmt.Errorf("%w: negative delete concurrency", ErrInvalidOptions)
+	}
+	if opts.DeleteConcurrency == 0 {
+		opts.DeleteConcurrency = DefaultDeleteConcurrency
 	}
 	if opts.MaxQuarantine < 0 || opts.MaxQuarantine > maxQuarantineEntries {
 		return nil, fmt.Errorf("%w: max quarantine=%d range=0..%d", ErrInvalidOptions, opts.MaxQuarantine, maxQuarantineEntries)

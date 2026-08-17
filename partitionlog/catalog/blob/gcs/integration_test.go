@@ -160,7 +160,7 @@ func liveSegmentRef(partition uint32, base uint64, last uint64, epoch uint64) pm
 		Partition:        partition,
 		WriterEpoch:      epoch,
 		SegmentUUID:      [16]byte{byte(partition), byte(base + 1), byte(last + 1), byte(epoch + 1)},
-		WriterTag:        [16]byte{7, 7, 7},
+		WriterTag:        [16]byte{byte(epoch)},
 		BaseLSN:          base,
 		LastLSN:          last,
 		MinTimestampMS:   int64(base),

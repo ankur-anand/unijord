@@ -46,7 +46,9 @@ func (r *Reclaimer) reclaimStaging(ctx context.Context, snapshot catalogblob.Mai
 		}
 
 		lastProcessed := afterKey
-		checkedHead := false
+		candidates := make([]deleteCandidate, 0, len(page.Objects))
+		var scheduledBytes uint64
+		budgetStopped := false
 		for _, object := range page.Objects {
 			parsed, err := r.layout.ParseStagingKey(r.opts.StreamID, state.Partition, object.Key)
 			if err != nil {
@@ -60,39 +62,44 @@ func (r *Reclaimer) reclaimStaging(ctx context.Context, snapshot catalogblob.Mai
 			}
 			budget.recordCandidate()
 			size := objectSize(object)
-			if !budget.canDelete(size) {
-				if !r.opts.DryRun && lastProcessed != state.StagingAfterKey {
-					state.StagingAfterKey = lastProcessed
-					return r.saveState(ctx, state, token)
-				}
-				return nil
+			if !r.opts.DryRun && !budget.canScheduleDelete(size, uint64(len(candidates)), scheduledBytes) {
+				budgetStopped = true
+				break
 			}
 			if r.opts.DryRun {
 				lastProcessed = object.Key
 				continue
 			}
-			if !checkedHead {
-				fresh, err := r.catalog.LoadMaintenanceSnapshot(ctx, state.Partition)
-				if err != nil {
-					return err
-				}
-				if err := r.validateSnapshot(fresh, state.Partition); err != nil {
-					return err
-				}
-				if fresh.Head.WriterEpoch < snapshot.Head.WriterEpoch {
-					return nil
-				}
-				checkedHead = true
+			candidates = append(candidates, deleteCandidate{key: object.Key, size: size, beforeKey: lastProcessed})
+			scheduledBytes += size
+			lastProcessed = object.Key
+		}
+		if len(candidates) > 0 {
+			fresh, err := r.catalog.LoadMaintenanceSnapshot(ctx, state.Partition)
+			if err != nil {
+				return err
 			}
-			if err := r.backend.Delete(ctx, object.Key); err != nil {
-				if lastProcessed != state.StagingAfterKey {
-					state.StagingAfterKey = lastProcessed
+			if err := r.validateSnapshot(fresh, state.Partition); err != nil {
+				return err
+			}
+			if fresh.Head.WriterEpoch < snapshot.Head.WriterEpoch {
+				return nil
+			}
+			checkpoint, err := r.executeDeletes(ctx, candidates, budget)
+			if err != nil {
+				if checkpoint != state.StagingAfterKey {
+					state.StagingAfterKey = checkpoint
 					_ = r.saveState(ctx, state, token)
 				}
 				return err
 			}
-			budget.recordDelete(size)
-			lastProcessed = object.Key
+		}
+		if budgetStopped {
+			if !r.opts.DryRun && lastProcessed != state.StagingAfterKey {
+				state.StagingAfterKey = lastProcessed
+				return r.saveState(ctx, state, token)
+			}
+			return nil
 		}
 
 		afterKey = lastProcessed

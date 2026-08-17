@@ -272,6 +272,26 @@ func TestOpenRejectsSegmentRefMismatch(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsIndexOverLimitBeforeStoreRead(t *testing.T) {
+	t.Parallel()
+
+	fixture := buildSegment(t, segformat.CodecNone, segformat.HashXXH64, 64, 1, 1, 32)
+	if fixture.ref.BlockIndexLength <= segformat.IndexPreambleSize+segformat.BlockIndexEntrySize {
+		t.Fatalf("fixture index length = %d, want multiple entries", fixture.ref.BlockIndexLength)
+	}
+	store := newCountingStore(newMemoryStore(map[string][]byte{fixture.ref.URI: fixture.object}))
+	opts := DefaultOptions()
+	opts.MaxIndexBytes = uint64(fixture.ref.BlockIndexLength - segformat.BlockIndexEntrySize)
+
+	_, err := Open(context.Background(), store, fixture.ref, opts)
+	if !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("Open() error = %v, want %v", err, ErrInvalidSegment)
+	}
+	if len(store.reads()) != 0 {
+		t.Fatalf("store reads = %+v, want none", store.reads())
+	}
+}
+
 type segmentFixture struct {
 	ref     pmeta.SegmentRef
 	object  []byte

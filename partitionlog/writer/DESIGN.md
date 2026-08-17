@@ -369,9 +369,12 @@ It:
 
 The snapshot returned by `Session.PublishSegment(...)` must satisfy:
 
+- the segment starts at the previous snapshot's `NextLSN`;
 - same partition as the writer;
 - same writer identity as before publish;
 - `Head.WriterEpoch == Identity.Epoch`;
+- `Head.SegmentCount` advances by exactly one;
+- retention and `OldestLSN` fields do not change;
 - `Head.HasLastSegment == true`;
 - `Head.LastSegment == published segment`;
 - `Head.NextLSN == publishedSegment.NextLSN()`.

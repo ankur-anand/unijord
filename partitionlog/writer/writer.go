@@ -1032,25 +1032,32 @@ func validatePublishedSnapshot(current Snapshot, next Snapshot, segment pmeta.Se
 	if err := validateHead(next.Head); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPublishResult, err)
 	}
-	if next.Head.Partition != current.Head.Partition {
+	switch {
+	case segment.BaseLSN != current.Head.NextLSN:
+		return fmt.Errorf("%w: segment base_lsn=%d current_next_lsn=%d", ErrInvalidPublishResult, segment.BaseLSN, current.Head.NextLSN)
+	case current.Head.SegmentCount == math.MaxUint64:
+		return fmt.Errorf("%w: segment count exhausted", ErrInvalidPublishResult)
+	case next.Head.Partition != current.Head.Partition:
 		return fmt.Errorf("%w: partition=%d current_partition=%d", ErrInvalidPublishResult, next.Head.Partition, current.Head.Partition)
-	}
-	if next.Head.StreamID != current.Head.StreamID {
+	case next.Head.StreamID != current.Head.StreamID:
 		return fmt.Errorf("%w: stream_id=%q current_stream_id=%q", ErrInvalidPublishResult, next.Head.StreamID, current.Head.StreamID)
-	}
-	if next.Identity != current.Identity {
+	case next.Identity != current.Identity:
 		return fmt.Errorf("%w: identity changed from %+v to %+v", ErrInvalidPublishResult, current.Identity, next.Identity)
-	}
-	if next.Head.WriterEpoch != current.Identity.Epoch {
+	case next.Head.WriterEpoch != current.Identity.Epoch:
 		return fmt.Errorf("%w: head writer_epoch=%d identity epoch=%d", ErrInvalidPublishResult, next.Head.WriterEpoch, current.Identity.Epoch)
-	}
-	if !next.Head.HasLastSegment {
+	case next.Head.SegmentCount != current.Head.SegmentCount+1:
+		return fmt.Errorf("%w: segment_count=%d want=%d", ErrInvalidPublishResult, next.Head.SegmentCount, current.Head.SegmentCount+1)
+	case next.Head.OldestLSN != current.Head.OldestLSN:
+		return fmt.Errorf("%w: publish changed oldest_lsn from %d to %d", ErrInvalidPublishResult, current.Head.OldestLSN, next.Head.OldestLSN)
+	case next.Head.AppliedRetentionLSN != current.Head.AppliedRetentionLSN:
+		return fmt.Errorf("%w: publish changed applied_retention_lsn", ErrInvalidPublishResult)
+	case next.Head.AppliedRetentionVersion != current.Head.AppliedRetentionVersion:
+		return fmt.Errorf("%w: publish changed applied_retention_version", ErrInvalidPublishResult)
+	case !next.Head.HasLastSegment:
 		return fmt.Errorf("%w: missing last segment", ErrInvalidPublishResult)
-	}
-	if next.Head.LastSegment != segment {
+	case next.Head.LastSegment != segment:
 		return fmt.Errorf("%w: published segment does not match returned last segment", ErrInvalidPublishResult)
-	}
-	if next.Head.NextLSN != segment.NextLSN() {
+	case next.Head.NextLSN != segment.NextLSN():
 		return fmt.Errorf("%w: next_lsn=%d segment_next_lsn=%d", ErrInvalidPublishResult, next.Head.NextLSN, segment.NextLSN())
 	}
 	return nil

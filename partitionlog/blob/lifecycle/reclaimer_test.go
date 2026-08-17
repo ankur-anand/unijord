@@ -85,11 +85,11 @@ func TestReclaimerResumesAfterDeleteFailureUsingLastObjectKey(t *testing.T) {
 		t.Fatalf("RunPartition(observe) error = %v", err)
 	}
 	clock.Advance(DefaultDeleteDelay + time.Millisecond)
-	if _, err := r.RunPartition(ctx, 7); err == nil || err.Error() != "injected delete failure" {
+	if _, err := r.RunPartition(ctx, 7); !errors.Is(err, errInjectedDelete) {
 		t.Fatalf("RunPartition(failure) error = %v", err)
 	}
-	assertMissing(t, memory, keys[0])
-	assertExists(t, memory, keys[1], keys[2], keys[3])
+	assertMissing(t, memory, keys[0], keys[2])
+	assertExists(t, memory, keys[1], keys[3])
 
 	backend.mu.Lock()
 	backend.listCalls = nil
@@ -323,7 +323,7 @@ func TestScrubPartitionReclaimsLateObjectBelowSafeFloor(t *testing.T) {
 	ctx := context.Background()
 	backend := blobmemory.New()
 	layout := segmentsink.NewLayout("root")
-	clock := newFakeClock(time.Now().UTC())
+	clock := newFakeClock(time.Now().UTC().Add(48 * time.Hour))
 	catalog := &fakeCatalog{snapshot: maintenanceSnapshot(100, 200, 2, 0)}
 	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{})
 
@@ -560,6 +560,8 @@ type faultBackend struct {
 	listCalls       []blobstore.ListOptions
 }
 
+var errInjectedDelete = errors.New("injected delete failure")
+
 func (b *faultBackend) List(ctx context.Context, opts blobstore.ListOptions) (blobstore.ObjectPage, error) {
 	b.mu.Lock()
 	b.listCalls = append(b.listCalls, opts)
@@ -572,7 +574,7 @@ func (b *faultBackend) Delete(ctx context.Context, key string) error {
 	if key == b.failDeleteKey && b.failDeleteCount > 0 {
 		b.failDeleteCount--
 		b.mu.Unlock()
-		return errors.New("injected delete failure")
+		return errInjectedDelete
 	}
 	b.mu.Unlock()
 	return b.Store.Delete(ctx, key)

@@ -118,12 +118,15 @@ type Txn interface {
 }
 ```
 
-`Txn.UploadPart` must be safe for concurrent calls and must fully consume or
-copy `part.Bytes` before returning. `Txn.Complete` receives receipts sorted by
-part number with a contiguous range starting at `1`. `Txn.Abort` must be
-idempotent and safe to call while uploads are running. All blocking sink calls
-must return when their context is canceled. `Abort` must interrupt in-flight
-uploads so the writer can join its upload workers without a liveness cycle.
+`Txn.UploadPart` must be safe for concurrent calls, must fully consume or copy
+`part.Bytes` before returning, and must return the input part number in its
+receipt. `Txn.Complete` receives receipts sorted by part number with a
+contiguous range starting at `1`; its result must contain a non-empty URI and
+the exact committed object size. `Txn.Abort` must be idempotent and safe to call
+while uploads are running. All blocking sink calls must return when their
+context is canceled. `Abort` must interrupt in-flight uploads so the writer can
+join its upload workers without a liveness cycle. Contract violations make the
+writer terminal and are reported through `ErrSinkContract`.
 
 `New` does not call `sink.Begin`. The sink transaction is opened lazily when the
 first sealed block is emitted, which keeps segment rotation off the sink setup
@@ -238,6 +241,26 @@ Abort  -> nil
 ```
 
 `Abort` is idempotent. Calling `Abort` after a successful `Close` is a no-op.
+
+## Validation
+
+The package test suite covers lazy sink creation, block and part splitting,
+parallel sealing order, out-of-order upload completion, bounded queue
+backpressure, shared upload limiting, cancellation at queue/begin/complete
+boundaries, upload failure cleanup, terminal states, and goroutine drainage.
+
+Sink results are treated as untrusted boundary data. The packer verifies that
+every receipt identifies the part that produced it and that `Complete` returns
+a non-empty URI with the exact accepted byte count.
+
+Run the deterministic pipeline soak under the race detector with:
+
+```text
+make stress-write
+```
+
+`STRESSCOUNT` controls the number of complete writer lifecycles and defaults to
+`100`.
 
 ## Roll Policy
 

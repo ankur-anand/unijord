@@ -70,6 +70,37 @@ func TestSessionMapsStaleWriter(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsExpectedNextLSNMismatch(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	writerID := [16]byte{1}
+	ws, err := cat.OpenWriter(context.Background(), 7, writerID)
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	session, err := writeradapter.New(ws)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	segment := validSegmentRef(7, 0, 2, ws.Epoch(), writerID)
+
+	_, err = session.PublishSegment(context.Background(), writer.PublishRequest{
+		ExpectedNextLSN: 1,
+		Segment:         segment,
+	})
+	if !errors.Is(err, writer.ErrPublishFailed) {
+		t.Fatalf("PublishSegment() error = %v, want %v", err, writer.ErrPublishFailed)
+	}
+	state, err := cat.LoadPartition(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if state.SegmentCount != 0 || state.NextLSN != 0 {
+		t.Fatalf("catalog state after rejected publish = %+v", state)
+	}
+}
+
 func TestSessionMapsIndeterminateCommit(t *testing.T) {
 	t.Parallel()
 

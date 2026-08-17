@@ -215,6 +215,31 @@ func TestBlobCatalogWriterFenceRejectsStaleSession(t *testing.T) {
 	}
 }
 
+func TestBlobCatalogRejectsSegmentFromDifferentWriterIdentity(t *testing.T) {
+	t.Parallel()
+
+	cat, err := NewMemory(Options{})
+	if err != nil {
+		t.Fatalf("NewMemory() error = %v", err)
+	}
+	ws, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	segment := testSegmentRef(1, 0, 9, ws.Epoch())
+	segment.WriterTag = [16]byte{2}
+	if _, err := ws.AppendSegment(context.Background(), segment); !errors.Is(err, pcatalog.ErrInvalidRequest) {
+		t.Fatalf("AppendSegment(wrong writer tag) error = %v, want %v", err, pcatalog.ErrInvalidRequest)
+	}
+	state, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if state.SegmentCount != 0 || state.NextLSN != 0 {
+		t.Fatalf("state after rejected segment = %+v", state)
+	}
+}
+
 func TestBlobCatalogWriterIdempotentLastAppend(t *testing.T) {
 	t.Parallel()
 
@@ -259,6 +284,9 @@ func TestBlobCatalogIdempotentRetryChecksCurrentHead(t *testing.T) {
 	second, err := cat.OpenWriter(context.Background(), 1, [16]byte{2})
 	if err != nil {
 		t.Fatalf("OpenWriter(second) error = %v", err)
+	}
+	if _, err := first.AppendSegment(context.Background(), firstSegment); !errors.Is(err, pcatalog.ErrStaleWriter) {
+		t.Fatalf("stale retry after fence move error = %v, want %v", err, pcatalog.ErrStaleWriter)
 	}
 	if _, err := second.AppendSegment(context.Background(), testSegmentRef(1, 10, 19, second.Epoch())); err != nil {
 		t.Fatalf("AppendSegment(second segment) error = %v", err)

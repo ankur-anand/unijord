@@ -391,7 +391,7 @@ func testSegmentRefWithTime(partition uint32, base, last, epoch uint64, minTS, m
 		Partition:        partition,
 		WriterEpoch:      epoch,
 		SegmentUUID:      [16]byte{byte(partition), byte(base + 1), byte(last + 1), byte(epoch + 1)},
-		WriterTag:        [16]byte{9, 8, 7},
+		WriterTag:        [16]byte{byte(epoch)},
 		BaseLSN:          base,
 		LastLSN:          last,
 		MinTimestampMS:   minTS,

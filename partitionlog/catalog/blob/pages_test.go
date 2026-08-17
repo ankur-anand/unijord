@@ -430,6 +430,71 @@ func TestLoadIndex(t *testing.T) {
 	}
 }
 
+func TestLoadPageRejectsObjectKeyMetadataMismatch(t *testing.T) {
+	t.Parallel()
+
+	cat, err := NewMemory(Options{Prefix: "test-catalog", StreamID: "stream-a"})
+	if err != nil {
+		t.Fatalf("NewMemory() error = %v", err)
+	}
+	segment := testSegmentRef(1, 100, 199, 1)
+	segment.StreamID = cat.opts.StreamID
+	leafRef, _, err := cat.writeLeaf(context.Background(), leafPage{
+		Partition:  1,
+		Generation: 2,
+		Segments:   []pmeta.SegmentRef{segment},
+	})
+	if err != nil {
+		t.Fatalf("writeLeaf() error = %v", err)
+	}
+	indexRef, err := cat.writeIndex(context.Background(), indexPage{
+		Level:      1,
+		Partition:  1,
+		Generation: 3,
+		Refs:       []pageRef{*leafRef},
+	})
+	if err != nil {
+		t.Fatalf("writeIndex() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		ref  pageRef
+		load func(pageRef) error
+	}{
+		{
+			name: "leaf",
+			ref:  *leafRef,
+			load: func(ref pageRef) error {
+				_, err := cat.loadLeaf(context.Background(), ref, cat.opts.StreamID, 1)
+				return err
+			},
+		},
+		{
+			name: "index",
+			ref:  *indexRef,
+			load: func(ref pageRef) error {
+				_, err := cat.loadIndex(context.Background(), ref, cat.opts.StreamID, 1)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ref := tt.ref
+			if ref.Level == 0 {
+				ref.Path = LeafPagePath(cat.opts.Prefix, cat.opts.StreamID, 1, ref.SeqLo, ref.SeqHi, ref.Generation+1, ref.PageID)
+			} else {
+				ref.Path = IndexPagePath(cat.opts.Prefix, cat.opts.StreamID, 1, ref.Level, ref.SeqLo, ref.SeqHi, ref.Generation+1, ref.PageID)
+			}
+			if err := tt.load(ref); !errors.Is(err, ErrCorruptCatalog) {
+				t.Fatalf("load mismatched path error = %v, want %v", err, ErrCorruptCatalog)
+			}
+		})
+	}
+}
+
 func TestLoadLeafRejectsWrongStream(t *testing.T) {
 	t.Parallel()
 

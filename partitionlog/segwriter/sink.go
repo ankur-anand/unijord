@@ -15,12 +15,14 @@ type Sink interface {
 type Txn interface {
 	// UploadPart must be safe for concurrent calls. Implementations must fully
 	// consume or copy part.Bytes before returning. It must return promptly when
-	// ctx is canceled or Abort interrupts the transaction.
+	// ctx is canceled or Abort interrupts the transaction. A successful receipt
+	// must carry the same part number as part.
 	UploadPart(ctx context.Context, part Part) (PartReceipt, error)
 
 	// Complete receives exactly one receipt per uploaded part, sorted by part
-	// number with a contiguous range starting at 1. It must return promptly when
-	// ctx is canceled.
+	// number with a contiguous range starting at 1. A successful result must have
+	// a non-empty URI and report the exact committed byte size. It must return
+	// promptly when ctx is canceled.
 	Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
 
 	// Abort discards staged parts. It must be idempotent, safe to call while

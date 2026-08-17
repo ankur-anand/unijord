@@ -320,32 +320,31 @@ confirming head read is available, it returns `ErrFenceIndeterminate`.
 Append with a writer fence:
 
 1. `req.WriterEpoch` must equal current `head.WriterEpoch`;
-2. `req.ExpectedNextLSN` must equal current `head.NextLSN`;
-3. `req.Segment.BaseLSN` must equal `head.NextLSN`;
-4. if `req.WriterEpoch < head.WriterEpoch`, return `ErrStaleWriter`;
-5. if `req.WriterEpoch > head.WriterEpoch`, return conflict or stale-writer;
-6. commit candidate pages and CAS the head.
+2. `req.Segment.WriterTag` must equal current `head.WriterID`;
+3. `req.ExpectedNextLSN` must equal current `head.NextLSN`;
+4. `req.Segment.BaseLSN` must equal `head.NextLSN`;
+5. if `req.WriterEpoch < head.WriterEpoch`, return `ErrStaleWriter`;
+6. if `req.WriterEpoch > head.WriterEpoch`, return conflict or stale-writer;
+7. commit candidate pages when needed and CAS the head.
 
 ### Steady-State Append
 
-The common append case updates only the hot leaf and the head:
+The common append case updates only the bounded segment buffer in the head:
 
-1. read hot head or use the session’s cached `(state, token)`;
-2. write a new candidate active leaf page containing the appended segment;
+1. use the session's cached `(state, token)`;
+2. append the new `SegmentRef` to `active_segments`;
 3. CAS the head from the cached token to:
    - `next_lsn = segment.LastLSN + 1`
    - `last_segment = segment`
    - `segment_count = old + 1`
-   - `active_leaf_ref = newLeaf`
+   - `active_segments = old active_segments + segment`
    - `generation = old + 1`
-4. on CAS success, the segment is visible;
-5. on CAS failure, the new leaf is an orphan candidate.
+4. on CAS success, the segment is visible.
 
 The intended hot path is:
 
 ```text
 write segment object
-write one candidate leaf page
 CAS head
 ```
 
@@ -359,16 +358,21 @@ PUT manifest
 
 ### Split Append
 
-When the active leaf is full:
+When `active_segments` reaches `LeafSegmentLimit`:
 
-1. seal the current active leaf;
-2. create a new active leaf containing the new segment;
-3. carry the sealed leaf through the bounded index frontier;
-4. CAS the head to the new `active_leaf_ref` and `index_frontier`.
+1. seal the complete active buffer as a new immutable leaf page;
+2. carry the previous leaf frontier through the bounded index frontier;
+3. set the new leaf as `leaf_frontier` and clear `active_segments`;
+4. CAS the head to the new leaf and index frontier.
 
 This is copy-on-write on one bounded path, not a rewrite of full history.
 
 The split cost is `O(log pages)` rather than `O(total history)`.
+
+Every page reference is self-describing. Its canonical object key encodes the
+page level, LSN range, catalog generation, and content-derived page ID. Readers
+validate those fields against both the reference and decoded page before using
+the page.
 
 ## Read Protocol
 

@@ -30,7 +30,10 @@ func (r *Reclaimer) reclaimSegments(ctx context.Context, state *stateFile, token
 		}
 
 		lastProcessed := afterKey
-		checkedHead := false
+		candidates := make([]deleteCandidate, 0, len(page.Objects))
+		var scheduledBytes uint64
+		reachedFloor := false
+		budgetStopped := false
 		for _, object := range page.Objects {
 			parsed, err := r.layout.ParseSegmentKey(r.opts.StreamID, state.Partition, object.Key)
 			if err != nil {
@@ -39,36 +42,45 @@ func (r *Reclaimer) reclaimSegments(ctx context.Context, state *stateFile, token
 				continue
 			}
 			if parsed.BaseLSN >= state.SafeFloorLSN {
-				return r.completeSegments(ctx, state, token)
+				reachedFloor = true
+				break
 			}
 			budget.recordCandidate()
 			size := objectSize(object)
-			if !budget.canDelete(size) {
-				if !r.opts.DryRun && lastProcessed != state.SegmentAfterKey {
-					state.SegmentAfterKey = lastProcessed
-					return r.saveState(ctx, state, token)
-				}
-				return nil
+			if !r.opts.DryRun && !budget.canScheduleDelete(size, uint64(len(candidates)), scheduledBytes) {
+				budgetStopped = true
+				break
 			}
 			if r.opts.DryRun {
 				lastProcessed = object.Key
 				continue
 			}
-			if !checkedHead {
-				if _, err := r.recheckFloor(ctx, state.Partition, state.SafeFloorLSN); err != nil {
-					return err
-				}
-				checkedHead = true
+			candidates = append(candidates, deleteCandidate{key: object.Key, size: size, beforeKey: lastProcessed})
+			scheduledBytes += size
+			lastProcessed = object.Key
+		}
+		if len(candidates) > 0 {
+			if _, err := r.recheckFloor(ctx, state.Partition, state.SafeFloorLSN); err != nil {
+				return err
 			}
-			if err := r.backend.Delete(ctx, object.Key); err != nil {
-				if lastProcessed != state.SegmentAfterKey {
-					state.SegmentAfterKey = lastProcessed
+			checkpoint, err := r.executeDeletes(ctx, candidates, budget)
+			if err != nil {
+				if checkpoint != state.SegmentAfterKey {
+					state.SegmentAfterKey = checkpoint
 					_ = r.saveState(ctx, state, token)
 				}
 				return err
 			}
-			budget.recordDelete(size)
-			lastProcessed = object.Key
+		}
+		if reachedFloor {
+			return r.completeSegments(ctx, state, token)
+		}
+		if budgetStopped {
+			if !r.opts.DryRun && lastProcessed != state.SegmentAfterKey {
+				state.SegmentAfterKey = lastProcessed
+				return r.saveState(ctx, state, token)
+			}
+			return nil
 		}
 
 		afterKey = lastProcessed

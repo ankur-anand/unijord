@@ -221,14 +221,14 @@ func TestPackerWriteFinalReturnsPriorUploadError(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("upload failed before final")
-	txn := newRecordingTxn()
-	txn.failPart = 1
-	txn.failErr = wantErr
+	txn := newGatedFailureTxn(wantErr)
 	p := newTestPacker(t, txn, packerOptions{PartSize: 4, UploadParallelism: 1})
 
 	if err := p.WriteBody(context.Background(), []byte("abcd")); err != nil {
 		t.Fatalf("WriteBody() error = %v", err)
 	}
+	txn.waitStarted(t)
+	txn.releaseFailure()
 	_ = p.BodyHash()
 	waitForPackerResult(t, p)
 

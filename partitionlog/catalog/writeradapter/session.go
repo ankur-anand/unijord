@@ -51,6 +51,13 @@ func (s *Session) PublishSegment(ctx context.Context, req writer.PublishRequest)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if req.ExpectedNextLSN != s.snapshot.Head.NextLSN {
+		return writer.Snapshot{}, fmt.Errorf("%w: expected_next_lsn=%d current=%d", writer.ErrPublishFailed, req.ExpectedNextLSN, s.snapshot.Head.NextLSN)
+	}
+	if req.Segment.BaseLSN != req.ExpectedNextLSN {
+		return writer.Snapshot{}, fmt.Errorf("%w: segment base_lsn=%d expected_next_lsn=%d", writer.ErrPublishFailed, req.Segment.BaseLSN, req.ExpectedNextLSN)
+	}
+
 	nextHead, err := s.inner.AppendSegment(ctx, req.Segment)
 	if err != nil {
 		return writer.Snapshot{}, mapCatalogError(err)

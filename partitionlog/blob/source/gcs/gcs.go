@@ -3,10 +3,9 @@ package gcs
 import (
 	"context"
 	"fmt"
-	"io"
-	"math"
 
 	"cloud.google.com/go/storage"
+	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/rangeread"
 	"github.com/ankur-anand/unijord/partitionlog/segreader"
 )
 
@@ -28,19 +27,23 @@ func NewStore(client *storage.Client, bucket string) (*Store, error) {
 }
 
 func (s *Store) ReadAt(ctx context.Context, key string, off uint64, n uint64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if key == "" {
 		return nil, fmt.Errorf("blob/source/gcs: empty key")
 	}
 	if n == 0 {
 		return []byte{}, nil
 	}
-	if off > math.MaxInt64 || n > math.MaxInt64 {
-		return nil, fmt.Errorf("blob/source/gcs: range overflows int64 offset=%d length=%d", off, n)
+	bounds, err := rangeread.Validate(off, n)
+	if err != nil {
+		return nil, err
 	}
-	r, err := s.client.Bucket(s.bucket).Object(key).NewRangeReader(ctx, int64(off), int64(n))
+	r, err := s.client.Bucket(s.bucket).Object(key).NewRangeReader(ctx, bounds.Offset, bounds.Count)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	return io.ReadAll(r)
+	return rangeread.ReadExact(r, n)
 }

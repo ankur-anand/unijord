@@ -11,6 +11,7 @@ import (
 	"github.com/ankur-anand/unijord/internal/blobstore"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 )
 
@@ -161,6 +162,72 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 		Key:    aws.String(key),
 	})
 	return mapDeleteError(err)
+}
+
+// DeleteBatch deletes up to 1,000 keys with one S3 DeleteObjects request.
+// Returned errors align with keys; nil means deleted or already absent.
+func (b *Backend) DeleteBatch(ctx context.Context, keys []string) []error {
+	errs := make([]error, len(keys))
+	if len(keys) == 0 {
+		return errs
+	}
+	if len(keys) > 1000 {
+		err := fmt.Errorf("%w: delete batch keys=%d max=1000", blobstore.ErrInvalidRequest, len(keys))
+		fillErrors(errs, err)
+		return errs
+	}
+	objects := make([]awstypes.ObjectIdentifier, len(keys))
+	positions := make(map[string][]int, len(keys))
+	for i, key := range keys {
+		if key == "" {
+			errs[i] = fmt.Errorf("%w: empty key", blobstore.ErrInvalidRequest)
+			continue
+		}
+		objects[i] = awstypes.ObjectIdentifier{Key: aws.String(key)}
+		positions[key] = append(positions[key], i)
+	}
+	for _, err := range errs {
+		if err != nil {
+			fillErrors(errs, err)
+			return errs
+		}
+	}
+	out, err := b.client.DeleteObjects(ctx, &awss3.DeleteObjectsInput{
+		Bucket: aws.String(b.bucket),
+		Delete: &awstypes.Delete{Objects: objects, Quiet: aws.Bool(true)},
+	})
+	if err != nil {
+		fillErrors(errs, mapDeleteError(err))
+		return errs
+	}
+	if err := applyDeleteErrors(errs, positions, out.Errors); err != nil {
+		fillErrors(errs, err)
+	}
+	return errs
+}
+
+func applyDeleteErrors(errs []error, positions map[string][]int, items []awstypes.Error) error {
+	for _, item := range items {
+		key := aws.ToString(item.Key)
+		indexes, ok := positions[key]
+		if !ok {
+			return fmt.Errorf("s3 delete response contained unknown key %q", key)
+		}
+		if aws.ToString(item.Code) == "NoSuchKey" {
+			continue
+		}
+		itemErr := fmt.Errorf("s3 delete key=%q code=%s: %s", key, aws.ToString(item.Code), aws.ToString(item.Message))
+		for _, i := range indexes {
+			errs[i] = itemErr
+		}
+	}
+	return nil
+}
+
+func fillErrors(errs []error, err error) {
+	for i := range errs {
+		errs[i] = err
+	}
 }
 
 func (b *Backend) putObject(ctx context.Context, key string, body []byte, ifNoneMatch *string, ifMatch *string) (blobstore.Object, error) {

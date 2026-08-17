@@ -164,6 +164,18 @@ func (p *packer) Complete(ctx context.Context) (CommittedObject, error) {
 	if err != nil {
 		return CommittedObject{}, err
 	}
+	if obj.URI == "" {
+		err := fmt.Errorf("%w: complete returned an empty object URI", ErrSinkContract)
+		p.setFirstErr(err)
+		p.abortAfterFailure()
+		return CommittedObject{}, err
+	}
+	if obj.SizeBytes != p.offset {
+		err := fmt.Errorf("%w: complete size=%d accepted_bytes=%d", ErrSinkContract, obj.SizeBytes, p.offset)
+		p.setFirstErr(err)
+		p.abortAfterFailure()
+		return CommittedObject{}, err
+	}
 	p.completed = true
 	p.cancel()
 	return obj, nil
@@ -271,6 +283,9 @@ func (p *packer) uploadWorker() {
 				return
 			}
 			receipt, err := p.uploadPart(part)
+			if err == nil && receipt.Number != part.Number {
+				err = fmt.Errorf("%w: upload part=%d returned receipt=%d", ErrSinkContract, part.Number, receipt.Number)
+			}
 			result := uploadResult{receipt: receipt, err: err}
 			select {
 			case p.results <- result:

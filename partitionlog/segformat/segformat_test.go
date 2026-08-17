@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -57,6 +58,26 @@ func TestFilePreambleMarshalParse(t *testing.T) {
 	}
 	if out != in {
 		t.Fatalf("parsed preamble = %+v, want %+v", out, in)
+	}
+}
+
+func TestTrailerValidateRejectsRangeOverflow(t *testing.T) {
+	t.Parallel()
+
+	trailer := Trailer{
+		Codec:            CodecNone,
+		HashAlgo:         HashCRC32C,
+		RecordFormat:     RecordFormatV1,
+		BaseLSN:          1,
+		LastLSN:          1,
+		RecordCount:      1,
+		BlockCount:       1,
+		BlockIndexOffset: math.MaxUint64 - 64,
+		BlockIndexLength: IndexPreambleSize + BlockIndexEntrySize,
+		TotalSize:        223,
+	}
+	if err := trailer.Validate(0); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("Trailer.Validate() error = %v, want %v", err, ErrInvalidSegment)
 	}
 }
 

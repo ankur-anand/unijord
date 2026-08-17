@@ -112,18 +112,6 @@ func (b *runBudget) listLimit() int {
 	return min(remaining, b.opts.ListPageSize)
 }
 
-func (b *runBudget) canDelete(size uint64) bool {
-	if b.result.DeletedObjects >= b.opts.MaxDeletesPerRun {
-		b.exhausted = true
-		return false
-	}
-	if b.result.DeletedObjects > 0 && size > b.opts.MaxDeleteBytes-b.result.DeletedBytes {
-		b.exhausted = true
-		return false
-	}
-	return true
-}
-
 func (b *runBudget) recordScan(count int) {
 	b.result.ScannedObjects += count
 	if b.result.ScannedObjects >= b.opts.MaxObjectsPerRun {

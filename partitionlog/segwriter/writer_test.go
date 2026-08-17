@@ -421,12 +421,20 @@ func TestWriterAbortsTxnOnUploadFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	var appendErr error
 	for _, record := range makeWriterRecords(4, 1, 1, 24) {
-		if err := w.Append(context.Background(), record); err != nil {
-			t.Fatalf("Append() error = %v", err)
+		if appendErr = w.Append(context.Background(), record); appendErr != nil {
+			break
 		}
 	}
-	if _, err := w.Close(context.Background()); !errors.Is(err, sink.failErr) {
+	if appendErr != nil {
+		if !errors.Is(appendErr, sink.failErr) {
+			t.Fatalf("Append() error = %v, want %v", appendErr, sink.failErr)
+		}
+		if _, err := w.Close(context.Background()); !errors.Is(err, ErrWriterAborted) {
+			t.Fatalf("Close() after failed Append = %v, want %v", err, ErrWriterAborted)
+		}
+	} else if _, err := w.Close(context.Background()); !errors.Is(err, sink.failErr) {
 		t.Fatalf("Close() error = %v, want %v", err, sink.failErr)
 	}
 	if got := sink.abortCount(); got != 1 {

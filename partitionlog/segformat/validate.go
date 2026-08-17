@@ -135,7 +135,14 @@ func (t Trailer) Validate(objectSize uint64) error {
 	if t.BlockIndexOffset < FilePreambleSize+BlockPreambleSize {
 		return fmt.Errorf("%w: block_index_offset=%d too small", ErrInvalidSegment, t.BlockIndexOffset)
 	}
-	expectedTotal := t.BlockIndexOffset + uint64(t.BlockIndexLength) + TrailerSize
+	if t.BlockIndexOffset > ^uint64(0)-uint64(t.BlockIndexLength) {
+		return fmt.Errorf("%w: block index range overflows uint64", ErrInvalidSegment)
+	}
+	indexEnd := t.BlockIndexOffset + uint64(t.BlockIndexLength)
+	if indexEnd > ^uint64(0)-TrailerSize {
+		return fmt.Errorf("%w: total size overflows uint64", ErrInvalidSegment)
+	}
+	expectedTotal := indexEnd + TrailerSize
 	if t.TotalSize != expectedTotal {
 		return fmt.Errorf("%w: total_size=%d want=%d", ErrInvalidSegment, t.TotalSize, expectedTotal)
 	}

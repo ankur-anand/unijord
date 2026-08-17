@@ -172,6 +172,16 @@ func (s *writerSession) ApplyPendingRetention(ctx context.Context) (csession.Ret
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	current, token, err := s.cat.loadHead(ctx, s.head.Partition)
+	if err != nil {
+		return csession.RetentionApplyResult{}, err
+	}
+	if current.WriterEpoch != s.writerEpoch || current.WriterID != s.writerID {
+		return csession.RetentionApplyResult{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, s.head.Partition)
+	}
+	s.head = current
+	s.token = token
+
 	request, found, err := s.cat.LoadRetentionRequest(ctx, s.head.Partition)
 	if err != nil {
 		return csession.RetentionApplyResult{}, err
@@ -182,10 +192,6 @@ func (s *writerSession) ApplyPendingRetention(ctx context.Context) (csession.Ret
 	if request.BeforeLSN < s.head.AppliedRetentionLSN {
 		return csession.RetentionApplyResult{}, fmt.Errorf("%w: before_lsn=%d applied=%d", csession.ErrRetentionRegression, request.BeforeLSN, s.head.AppliedRetentionLSN)
 	}
-	if s.head.WriterEpoch != s.writerEpoch || s.head.WriterID != s.writerID {
-		return csession.RetentionApplyResult{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, s.head.Partition)
-	}
-
 	generation, err := nextGeneration(s.head.Generation, s.head.Partition)
 	if err != nil {
 		return csession.RetentionApplyResult{}, err
@@ -239,13 +245,11 @@ func (s *writerSession) commitRetentionHead(ctx context.Context, previous, next 
 			if err != nil {
 				return pmeta.PartitionHead{}, err
 			}
+			if retentionApplied(current, request, next.AppliedRetentionLSN) {
+				return s.acceptObservedRetention(next, current, obj.Token), nil
+			}
 			if current.WriterEpoch != previous.WriterEpoch || current.WriterID != previous.WriterID {
 				return pmeta.PartitionHead{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, previous.Partition)
-			}
-			if retentionApplied(current, request, next.AppliedRetentionLSN) {
-				s.head = current
-				s.token = obj.Token
-				return stateFromHead(current), nil
 			}
 			if !sameHeadState(current, previous) {
 				return pmeta.PartitionHead{}, fmt.Errorf("%w: head changed while applying retention partition=%d", csession.ErrConflict, previous.Partition)
@@ -267,13 +271,11 @@ func (s *writerSession) commitRetentionHead(ctx context.Context, previous, next 
 	if err != nil {
 		return pmeta.PartitionHead{}, errors.Join(lastCASErr, err)
 	}
+	if retentionApplied(current, request, next.AppliedRetentionLSN) {
+		return s.acceptObservedRetention(next, current, token), nil
+	}
 	if current.WriterEpoch != previous.WriterEpoch || current.WriterID != previous.WriterID {
 		return pmeta.PartitionHead{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, previous.Partition)
-	}
-	if retentionApplied(current, request, next.AppliedRetentionLSN) {
-		s.head = current
-		s.token = token
-		return stateFromHead(current), nil
 	}
 	if lastCASErr != nil {
 		return pmeta.PartitionHead{}, fmt.Errorf("apply retention partition=%d: %w", previous.Partition, lastCASErr)
@@ -283,6 +285,14 @@ func (s *writerSession) commitRetentionHead(ctx context.Context, previous, next 
 
 func retentionApplied(head headFile, request csession.RetentionRequest, target uint64) bool {
 	return head.AppliedRetentionVersion == request.PolicyVersion && head.AppliedRetentionLSN == target
+}
+
+func (s *writerSession) acceptObservedRetention(expected, observed headFile, token string) pmeta.PartitionHead {
+	s.head = expected
+	if sameHeadState(observed, expected) {
+		s.token = token
+	}
+	return stateFromHead(expected)
 }
 
 func (c *Catalog) buildRetentionPageSet(ctx context.Context, head headFile, target, generation uint64) (nextPageSet, uint64, error) {

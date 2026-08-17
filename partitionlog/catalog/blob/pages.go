@@ -186,6 +186,9 @@ func (c *Catalog) writeIndex(ctx context.Context, page indexPage) (*pageRef, err
 }
 
 func (c *Catalog) loadLeaf(ctx context.Context, ref pageRef, streamID string, partition uint32) (leafPage, error) {
+	if err := c.validatePageRefPath(ref, streamID, partition, PageObjectLeaf); err != nil {
+		return leafPage{}, err
+	}
 	obj, err := c.backend.Get(ctx, ref.Path)
 	if err != nil {
 		return leafPage{}, err
@@ -213,6 +216,9 @@ func (c *Catalog) loadLeaf(ctx context.Context, ref pageRef, streamID string, pa
 }
 
 func (c *Catalog) loadIndex(ctx context.Context, ref pageRef, streamID string, partition uint32) (indexPage, error) {
+	if err := c.validatePageRefPath(ref, streamID, partition, PageObjectIndex); err != nil {
+		return indexPage{}, err
+	}
 	obj, err := c.backend.Get(ctx, ref.Path)
 	if err != nil {
 		return indexPage{}, err
@@ -237,6 +243,22 @@ func (c *Catalog) loadIndex(ctx context.Context, ref pageRef, streamID string, p
 		return indexPage{}, err
 	}
 	return page, nil
+}
+
+func (c *Catalog) validatePageRefPath(ref pageRef, streamID string, partition uint32, kind PageObjectKind) error {
+	parsed, err := ParsePagePath(c.opts.Prefix, streamID, partition, ref.Path)
+	if err != nil {
+		return err
+	}
+	if parsed.Kind != kind ||
+		parsed.Level != ref.Level ||
+		parsed.SeqLo != ref.SeqLo ||
+		parsed.SeqHi != ref.SeqHi ||
+		parsed.Generation != ref.Generation ||
+		parsed.PageID != ref.PageID {
+		return fmt.Errorf("%w: page ref path mismatch %s", ErrCorruptCatalog, ref.Path)
+	}
+	return nil
 }
 
 func cloneRefs(refs []pageRef) []pageRef {

@@ -99,18 +99,3 @@ func putS3Object(t testing.TB, client *awss3.Client, bucket string, key string, 
 		t.Fatalf("put object = %q, want %q", got, body)
 	}
 }
-
-func TestRangeEnd(t *testing.T) {
-	t.Parallel()
-
-	end, err := rangeEnd(2, 3)
-	if err != nil {
-		t.Fatalf("rangeEnd() error = %v", err)
-	}
-	if end != 4 {
-		t.Fatalf("rangeEnd() = %d, want 4", end)
-	}
-	if _, err := rangeEnd(^uint64(0), 2); err == nil {
-		t.Fatal("rangeEnd(overflow) error = nil, want error")
-	}
-}

@@ -225,9 +225,6 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	data := c.getOrCreateLocked(partition)
 	state := data.state
 
-	if retry, ok := idempotentRetry(data, expectedNextLSN, segment); ok {
-		return retry, data.headVersion, nil
-	}
 	if state.WriterEpoch == 0 {
 		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer fence not acquired", ErrStaleWriter)
 	}
@@ -239,6 +236,12 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	}
 	if writerID != data.writerID {
 		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer_id mismatch", ErrStaleWriter)
+	}
+	if segment.WriterTag != writerID {
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: segment writer_tag does not match writer_id", ErrInvalidRequest)
+	}
+	if retry, ok := idempotentRetry(data, expectedNextLSN, segment); ok {
+		return retry, data.headVersion, nil
 	}
 	if expectedNextLSN != state.NextLSN {
 		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: expected_next_lsn=%d current=%d", ErrConflict, expectedNextLSN, state.NextLSN)

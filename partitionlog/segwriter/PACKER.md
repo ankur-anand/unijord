@@ -63,11 +63,14 @@ type Txn interface {
 }
 ```
 
-`UploadPart` must be concurrency-safe and must fully consume or copy
-`part.Bytes` before returning. `Complete` receives sorted contiguous receipts.
-`Abort` must be idempotent, safe while uploads are running, and must interrupt
-in-flight uploads. Every blocking transaction method must return after its
-context is canceled.
+`UploadPart` must be concurrency-safe, must fully consume or copy `part.Bytes`
+before returning, and must return the input part number in its receipt.
+`Complete` receives sorted contiguous receipts and must return a non-empty URI
+and the exact committed byte size. `Abort` must be idempotent, safe while
+uploads are running, and must interrupt in-flight uploads. Every blocking
+transaction method must return after its context is canceled. The packer
+rejects violations with `ErrSinkContract` rather than publishing inconsistent
+metadata.
 
 ## Part Splitting
 

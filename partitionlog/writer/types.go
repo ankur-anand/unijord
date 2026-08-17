@@ -42,7 +42,8 @@ type PublishRequest struct {
 
 type Session interface {
 	Snapshot() Snapshot
-	// PublishSegment must return promptly when ctx is canceled.
+	// PublishSegment publishes exactly one segment at ExpectedNextLSN and must
+	// return promptly when ctx is canceled.
 	PublishSegment(ctx context.Context, req PublishRequest) (Snapshot, error)
 }
 

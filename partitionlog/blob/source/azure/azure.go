@@ -3,11 +3,10 @@ package azure
 import (
 	"context"
 	"fmt"
-	"io"
-	"math"
 
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	"github.com/ankur-anand/unijord/partitionlog/blob/source/internal/rangeread"
 	"github.com/ankur-anand/unijord/partitionlog/segreader"
 )
 
@@ -25,24 +24,28 @@ func NewStore(container *container.Client) (*Store, error) {
 }
 
 func (s *Store) ReadAt(ctx context.Context, key string, off uint64, n uint64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if key == "" {
 		return nil, fmt.Errorf("blob/source/azure: empty key")
 	}
 	if n == 0 {
 		return []byte{}, nil
 	}
-	if off > math.MaxInt64 || n > math.MaxInt64 {
-		return nil, fmt.Errorf("blob/source/azure: range overflows int64 offset=%d length=%d", off, n)
+	bounds, err := rangeread.Validate(off, n)
+	if err != nil {
+		return nil, err
 	}
 	resp, err := s.container.NewBlobClient(key).DownloadStream(ctx, &azblobblob.DownloadStreamOptions{
 		Range: azblobblob.HTTPRange{
-			Offset: int64(off),
-			Count:  int64(n),
+			Offset: bounds.Offset,
+			Count:  bounds.Count,
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return rangeread.ReadExact(resp.Body, n)
 }

@@ -3,6 +3,7 @@ package sourcetest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/ankur-anand/unijord/partitionlog/segreader"
@@ -32,9 +33,21 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("bad_inputs", func(t *testing.T) {
 		runBadInputs(t, cfg.newFixture(t))
 	})
+	t.Run("canceled_context", func(t *testing.T) {
+		runCanceledContext(t, cfg.newFixture(t))
+	})
 	t.Run("defensive_copy", func(t *testing.T) {
 		runDefensiveCopy(t, cfg.newFixture(t))
 	})
+}
+
+func runCanceledContext(t *testing.T, fixture Fixture) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := fixture.Store.ReadAt(ctx, fixture.Key, 0, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadAt(canceled) error = %v, want %v", err, context.Canceled)
+	}
 }
 
 func (c Config) newFixture(t testing.TB) Fixture {

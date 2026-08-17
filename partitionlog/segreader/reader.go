@@ -36,6 +36,9 @@ func Open(ctx context.Context, store SegmentStore, ref pmeta.SegmentRef, opts Op
 	if ref.SizeBytes < segformat.FilePreambleSize+segformat.TrailerSize {
 		return nil, fmt.Errorf("%w: object too small: size=%d", ErrInvalidSegment, ref.SizeBytes)
 	}
+	if uint64(ref.BlockIndexLength) > normalized.MaxIndexBytes {
+		return nil, fmt.Errorf("%w: block index bytes=%d max=%d", ErrInvalidSegment, ref.BlockIndexLength, normalized.MaxIndexBytes)
+	}
 
 	trailerOff := ref.SizeBytes - segformat.TrailerSize
 	trailerBytes, err := readAtExact(ctx, store, ref.URI, trailerOff, segformat.TrailerSize)
@@ -76,16 +79,8 @@ func Open(ctx context.Context, store SegmentStore, ref pmeta.SegmentRef, opts Op
 
 	if normalized.ValidateSegmentHash {
 		indexEnd := trailer.BlockIndexOffset + uint64(trailer.BlockIndexLength)
-		body, err := readAtExact(ctx, store, ref.URI, 0, indexEnd)
-		if err != nil {
+		if err := validateSegmentHash(ctx, store, ref.URI, indexEnd, trailer.HashAlgo, trailer.SegmentHash); err != nil {
 			return nil, err
-		}
-		got, err := segformat.HashBytes(trailer.HashAlgo, body)
-		if err != nil {
-			return nil, fmt.Errorf("%w: hash segment: %w", ErrCorruptData, err)
-		}
-		if got != trailer.SegmentHash {
-			return nil, fmt.Errorf("%w: segment hash got=%x want=%x", ErrCorruptData, got, trailer.SegmentHash)
 		}
 	}
 

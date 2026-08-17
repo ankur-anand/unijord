@@ -104,7 +104,7 @@ This runs every `segformat` parser target and the complete segment open/scan
 target independently. Separate invocations preserve the exact failing target
 and let Go retain discovered inputs in its fuzz cache.
 
-`.github/workflows/partitionlog-format.yml` runs every target for ten minutes
+`.github/workflows/partitionlog.yml` runs every target for ten minutes
 each on a weekly schedule and on manual dispatch. Pull requests run the golden
 compatibility gate and the ordinary seed corpus without paying the sustained
 fuzzing cost.
