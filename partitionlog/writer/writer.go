@@ -32,6 +32,9 @@ type Writer struct {
 
 	active     *activeSegment
 	nextCutSeq uint64
+	// activeTransitionDone is non-nil while one goroutine owns the active
+	// segment transition. The channel is closed when that transition ends.
+	activeTransitionDone chan struct{}
 
 	hasTimestamp  bool
 	lastTimestamp int64
@@ -142,7 +145,7 @@ func New(opts Options) (*Writer, error) {
 
 func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error) {
 	w.mu.Lock()
-	if err := w.foregroundErrLocked(); err != nil {
+	if err := w.waitActiveTransitionLocked(ctx); err != nil {
 		w.mu.Unlock()
 		return AppendResult{}, err
 	}
@@ -644,6 +647,11 @@ func (w *Writer) ageLoop() {
 }
 
 func (w *Writer) cutLocked(ctx context.Context) error {
+	if err := w.beginActiveTransitionLocked(ctx); err != nil {
+		return err
+	}
+	defer w.endActiveTransitionLocked()
+
 	if w.active == nil || w.active.records == 0 {
 		return nil
 	}
@@ -679,6 +687,11 @@ func (w *Writer) tryCutAfterAppendLocked(ctx context.Context) {
 }
 
 func (w *Writer) detachActiveLocked(ctx context.Context) error {
+	if err := w.beginActiveTransitionLocked(ctx); err != nil {
+		return err
+	}
+	defer w.endActiveTransitionLocked()
+
 	if w.active == nil || w.active.records == 0 {
 		return nil
 	}
@@ -792,6 +805,35 @@ func (w *Writer) reserveInflightLocked(ctx context.Context, segments int, bytes 
 		}
 		w.mu.Lock()
 	}
+}
+
+func (w *Writer) waitActiveTransitionLocked(ctx context.Context) error {
+	for w.activeTransitionDone != nil {
+		done := w.activeTransitionDone
+		w.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			w.mu.Lock()
+			return ctx.Err()
+		}
+		w.mu.Lock()
+	}
+	return w.foregroundErrLocked()
+}
+
+func (w *Writer) beginActiveTransitionLocked(ctx context.Context) error {
+	if err := w.waitActiveTransitionLocked(ctx); err != nil {
+		return err
+	}
+	w.activeTransitionDone = make(chan struct{})
+	return nil
+}
+
+func (w *Writer) endActiveTransitionLocked() {
+	done := w.activeTransitionDone
+	w.activeTransitionDone = nil
+	close(done)
 }
 
 func (w *Writer) canReserveLocked(segments int, bytes uint64) bool {
