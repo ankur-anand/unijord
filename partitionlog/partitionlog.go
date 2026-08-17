@@ -23,6 +23,10 @@ type Options struct {
 // ReaderOptions configures the default reader created by Open.
 type ReaderOptions struct {
 	MaxRecordsPerBatch int
+	// MaxCachedPartitionHeads bounds catalog heads retained for passive reads.
+	// Heads for explicitly watched partitions remain pinned until their final
+	// Watch is closed or removes the partition.
+	MaxCachedPartitionHeads int
 
 	// RangeCacheBytes is the memory budget for cached byte ranges read from
 	// segment objects.
@@ -336,8 +340,9 @@ func newReader(store Store, opts ReaderOptions, metrics Metrics) (*Reader, error
 	}
 
 	ropts := reader.Options{
-		MaxRecordsPerBatch: opts.MaxRecordsPerBatch,
-		Refresh:            opts.Refresh,
+		MaxRecordsPerBatch:      opts.MaxRecordsPerBatch,
+		MaxCachedPartitionHeads: opts.MaxCachedPartitionHeads,
+		Refresh:                 opts.Refresh,
 	}
 	if metrics != nil {
 		ropts.Observer = readerMetricsAdapter{metrics: metrics}

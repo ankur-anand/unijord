@@ -161,25 +161,43 @@ Provider stores expose an explicit reclaimer from
 expensive reachability scrub on a slower schedule:
 
 ```go
+deleteLimiter, err := plifecycle.NewTokenBucketDeleteLimiter(10_000, 1_000)
+if err != nil {
+    return err
+}
+
 reclaimer, err := store.NewReclaimer(plifecycle.Options{
-    DeleteDelay:      24 * time.Hour,
-    MaxObjectsPerRun: 10_000,
-    MaxDeletesPerRun: 1_000,
+    DeleteDelay:       24 * time.Hour,
+    MaxObjectsPerRun:  10_000,
+    MaxDeletesPerRun:  1_000,
+    DeleteBatchSize:   1_000,
+    DeleteConcurrency: 16,
+    DeleteRateLimiter: deleteLimiter,
 })
 if err != nil {
     return err
 }
 
-retentionResult, err := reclaimer.RunPartition(ctx, 7)
+scheduler, err := plifecycle.NewScheduler(reclaimer, plifecycle.SchedulerOptions{
+    MaxConcurrentPartitions: 8,
+    PartitionRunTimeout:     30 * time.Second,
+    MaxPassesPerTask:        64,
+})
 if err != nil {
     return err
 }
 
-scrubResult, err := reclaimer.ScrubPartition(ctx, 7)
+summary, err := scheduler.Run(ctx, []plifecycle.Task{
+    {Partition: 7, Operation: plifecycle.OperationReclaim},
+    {Partition: 8, Operation: plifecycle.OperationReclaim},
+})
 ```
 
-Both operations are bounded and checkpoint progress in object storage. They do
-not run implicitly inside writers or readers.
+Call the same scheduler separately with `OperationScrub` on a slower cadence.
+One `Run` call is finite: it fairly requeues bounded continuations up to
+`MaxPassesPerTask`, reports still-busy partitions as deferred, and returns. The
+caller remains responsible for partition discovery and the recurring schedule.
+Nothing runs implicitly inside writers or readers.
 
 The physical object lifecycle is defined in
 [`LIFECYCLE.md`](./LIFECYCLE.md).

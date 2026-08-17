@@ -55,7 +55,8 @@ type RefreshPolicy = plreader.RefreshPolicy
 type Freshness = plreader.Freshness
 
 const (
-	CursorCheckpointVersion = plreader.CursorCheckpointVersion
+	CursorCheckpointVersion        = plreader.CursorCheckpointVersion
+	DefaultMaxCachedPartitionHeads = plreader.DefaultMaxCachedPartitionHeads
 
 	FreshnessDefault = plreader.FreshnessDefault
 	FreshnessCached  = plreader.FreshnessCached
@@ -64,8 +65,9 @@ const (
 )
 
 var (
-	ErrWatchClosed        = plreader.ErrWatchClosed
-	ErrCheckpointInvalid  = plreader.ErrCheckpointInvalid
-	ErrCheckpointMismatch = plreader.ErrCheckpointMismatch
-	ErrCheckpointAhead    = plreader.ErrCheckpointAhead
+	ErrWatchClosed         = plreader.ErrWatchClosed
+	ErrPartitionNotWatched = plreader.ErrPartitionNotWatched
+	ErrCheckpointInvalid   = plreader.ErrCheckpointInvalid
+	ErrCheckpointMismatch  = plreader.ErrCheckpointMismatch
+	ErrCheckpointAhead     = plreader.ErrCheckpointAhead
 )

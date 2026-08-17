@@ -23,7 +23,7 @@ func TestRefreshCallerCancellationDoesNotPoisonJoinedCaller(t *testing.T) {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	coordinator := newRefreshCoordinator(cat, RefreshPolicy{}, nil)
+	coordinator := newRefreshCoordinator(cat, RefreshPolicy{}, DefaultMaxCachedPartitionHeads, nil)
 
 	winnerCtx, cancelWinner := context.WithCancel(context.Background())
 	winnerDone := make(chan refreshCallResult, 1)
@@ -91,7 +91,7 @@ func TestRefreshJoinedCallerCanCancelWithoutStoppingSharedWork(t *testing.T) {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	coordinator := newRefreshCoordinator(cat, RefreshPolicy{}, nil)
+	coordinator := newRefreshCoordinator(cat, RefreshPolicy{}, DefaultMaxCachedPartitionHeads, nil)
 
 	winnerDone := make(chan refreshCallResult, 1)
 	go func() {
@@ -155,7 +155,7 @@ func TestRefreshSharedWorkHonorsRefreshTimeout(t *testing.T) {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	coordinator := newRefreshCoordinator(cat, RefreshPolicy{RefreshTimeout: 20 * time.Millisecond}, nil)
+	coordinator := newRefreshCoordinator(cat, RefreshPolicy{RefreshTimeout: 20 * time.Millisecond}, DefaultMaxCachedPartitionHeads, nil)
 
 	_, err := coordinator.refresh(context.Background(), 7)
 	if !errors.Is(err, context.DeadlineExceeded) {

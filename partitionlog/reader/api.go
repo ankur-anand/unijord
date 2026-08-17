@@ -1,6 +1,7 @@
 package reader
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -18,7 +19,10 @@ const (
 	defaultRefreshTimeout         = 5 * time.Second
 )
 
-var ErrWatchClosed = errors.New("partitionlog/reader: watch closed")
+var (
+	ErrWatchClosed         = errors.New("partitionlog/reader: watch closed")
+	ErrPartitionNotWatched = errors.New("partitionlog/reader: partition not watched")
+)
 
 // Partition returns a passive reader view for one partition.
 func (r *Reader) Partition(partition uint32) *PartitionReader {
@@ -36,10 +40,11 @@ func (r *Reader) Watch(ctx context.Context, opts WatchOptions) (*Watch, error) {
 	}
 	wctx, cancel := context.WithCancel(ctx)
 	w := &Watch{
-		reader:     r,
-		ctx:        wctx,
-		cancel:     cancel,
-		partitions: make(map[uint32]struct{}, len(opts.Partitions)),
+		reader:            r,
+		ctx:               wctx,
+		cancel:            cancel,
+		partitions:        make(map[uint32]struct{}, len(opts.Partitions)),
+		membershipChanged: make(chan struct{}),
 	}
 	for _, partition := range opts.Partitions {
 		if err := w.addPartitionLocked(partition); err != nil {
@@ -270,9 +275,10 @@ type Watch struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	closed     bool
-	partitions map[uint32]struct{}
+	mu                sync.Mutex
+	closed            bool
+	partitions        map[uint32]struct{}
+	membershipChanged chan struct{}
 }
 
 // AddPartition adds a partition to this Watch's background refresh set.
@@ -285,7 +291,8 @@ func (w *Watch) AddPartition(partition uint32) error {
 	return w.addPartitionLocked(partition)
 }
 
-// RemovePartition removes a partition from this Watch's background refresh set.
+// RemovePartition removes a partition from this Watch's background refresh
+// set. A blocked Tailer for the partition returns ErrPartitionNotWatched.
 func (w *Watch) RemovePartition(partition uint32) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -293,6 +300,7 @@ func (w *Watch) RemovePartition(partition uint32) {
 		return
 	}
 	delete(w.partitions, partition)
+	w.signalMembershipChangedLocked()
 	w.reader.refresh.unwatchPartition(partition)
 }
 
@@ -327,6 +335,7 @@ func (w *Watch) Close() error {
 		return nil
 	}
 	w.closed = true
+	close(w.membershipChanged)
 	partitions := make([]uint32, 0, len(w.partitions))
 	for partition := range w.partitions {
 		partitions = append(partitions, partition)
@@ -347,6 +356,11 @@ func (w *Watch) addPartitionLocked(partition uint32) error {
 	w.partitions[partition] = struct{}{}
 	w.reader.refresh.watchPartition(partition)
 	return nil
+}
+
+func (w *Watch) signalMembershipChangedLocked() {
+	close(w.membershipChanged)
+	w.membershipChanged = make(chan struct{})
 }
 
 // Tailer is a blocking cursor attached to an explicit Watch. It is not safe for
@@ -417,18 +431,41 @@ func (t *Tailer) Close() error {
 }
 
 func (w *Watch) waitForAdvance(ctx context.Context, partition uint32, generation uint64) error {
+	membershipChanged, err := w.partitionMembership(partition)
+	if err != nil {
+		return err
+	}
 	ch, wait := w.reader.refresh.waitChannel(partition, generation)
 	if !wait {
-		return nil
+		return w.partitionMembershipError(partition)
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-w.ctx.Done():
 		return ErrWatchClosed
+	case <-membershipChanged:
+		return w.partitionMembershipError(partition)
 	case <-ch:
-		return nil
+		return w.partitionMembershipError(partition)
 	}
+}
+
+func (w *Watch) partitionMembership(partition uint32) (<-chan struct{}, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil, ErrWatchClosed
+	}
+	if _, ok := w.partitions[partition]; !ok {
+		return nil, ErrPartitionNotWatched
+	}
+	return w.membershipChanged, nil
+}
+
+func (w *Watch) partitionMembershipError(partition uint32) error {
+	_, err := w.partitionMembership(partition)
+	return err
 }
 
 type refreshCoordinator struct {
@@ -437,11 +474,14 @@ type refreshCoordinator struct {
 	observer Observer
 	group    singleflight.Group
 
-	mu         sync.Mutex
-	partitions map[uint32]*partitionState
-	watched    map[uint32]int
-	loopCancel context.CancelFunc
-	loopDone   chan struct{}
+	mu                      sync.Mutex
+	cachedHeads             map[uint32]*cachedPartitionHead
+	cachedHeadLRU           list.List
+	maxCachedPartitionHeads int
+	watches                 map[uint32]*partitionState
+	nextGeneration          uint64
+	loopCancel              context.CancelFunc
+	loopDone                chan struct{}
 }
 
 type partitionState struct {
@@ -449,6 +489,12 @@ type partitionState struct {
 	hasHead    bool
 	generation uint64
 	changed    chan struct{}
+	refs       int
+}
+
+type cachedPartitionHead struct {
+	head    pmeta.PartitionHead
+	element *list.Element
 }
 
 type headSnapshot struct {
@@ -456,13 +502,14 @@ type headSnapshot struct {
 	generation uint64
 }
 
-func newRefreshCoordinator(cat catalog.Reader, policy RefreshPolicy, observer Observer) *refreshCoordinator {
+func newRefreshCoordinator(cat catalog.Reader, policy RefreshPolicy, maxCachedPartitionHeads int, observer Observer) *refreshCoordinator {
 	return &refreshCoordinator{
-		catalog:    cat,
-		policy:     normalizeRefreshPolicy(policy, RefreshPolicy{}),
-		observer:   observer,
-		partitions: make(map[uint32]*partitionState),
-		watched:    make(map[uint32]int),
+		catalog:                 cat,
+		policy:                  normalizeRefreshPolicy(policy, RefreshPolicy{}),
+		observer:                observer,
+		cachedHeads:             make(map[uint32]*cachedPartitionHead),
+		maxCachedPartitionHeads: maxCachedPartitionHeads,
+		watches:                 make(map[uint32]*partitionState),
 	}
 }
 
@@ -572,7 +619,22 @@ func (c *refreshCoordinator) observe(event MetricEvent) {
 func (c *refreshCoordinator) watchPartition(partition uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.watched[partition]++
+	state, ok := c.watches[partition]
+	if ok {
+		state.refs++
+	} else {
+		state = &partitionState{
+			changed: make(chan struct{}),
+			refs:    1,
+		}
+		if cached, cachedOK := c.cachedHeads[partition]; cachedOK {
+			state.head = cached.head
+			state.hasHead = true
+			state.generation = c.nextGenerationLocked()
+			c.removeCachedHeadLocked(partition)
+		}
+		c.watches[partition] = state
+	}
 	if c.loopCancel == nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -586,12 +648,18 @@ func (c *refreshCoordinator) unwatchPartition(partition uint32) {
 	var cancel context.CancelFunc
 	var done chan struct{}
 	c.mu.Lock()
-	if count := c.watched[partition]; count <= 1 {
-		delete(c.watched, partition)
-	} else {
-		c.watched[partition] = count - 1
+	if state, ok := c.watches[partition]; ok {
+		if state.refs > 1 {
+			state.refs--
+		} else {
+			delete(c.watches, partition)
+			close(state.changed)
+			if state.hasHead {
+				c.cacheHeadLocked(partition, state.head)
+			}
+		}
 	}
-	if len(c.watched) == 0 && c.loopCancel != nil {
+	if len(c.watches) == 0 && c.loopCancel != nil {
 		cancel = c.loopCancel
 		done = c.loopDone
 		c.loopCancel = nil
@@ -654,8 +722,8 @@ func (c *refreshCoordinator) pollWatched(ctx context.Context) {
 func (c *refreshCoordinator) snapshotWatched() []uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]uint32, 0, len(c.watched))
-	for partition := range c.watched {
+	out := make([]uint32, 0, len(c.watches))
+	for partition := range c.watches {
 		out = append(out, partition)
 	}
 	return out
@@ -664,18 +732,22 @@ func (c *refreshCoordinator) snapshotWatched() []uint32 {
 func (c *refreshCoordinator) snapshot(partition uint32) (pmeta.PartitionHead, uint64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	state, ok := c.partitions[partition]
-	if !ok || !state.hasHead {
+	if state, ok := c.watches[partition]; ok && state.hasHead {
+		return state.head, state.generation, true
+	}
+	cached, ok := c.cachedHeads[partition]
+	if !ok {
 		return pmeta.PartitionHead{}, 0, false
 	}
-	return state.head, state.generation, true
+	c.cachedHeadLRU.MoveToFront(cached.element)
+	return cached.head, 0, true
 }
 
 func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<-chan struct{}, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	state := c.stateLocked(partition)
-	if state.generation != generation {
+	state, ok := c.watches[partition]
+	if !ok || state.generation != generation {
 		return nil, false
 	}
 	return state.changed, true
@@ -684,24 +756,51 @@ func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<
 func (c *refreshCoordinator) updateHead(partition uint32, head pmeta.PartitionHead) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	state := c.stateLocked(partition)
-	if state.hasHead && state.head == head {
+	if state, ok := c.watches[partition]; ok {
+		if state.hasHead && state.head == head {
+			return state.generation
+		}
+		state.head = head
+		state.hasHead = true
+		state.generation = c.nextGenerationLocked()
+		close(state.changed)
+		state.changed = make(chan struct{})
 		return state.generation
 	}
-	state.head = head
-	state.hasHead = true
-	state.generation++
-	close(state.changed)
-	state.changed = make(chan struct{})
-	return state.generation
+	c.cacheHeadLocked(partition, head)
+	return 0
 }
 
-func (c *refreshCoordinator) stateLocked(partition uint32) *partitionState {
-	state, ok := c.partitions[partition]
-	if ok {
-		return state
+func (c *refreshCoordinator) cacheHeadLocked(partition uint32, head pmeta.PartitionHead) {
+	if cached, ok := c.cachedHeads[partition]; ok {
+		cached.head = head
+		c.cachedHeadLRU.MoveToFront(cached.element)
+		return
 	}
-	state = &partitionState{changed: make(chan struct{})}
-	c.partitions[partition] = state
-	return state
+	element := c.cachedHeadLRU.PushFront(partition)
+	c.cachedHeads[partition] = &cachedPartitionHead{head: head, element: element}
+	for len(c.cachedHeads) > c.maxCachedPartitionHeads {
+		oldest := c.cachedHeadLRU.Back()
+		if oldest == nil {
+			return
+		}
+		c.removeCachedHeadLocked(oldest.Value.(uint32))
+	}
+}
+
+func (c *refreshCoordinator) removeCachedHeadLocked(partition uint32) {
+	cached, ok := c.cachedHeads[partition]
+	if !ok {
+		return
+	}
+	c.cachedHeadLRU.Remove(cached.element)
+	delete(c.cachedHeads, partition)
+}
+
+func (c *refreshCoordinator) nextGenerationLocked() uint64 {
+	c.nextGeneration++
+	if c.nextGeneration == 0 {
+		c.nextGeneration++
+	}
+	return c.nextGeneration
 }

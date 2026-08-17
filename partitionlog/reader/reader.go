@@ -27,7 +27,7 @@ func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) 
 		catalog: cat,
 		store:   store,
 		opts:    normalized,
-		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.Observer),
+		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.MaxCachedPartitionHeads, normalized.Observer),
 	}, nil
 }
 
@@ -460,6 +460,12 @@ func normalizeOptions(opts Options) (Options, error) {
 	}
 	if opts.MaxRecordsPerBatch < 0 {
 		return Options{}, fmt.Errorf("%w: max_records_per_batch=%d", ErrInvalidOptions, opts.MaxRecordsPerBatch)
+	}
+	if opts.MaxCachedPartitionHeads == 0 {
+		opts.MaxCachedPartitionHeads = DefaultMaxCachedPartitionHeads
+	}
+	if opts.MaxCachedPartitionHeads < 0 {
+		return Options{}, fmt.Errorf("%w: max_cached_partition_heads=%d", ErrInvalidOptions, opts.MaxCachedPartitionHeads)
 	}
 	if opts.SegmentOptions == (segreader.Options{}) {
 		opts.SegmentOptions = segreader.DefaultOptions()

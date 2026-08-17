@@ -10,18 +10,20 @@ import (
 )
 
 const (
-	DefaultMaxRecordsPerBatch        = 1024
-	CursorCheckpointVersion   uint16 = 1
+	DefaultMaxRecordsPerBatch             = 1024
+	DefaultMaxCachedPartitionHeads        = 16_384
+	CursorCheckpointVersion        uint16 = 1
 )
 
 type SegmentStore = segreader.SegmentStore
 
 type Options struct {
-	MaxRecordsPerBatch int
-	SegmentOptions     segreader.Options
-	SegmentCache       *SegmentReaderCache
-	Refresh            RefreshPolicy
-	Observer           Observer
+	MaxRecordsPerBatch      int
+	MaxCachedPartitionHeads int
+	SegmentOptions          segreader.Options
+	SegmentCache            *SegmentReaderCache
+	Refresh                 RefreshPolicy
+	Observer                Observer
 }
 
 type Reader struct {
