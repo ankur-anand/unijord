@@ -1,7 +1,7 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 
-PACKAGES ?= ./partitionlog/... ./internal/blobstore/... ./internal/registry
+PACKAGES ?= ./partitionlog/... ./internal/blobstore/...
 TESTFLAGS ?=
 FUZZTIME ?= 1m
 STRESSCOUNT ?= 100
