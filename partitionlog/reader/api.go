@@ -15,6 +15,7 @@ import (
 const (
 	defaultPollInterval           = time.Second
 	defaultMaxConcurrentRefreshes = 16
+	defaultRefreshTimeout         = 5 * time.Second
 )
 
 var ErrWatchClosed = errors.New("partitionlog/reader: watch closed")
@@ -478,8 +479,11 @@ func normalizeRefreshPolicy(policy RefreshPolicy, fallback RefreshPolicy) Refres
 	if policy.MaxConcurrentRefreshes <= 0 {
 		policy.MaxConcurrentRefreshes = defaultMaxConcurrentRefreshes
 	}
-	if policy.RefreshTimeout == 0 {
+	if policy.RefreshTimeout <= 0 {
 		policy.RefreshTimeout = fallback.RefreshTimeout
+	}
+	if policy.RefreshTimeout <= 0 {
+		policy.RefreshTimeout = defaultRefreshTimeout
 	}
 	return policy
 }
@@ -520,7 +524,10 @@ func (c *refreshCoordinator) headForRead(ctx context.Context, partition uint32, 
 }
 
 func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
-	v, err, _ := c.group.Do(fmt.Sprintf("%d", partition), func() (any, error) {
+	if err := ctx.Err(); err != nil {
+		return pmeta.PartitionHead{}, err
+	}
+	resultCh := c.group.DoChan(fmt.Sprintf("%d", partition), func() (any, error) {
 		start := time.Now()
 		var head pmeta.PartitionHead
 		var refreshErr error
@@ -533,11 +540,9 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 				Err:       refreshErr,
 			})
 		}()
-		if err := ctx.Err(); err != nil {
-			refreshErr = err
-			return headSnapshot{}, err
-		}
-		head, err := c.catalog.LoadPartition(ctx, partition)
+		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.policy.RefreshTimeout)
+		defer cancel()
+		head, err := c.catalog.LoadPartition(workCtx, partition)
 		if err != nil {
 			refreshErr = err
 			return headSnapshot{}, err
@@ -545,11 +550,16 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 		generation := c.updateHead(partition, head)
 		return headSnapshot{head: head, generation: generation}, nil
 	})
-	if err != nil {
-		return pmeta.PartitionHead{}, err
+	select {
+	case <-ctx.Done():
+		return pmeta.PartitionHead{}, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return pmeta.PartitionHead{}, result.Err
+		}
+		snapshot := result.Val.(headSnapshot)
+		return snapshot.head, nil
 	}
-	snapshot := v.(headSnapshot)
-	return snapshot.head, nil
 }
 
 func (c *refreshCoordinator) observe(event MetricEvent) {

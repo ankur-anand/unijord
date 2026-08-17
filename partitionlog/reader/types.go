@@ -143,8 +143,8 @@ type RefreshPolicy struct {
 	// concurrency is capped by the number of watched partitions.
 	MaxConcurrentRefreshes int
 
-	// RefreshTimeout bounds one catalog head refresh. Zero means no extra
-	// timeout beyond the Watch context.
+	// RefreshTimeout bounds one shared catalog head refresh. Zero uses the
+	// default timeout.
 	RefreshTimeout time.Duration
 }
 
