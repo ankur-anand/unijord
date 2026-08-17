@@ -9,7 +9,6 @@ import (
 
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/ankur-anand/unijord/partitionlog/segreader"
 )
 
@@ -438,8 +437,8 @@ func (r *Reader) readSegment(ctx context.Context, segment pmeta.SegmentRef, from
 			Partition:   record.Partition,
 			LSN:         record.LSN,
 			TimestampMS: record.TimestampMS,
-			Headers:     segformat.CloneHeaders(record.Headers),
-			Value:       append([]byte(nil), record.Value...),
+			Headers:     record.Headers,
+			Value:       record.Value,
 		})
 	}
 	return out, nil
