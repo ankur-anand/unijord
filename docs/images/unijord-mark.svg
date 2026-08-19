@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">Unijord folded timeline mark</title>
+  <desc id="description">One continuous timeline folded into a U, ending at its committed tail.</desc>
+  <path
+    d="M32 52h28c12.2 0 22 9.8 22 22v64c0 31.5 20.6 54 46 54s46-22.5 46-54V74c0-12.2 9.8-22 22-22h28"
+    fill="none"
+    stroke="#0b806f"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="20"
+  />
+  <circle cx="224" cy="52" r="14" fill="#17201e" />
+</svg>
