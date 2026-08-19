@@ -18,7 +18,7 @@ type deleteCandidate struct {
 	beforeKey string
 }
 
-func (r *Reclaimer) executeDeletes(ctx context.Context, candidates []deleteCandidate, budget *runBudget) (string, error) {
+func (r *Reclaimer) executeDeletes(ctx context.Context, state *stateFile, candidates []deleteCandidate, budget *runBudget) (string, error) {
 	if len(candidates) == 0 || r.opts.DryRun {
 		return "", nil
 	}
@@ -28,7 +28,7 @@ func (r *Reclaimer) executeDeletes(ctx context.Context, candidates []deleteCandi
 	failed := 0
 	for start := 0; start < len(candidates); start += r.opts.DeleteBatchSize {
 		end := min(start+r.opts.DeleteBatchSize, len(candidates))
-		errs := r.deleteWave(ctx, candidates[start:end])
+		errs := r.deleteWave(ctx, state, candidates[start:end])
 		for i, err := range errs {
 			candidate := candidates[start+i]
 			if err == nil {
@@ -56,13 +56,16 @@ func (r *Reclaimer) executeDeletes(ctx context.Context, candidates []deleteCandi
 	)
 }
 
-func (r *Reclaimer) deleteWave(ctx context.Context, candidates []deleteCandidate) []error {
+func (r *Reclaimer) deleteWave(ctx context.Context, state *stateFile, candidates []deleteCandidate) []error {
 	keys := make([]string, len(candidates))
 	for i := range candidates {
 		keys[i] = candidates[i].key
 	}
 	if backend, ok := r.backend.(batchDeleteBackend); ok {
 		if err := r.waitForDeleteBudget(ctx, len(keys)); err != nil {
+			return repeatedDeleteError(len(keys), err)
+		}
+		if err := r.checkLease(state); err != nil {
 			return repeatedDeleteError(len(keys), err)
 		}
 		errs := backend.DeleteBatch(ctx, keys)
@@ -95,6 +98,10 @@ func (r *Reclaimer) deleteWave(ctx context.Context, candidates []deleteCandidate
 					errs[i] = err
 					continue
 				}
+				if err := r.checkLease(state); err != nil {
+					errs[i] = err
+					continue
+				}
 				errs[i] = r.backend.Delete(ctx, candidates[i].key)
 			}
 		}()
@@ -104,11 +111,17 @@ func (r *Reclaimer) deleteWave(ctx context.Context, candidates []deleteCandidate
 }
 
 func (r *Reclaimer) waitForDeleteBudget(ctx context.Context, objects int) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("lifecycle: delete context: %w", err)
+	}
 	if r.opts.DeleteRateLimiter == nil {
 		return nil
 	}
 	if err := r.opts.DeleteRateLimiter.Wait(ctx, objects); err != nil {
 		return fmt.Errorf("lifecycle: wait for delete rate budget: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("lifecycle: delete context after rate wait: %w", err)
 	}
 	return nil
 }

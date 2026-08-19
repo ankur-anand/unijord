@@ -25,7 +25,7 @@ var (
 
 const (
 	DefaultDeleteDelay       = 24 * time.Hour
-	DefaultLeaseDuration     = time.Minute
+	DefaultMaxPassDuration   = 20 * time.Second
 	DefaultListPageSize      = 1000
 	DefaultMaxObjectsPerRun  = 10_000
 	DefaultMaxDeletesPerRun  = 1_000
@@ -35,6 +35,8 @@ const (
 	DefaultMaxQuarantine     = 256
 	DefaultCASAttempts       = 8
 	maxQuarantineEntries     = 1000
+	leaseDurationMultiplier  = 3
+	maxLeaseReleaseTimeout   = 5 * time.Second
 )
 
 type Object = blobstore.Object
@@ -59,7 +61,7 @@ type Catalog interface {
 
 // DeleteRateLimiter coordinates physical delete throughput across reclaimers.
 // The objects count is the number of keys in the provider request. Implementations
-// must be safe for concurrent use.
+// must be safe for concurrent use and return promptly when ctx is canceled.
 type DeleteRateLimiter interface {
 	Wait(ctx context.Context, objects int) error
 }
@@ -73,8 +75,10 @@ type Options struct {
 	// random identity at construction.
 	OwnerID [16]byte
 
-	DeleteDelay      time.Duration
-	LeaseDuration    time.Duration
+	DeleteDelay time.Duration
+	// MaxPassDuration bounds one RunPartition or ScrubPartition call. The
+	// reclaimer derives a longer lease from this value.
+	MaxPassDuration  time.Duration
 	ListPageSize     int
 	MaxObjectsPerRun int
 	MaxDeletesPerRun int
@@ -135,11 +139,17 @@ func newReclaimer(backend Backend, catalog Catalog, layout segmentsink.Layout, o
 	if opts.DeleteDelay == 0 {
 		opts.DeleteDelay = DefaultDeleteDelay
 	}
-	if opts.LeaseDuration < 0 {
-		return nil, fmt.Errorf("%w: negative lease duration", ErrInvalidOptions)
+	if opts.MaxPassDuration < 0 {
+		return nil, fmt.Errorf("%w: negative max pass duration", ErrInvalidOptions)
 	}
-	if opts.LeaseDuration == 0 {
-		opts.LeaseDuration = DefaultLeaseDuration
+	if opts.MaxPassDuration == 0 {
+		opts.MaxPassDuration = DefaultMaxPassDuration
+	}
+	if opts.MaxPassDuration < time.Millisecond {
+		return nil, fmt.Errorf("%w: max pass duration=%s below 1ms", ErrInvalidOptions, opts.MaxPassDuration)
+	}
+	if opts.MaxPassDuration > time.Duration(1<<63-1)/leaseDurationMultiplier {
+		return nil, fmt.Errorf("%w: max pass duration=%s overflows lease duration", ErrInvalidOptions, opts.MaxPassDuration)
 	}
 	if opts.ListPageSize < 0 {
 		return nil, fmt.Errorf("%w: negative list page size", ErrInvalidOptions)
@@ -197,4 +207,12 @@ func newReclaimer(backend Backend, catalog Catalog, layout segmentsink.Layout, o
 		opts.OwnerID = owner
 	}
 	return &Reclaimer{backend: backend, catalog: catalog, layout: layout, opts: opts, now: now}, nil
+}
+
+func (r *Reclaimer) leaseDuration() time.Duration {
+	return time.Duration(leaseDurationMultiplier) * r.opts.MaxPassDuration
+}
+
+func (r *Reclaimer) leaseReleaseTimeout() time.Duration {
+	return min(r.opts.MaxPassDuration, maxLeaseReleaseTimeout)
 }

@@ -168,6 +168,7 @@ if err != nil {
 
 reclaimer, err := store.NewReclaimer(plifecycle.Options{
     DeleteDelay:       24 * time.Hour,
+    MaxPassDuration:   20 * time.Second,
     MaxObjectsPerRun:  10_000,
     MaxDeletesPerRun:  1_000,
     DeleteBatchSize:   1_000,

@@ -24,7 +24,7 @@ func TestExecuteDeletesChargesNativeBatchesByObjectCount(t *testing.T) {
 	result := Result{}
 	budget := runBudget{opts: r.opts, result: &result}
 	candidates := []deleteCandidate{{key: "a"}, {key: "b"}, {key: "c"}, {key: "d"}, {key: "e"}}
-	if _, err := r.executeDeletes(context.Background(), candidates, &budget); err != nil {
+	if _, err := r.executeDeletes(context.Background(), activeTestLease(r), candidates, &budget); err != nil {
 		t.Fatalf("executeDeletes() error = %v", err)
 	}
 	if calls := limiter.Calls(); !equalInts(calls, []int{2, 2, 1}) {
@@ -44,7 +44,7 @@ func TestExecuteDeletesChargesFallbackDeletesIndividually(t *testing.T) {
 	result := Result{}
 	budget := runBudget{opts: r.opts, result: &result}
 	candidates := []deleteCandidate{{key: "a"}, {key: "b"}, {key: "c"}, {key: "d"}, {key: "e"}}
-	if _, err := r.executeDeletes(context.Background(), candidates, &budget); err != nil {
+	if _, err := r.executeDeletes(context.Background(), activeTestLease(r), candidates, &budget); err != nil {
 		t.Fatalf("executeDeletes() error = %v", err)
 	}
 	calls := limiter.Calls()
@@ -73,7 +73,7 @@ func TestDeleteRateLimiterFailurePreservesCheckpointAndSkipsProvider(t *testing.
 		{key: "a", beforeKey: "start"},
 		{key: "b", beforeKey: "a"},
 	}
-	checkpoint, err := r.executeDeletes(context.Background(), candidates, &budget)
+	checkpoint, err := r.executeDeletes(context.Background(), activeTestLease(r), candidates, &budget)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("executeDeletes() error = %v, want %v", err, context.DeadlineExceeded)
 	}

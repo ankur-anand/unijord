@@ -73,7 +73,7 @@ func (r *Reclaimer) reclaimPages(ctx context.Context, state *stateFile, token *s
 			if _, err := r.recheckFloor(ctx, state.Partition, state.SafeFloorLSN); err != nil {
 				return err
 			}
-			checkpoint, err := r.executeDeletes(ctx, candidates, budget)
+			checkpoint, err := r.executeDeletes(ctx, state, candidates, budget)
 			if err != nil {
 				if checkpoint != state.PageAfterKey {
 					state.PageAfterKey = checkpoint

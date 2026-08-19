@@ -12,6 +12,9 @@ func (r *Reclaimer) RunPartition(ctx context.Context, partition uint32) (result 
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	parentCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, r.opts.MaxPassDuration)
+	defer cancel()
 	now := r.now().UTC()
 	state, token, err := r.acquire(ctx, partition, now)
 	if err != nil {
@@ -23,7 +26,9 @@ func (r *Reclaimer) RunPartition(ctx context.Context, partition uint32) (result 
 		if r.opts.DryRun {
 			releaseState = &acquiredState
 		}
-		releaseErr := r.release(ctx, releaseState, &token)
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(parentCtx), r.leaseReleaseTimeout())
+		defer releaseCancel()
+		releaseErr := r.release(releaseCtx, releaseState, &token)
 		if err == nil && releaseErr != nil {
 			err = releaseErr
 		}

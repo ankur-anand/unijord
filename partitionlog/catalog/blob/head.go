@@ -212,13 +212,12 @@ func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.S
 		if err != nil {
 			return pmeta.PartitionHead{}, err
 		}
-		if current.WriterEpoch != s.writerEpoch || current.WriterID != s.writerID {
-			return pmeta.PartitionHead{}, fmt.Errorf("%w: writer fence moved partition=%d", csession.ErrStaleWriter, head.Partition)
+		observation, err := s.observeSegmentCommit(ctx, head, current, segment)
+		if err != nil {
+			return pmeta.PartitionHead{}, err
 		}
-		if retry, ok := idempotentHeadRetry(current, segment); ok {
-			s.head = current
-			s.token = token
-			return retry, nil
+		if observation == commitApplied {
+			return s.acceptObservedCommit(head, current, token), nil
 		}
 		return pmeta.PartitionHead{}, fmt.Errorf("%w: idempotent retry no longer matches head partition=%d", csession.ErrConflict, head.Partition)
 	}
@@ -330,11 +329,11 @@ func (s *writerSession) commitSegmentHead(ctx context.Context, previous, next he
 }
 
 func (s *writerSession) observeSegmentCommit(ctx context.Context, previous, current headFile, segment pmeta.SegmentRef) (commitObservation, error) {
-	if sameHeadState(current, previous) {
-		return commitNeedsRetry, nil
-	}
 	if current.HasLastSegment && current.LastSegment == segment {
 		return commitApplied, nil
+	}
+	if sameHeadState(current, previous) {
+		return commitNeedsRetry, nil
 	}
 	if current.NextLSN >= segment.NextLSN() {
 		if segment.BaseLSN < current.OldestLSN {

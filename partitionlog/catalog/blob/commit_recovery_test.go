@@ -222,6 +222,60 @@ func TestAppendSegmentReconcilesHistoricalCommitAfterHeadAdvances(t *testing.T) 
 	}
 }
 
+func TestAppendSegmentRetryReconcilesAfterIndeterminateResultAndFenceMoves(t *testing.T) {
+	t.Parallel()
+
+	backend := &casFaultBackend{Backend: NewMemoryBackend()}
+	opts := commitRecoveryTestOptions()
+	opts.WriterCommitMaxAttempts = 1
+	cat, err := New(backend, opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	first, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter(first) error = %v", err)
+	}
+	firstSegment := testSegmentRef(1, 0, 9, first.Epoch())
+
+	backend.arm(casFaultAfterApplyOnce, true, nil)
+	if _, err := first.AppendSegment(context.Background(), firstSegment); !errors.Is(err, pcatalog.ErrCommitIndeterminate) {
+		t.Fatalf("AppendSegment(first attempt) error = %v, want %v", err, pcatalog.ErrCommitIndeterminate)
+	}
+
+	backend.arm(casFaultNone, false, nil)
+	second, err := cat.OpenWriter(context.Background(), 1, [16]byte{2})
+	if err != nil {
+		t.Fatalf("OpenWriter(second) error = %v", err)
+	}
+	if _, err := second.AppendSegment(context.Background(), testSegmentRef(1, 10, 19, second.Epoch())); err != nil {
+		t.Fatalf("AppendSegment(second) error = %v", err)
+	}
+	third, err := cat.OpenWriter(context.Background(), 1, [16]byte{3})
+	if err != nil {
+		t.Fatalf("OpenWriter(third) error = %v", err)
+	}
+	if _, err := third.AppendSegment(context.Background(), testSegmentRef(1, 20, 29, third.Epoch())); err != nil {
+		t.Fatalf("AppendSegment(third) error = %v", err)
+	}
+
+	reconciled, err := first.AppendSegment(context.Background(), firstSegment)
+	if err != nil {
+		t.Fatalf("AppendSegment(retry) error = %v", err)
+	}
+	if reconciled.NextLSN != 10 || reconciled.SegmentCount != 1 || reconciled.LastSegment != firstSegment {
+		t.Fatalf("reconciled state = %+v", reconciled)
+	}
+
+	current, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if current.NextLSN != 30 || current.SegmentCount != 3 || current.WriterEpoch != third.Epoch() {
+		t.Fatalf("current state = %+v", current)
+	}
+}
+
 func TestAppendSegmentReturnsIndeterminateWhenCommitCannotBeObserved(t *testing.T) {
 	t.Parallel()
 

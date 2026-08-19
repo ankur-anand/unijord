@@ -85,7 +85,7 @@ func (r *Reclaimer) reclaimStaging(ctx context.Context, snapshot catalogblob.Mai
 			if fresh.Head.WriterEpoch < snapshot.Head.WriterEpoch {
 				return nil
 			}
-			checkpoint, err := r.executeDeletes(ctx, candidates, budget)
+			checkpoint, err := r.executeDeletes(ctx, state, candidates, budget)
 			if err != nil {
 				if checkpoint != state.StagingAfterKey {
 					state.StagingAfterKey = checkpoint

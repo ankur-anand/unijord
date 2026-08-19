@@ -24,7 +24,7 @@ func TestExecuteDeletesUsesBoundedConcurrency(t *testing.T) {
 	for i := range candidates {
 		candidates[i] = deleteCandidate{key: string(rune('a' + i)), size: 1}
 	}
-	if _, err := r.executeDeletes(context.Background(), candidates, &budget); err != nil {
+	if _, err := r.executeDeletes(context.Background(), activeTestLease(r), candidates, &budget); err != nil {
 		t.Fatalf("executeDeletes() error = %v", err)
 	}
 	if result.DeletedObjects != len(candidates) {
@@ -54,7 +54,7 @@ func TestExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint(t *test
 		{key: "d", size: 1, beforeKey: "c"},
 		{key: "e", size: 1, beforeKey: "d"},
 	}
-	checkpoint, err := r.executeDeletes(context.Background(), candidates, &budget)
+	checkpoint, err := r.executeDeletes(context.Background(), activeTestLease(r), candidates, &budget)
 	if !errors.Is(err, errNativeBatchDelete) {
 		t.Fatalf("executeDeletes() error = %v, want %v", err, errNativeBatchDelete)
 	}

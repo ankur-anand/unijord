@@ -63,8 +63,8 @@ type Runner interface {
 type SchedulerOptions struct {
 	// MaxConcurrentPartitions bounds lifecycle passes active at once.
 	MaxConcurrentPartitions int
-	// PartitionRunTimeout bounds one RunPartition or ScrubPartition call. It
-	// must be shorter than the reclaimer lease duration.
+	// PartitionRunTimeout bounds any Runner call. Reclaimer also enforces its
+	// own MaxPassDuration; this scheduler timeout may impose a tighter bound.
 	PartitionRunTimeout time.Duration
 	// MaxPassesPerTask bounds all attempts and continuations for one task in a
 	// Run call. A successful HasMore result at the limit is deferred.

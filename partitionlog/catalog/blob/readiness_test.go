@@ -3,7 +3,6 @@ package blob
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -45,6 +44,8 @@ func TestBlobCatalogMatchesMemoryCatalogAcrossLongHistory(t *testing.T) {
 		if i == 90 {
 			oldMemory := memoryWriter
 			oldBlob := blobWriter
+			oldMemoryHead := oldMemory.Head()
+			oldBlobHead := oldBlob.Head()
 			writerID = [16]byte{2}
 			memoryWriter, err = memory.OpenWriter(ctx, 7, writerID)
 			if err != nil {
@@ -54,11 +55,19 @@ func TestBlobCatalogMatchesMemoryCatalogAcrossLongHistory(t *testing.T) {
 			if err != nil {
 				t.Fatalf("blob replacement OpenWriter() error = %v", err)
 			}
-			if _, err := oldMemory.AppendSegment(ctx, last); !errors.Is(err, pcatalog.ErrStaleWriter) {
-				t.Fatalf("memory stale retry error = %v, want %v", err, pcatalog.ErrStaleWriter)
+			memoryRetry, err := oldMemory.AppendSegment(ctx, last)
+			if err != nil {
+				t.Fatalf("memory committed retry error = %v", err)
 			}
-			if _, err := oldBlob.AppendSegment(ctx, last); !errors.Is(err, pcatalog.ErrStaleWriter) {
-				t.Fatalf("blob stale retry error = %v, want %v", err, pcatalog.ErrStaleWriter)
+			if memoryRetry != oldMemoryHead {
+				t.Fatalf("memory committed retry = %+v, want %+v", memoryRetry, oldMemoryHead)
+			}
+			blobRetry, err := oldBlob.AppendSegment(ctx, last)
+			if err != nil {
+				t.Fatalf("blob committed retry error = %v", err)
+			}
+			if blobRetry != oldBlobHead {
+				t.Fatalf("blob committed retry = %+v, want %+v", blobRetry, oldBlobHead)
 			}
 		}
 

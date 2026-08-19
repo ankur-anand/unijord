@@ -209,7 +209,7 @@ func (c *MemoryCatalog) applyPendingRetention(ctx context.Context, partition uin
 	return RetentionApplyResult{Head: state, Request: request, Applied: true}, data.headVersion, nil
 }
 
-func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, writerID [16]byte, writerEpoch uint64, expectedNextLSN uint64, segment pmeta.SegmentRef) (pmeta.PartitionHead, uint64, error) {
+func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, writerID [16]byte, writerEpoch uint64, expectedNextLSN uint64, segment pmeta.SegmentRef, knownRetry bool) (pmeta.PartitionHead, uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return pmeta.PartitionHead{}, 0, err
 	}
@@ -225,6 +225,15 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	data := c.getOrCreateLocked(partition)
 	state := data.state
 
+	if segment.WriterTag != writerID {
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: segment writer_tag does not match writer_id", ErrInvalidRequest)
+	}
+	if retry, ok := idempotentRetry(data, expectedNextLSN, segment); ok {
+		return retry, data.headVersion, nil
+	}
+	if knownRetry && segment.BaseLSN < state.OldestLSN {
+		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: partition=%d: segment base_lsn=%d is below retained oldest_lsn=%d", ErrCommitIndeterminate, partition, segment.BaseLSN, state.OldestLSN)
+	}
 	if state.WriterEpoch == 0 {
 		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer fence not acquired", ErrStaleWriter)
 	}
@@ -236,12 +245,6 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	}
 	if writerID != data.writerID {
 		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: writer_id mismatch", ErrStaleWriter)
-	}
-	if segment.WriterTag != writerID {
-		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: segment writer_tag does not match writer_id", ErrInvalidRequest)
-	}
-	if retry, ok := idempotentRetry(data, expectedNextLSN, segment); ok {
-		return retry, data.headVersion, nil
 	}
 	if expectedNextLSN != state.NextLSN {
 		return pmeta.PartitionHead{}, 0, fmt.Errorf("%w: expected_next_lsn=%d current=%d", ErrConflict, expectedNextLSN, state.NextLSN)
@@ -341,14 +344,14 @@ func firstSegmentAtOrAfter(segments []pmeta.SegmentRef, lsn uint64) int {
 }
 
 func idempotentRetry(data *memoryPartition, expectedNextLSN uint64, segment pmeta.SegmentRef) (pmeta.PartitionHead, bool) {
-	last, ok := data.state.Last()
-	if !ok {
+	if expectedNextLSN != segment.BaseLSN {
 		return pmeta.PartitionHead{}, false
 	}
-	if expectedNextLSN != last.BaseLSN {
+	i := firstSegmentAtOrAfter(data.segments, segment.BaseLSN)
+	if i == len(data.segments) {
 		return pmeta.PartitionHead{}, false
 	}
-	if last != segment {
+	if data.segments[i] != segment {
 		return pmeta.PartitionHead{}, false
 	}
 	return data.state, true
@@ -387,15 +390,25 @@ func (s *memoryWriterSession) AppendSegment(ctx context.Context, segment pmeta.S
 	partition := s.partition
 	writerID := s.writerID
 	writerEpoch := s.writerEpoch
+	retryState := s.state
+	knownRetry := false
 	expectedNextLSN := s.state.NextLSN
-	if last, ok := s.state.Last(); ok && segment.BaseLSN == last.BaseLSN {
+	if last, ok := s.state.Last(); ok && segment == last {
+		expectedNextLSN = segment.BaseLSN
+		knownRetry = true
+	} else if last, ok := s.state.Last(); ok && segment.BaseLSN == last.BaseLSN {
 		expectedNextLSN = segment.BaseLSN
 	}
 	s.mu.Unlock()
 
-	state, headVersion, err := s.cat.appendSegment(ctx, partition, writerID, writerEpoch, expectedNextLSN, segment)
+	state, headVersion, err := s.cat.appendSegment(ctx, partition, writerID, writerEpoch, expectedNextLSN, segment, knownRetry)
 	if err != nil {
 		return pmeta.PartitionHead{}, err
+	}
+	if knownRetry {
+		// Reconciliation confirms this session's old commit; it does not rebase
+		// the stale writer onto the current partition head.
+		state = retryState
 	}
 
 	s.mu.Lock()

@@ -72,7 +72,7 @@ func (r *Reclaimer) acquire(ctx context.Context, partition uint32, now time.Time
 			return stateFile{}, "", fmt.Errorf("%w: owner=%s until=%d", ErrLeaseHeld, state.OwnerID, state.LeaseUntilMS)
 		}
 		state.OwnerID = owner
-		state.LeaseUntilMS = now.Add(r.opts.LeaseDuration).UnixMilli()
+		state.LeaseUntilMS = now.Add(r.leaseDuration()).UnixMilli()
 		state.UpdatedMS = now.UnixMilli()
 		body, err := marshalState(state, r.opts.StreamID, partition)
 		if err != nil {
@@ -107,7 +107,7 @@ func (r *Reclaimer) loadState(ctx context.Context, path string, partition uint32
 func (r *Reclaimer) saveState(ctx context.Context, state *stateFile, token *string) error {
 	now := r.now().UTC()
 	state.OwnerID = hex.EncodeToString(r.opts.OwnerID[:])
-	state.LeaseUntilMS = now.Add(r.opts.LeaseDuration).UnixMilli()
+	state.LeaseUntilMS = now.Add(r.leaseDuration()).UnixMilli()
 	state.UpdatedMS = now.UnixMilli()
 	body, err := marshalState(*state, r.opts.StreamID, state.Partition)
 	if err != nil {
@@ -122,6 +122,20 @@ func (r *Reclaimer) saveState(ctx context.Context, state *stateFile, token *stri
 		return fmt.Errorf("%w: state CAS conflict", ErrLeaseLost)
 	}
 	*token = obj.Token
+	return nil
+}
+
+func (r *Reclaimer) checkLease(state *stateFile) error {
+	if state == nil {
+		return fmt.Errorf("%w: missing state", ErrLeaseLost)
+	}
+	owner := hex.EncodeToString(r.opts.OwnerID[:])
+	if state.OwnerID != owner {
+		return fmt.Errorf("%w: owner=%s current=%s", ErrLeaseLost, owner, state.OwnerID)
+	}
+	if state.LeaseUntilMS <= r.now().UTC().UnixMilli() {
+		return fmt.Errorf("%w: lease expired at=%d", ErrLeaseLost, state.LeaseUntilMS)
+	}
 	return nil
 }
 

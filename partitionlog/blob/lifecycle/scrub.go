@@ -22,6 +22,9 @@ func (r *Reclaimer) ScrubPartition(ctx context.Context, partition uint32) (resul
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	parentCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, r.opts.MaxPassDuration)
+	defer cancel()
 	now := r.now().UTC()
 	state, token, err := r.acquire(ctx, partition, now)
 	if err != nil {
@@ -33,7 +36,9 @@ func (r *Reclaimer) ScrubPartition(ctx context.Context, partition uint32) (resul
 		if r.opts.DryRun {
 			releaseState = &acquiredState
 		}
-		releaseErr := r.release(ctx, releaseState, &token)
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(parentCtx), r.leaseReleaseTimeout())
+		defer releaseCancel()
+		releaseErr := r.release(releaseCtx, releaseState, &token)
 		if err == nil && releaseErr != nil {
 			err = releaseErr
 		}
@@ -167,7 +172,7 @@ func (r *Reclaimer) processPageQuarantine(ctx context.Context, state *stateFile,
 		scheduledBytes += candidate.SizeBytes
 	}
 	if len(deleteCandidates) > 0 {
-		if _, err := r.executeDeletes(ctx, deleteCandidates, budget); err != nil {
+		if _, err := r.executeDeletes(ctx, state, deleteCandidates, budget); err != nil {
 			return err
 		}
 		changed = true
@@ -250,7 +255,7 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 			lastProcessed = object.Key
 		}
 		if len(candidates) > 0 {
-			checkpoint, err := r.executeDeletes(ctx, candidates, budget)
+			checkpoint, err := r.executeDeletes(ctx, state, candidates, budget)
 			if err != nil {
 				_ = r.checkpointOrphanSegment(ctx, state, token, checkpoint)
 				return false, err

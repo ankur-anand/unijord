@@ -442,6 +442,10 @@ reconciles an ambiguous result as follows:
 6. if committed state cannot be read or the target range was already removed,
    return `ErrCommitIndeterminate`.
 
+Exact commit reconciliation runs before stale-writer rejection. A newer fence
+prevents an old writer from publishing new data; it does not invalidate
+read-only proof that the old writer's exact segment was already committed.
+
 The writer adapter maps `ErrCommitIndeterminate` to
 `writer.ErrPublishIndeterminate`. Higher layers must not manufacture a new
 segment for that LSN range. They should stop the writer and reconcile catalog

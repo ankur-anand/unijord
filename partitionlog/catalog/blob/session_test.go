@@ -265,7 +265,69 @@ func TestBlobCatalogWriterIdempotentLastAppend(t *testing.T) {
 	}
 }
 
-func TestBlobCatalogIdempotentRetryChecksCurrentHead(t *testing.T) {
+func TestBlobCatalogReconcilesCommittedRetryAfterMultipleFenceMoves(t *testing.T) {
+	t.Parallel()
+
+	cat, err := NewMemory(Options{LeafSegmentLimit: 2, IndexRefLimit: 2})
+	if err != nil {
+		t.Fatalf("NewMemory() error = %v", err)
+	}
+	first, err := cat.OpenWriter(context.Background(), 1, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter(first) error = %v", err)
+	}
+	firstSegment := testSegmentRef(1, 0, 9, first.Epoch())
+	firstState, err := first.AppendSegment(context.Background(), firstSegment)
+	if err != nil {
+		t.Fatalf("AppendSegment(first segment) error = %v", err)
+	}
+
+	second, err := cat.OpenWriter(context.Background(), 1, [16]byte{2})
+	if err != nil {
+		t.Fatalf("OpenWriter(second) error = %v", err)
+	}
+	retry, err := first.AppendSegment(context.Background(), firstSegment)
+	if err != nil {
+		t.Fatalf("AppendSegment(retry after fence move) error = %v", err)
+	}
+	if retry != firstState {
+		t.Fatalf("retry state = %+v, want original commit state %+v", retry, firstState)
+	}
+	secondSegment := testSegmentRef(1, 10, 19, second.Epoch())
+	if _, err := second.AppendSegment(context.Background(), secondSegment); err != nil {
+		t.Fatalf("AppendSegment(second segment) error = %v", err)
+	}
+
+	third, err := cat.OpenWriter(context.Background(), 1, [16]byte{3})
+	if err != nil {
+		t.Fatalf("OpenWriter(third) error = %v", err)
+	}
+	thirdSegment := testSegmentRef(1, 20, 29, third.Epoch())
+	if _, err := third.AppendSegment(context.Background(), thirdSegment); err != nil {
+		t.Fatalf("AppendSegment(third segment) error = %v", err)
+	}
+
+	retry, err = first.AppendSegment(context.Background(), firstSegment)
+	if err != nil {
+		t.Fatalf("AppendSegment(historical retry) error = %v", err)
+	}
+	if retry != firstState {
+		t.Fatalf("historical retry state = %+v, want original commit state %+v", retry, firstState)
+	}
+
+	if _, err := first.AppendSegment(context.Background(), testSegmentRef(1, 10, 19, first.Epoch())); !errors.Is(err, pcatalog.ErrStaleWriter) {
+		t.Fatalf("AppendSegment(new stale segment) error = %v, want %v", err, pcatalog.ErrStaleWriter)
+	}
+	current, err := cat.LoadPartition(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadPartition() error = %v", err)
+	}
+	if current.WriterEpoch != third.Epoch() || current.NextLSN != 30 || current.SegmentCount != 3 {
+		t.Fatalf("current state = %+v", current)
+	}
+}
+
+func TestBlobCatalogCommittedRetryIsIndeterminateAfterRetention(t *testing.T) {
 	t.Parallel()
 
 	cat, err := NewMemory(Options{LeafSegmentLimit: 2, IndexRefLimit: 2})
@@ -278,21 +340,35 @@ func TestBlobCatalogIdempotentRetryChecksCurrentHead(t *testing.T) {
 	}
 	firstSegment := testSegmentRef(1, 0, 9, first.Epoch())
 	if _, err := first.AppendSegment(context.Background(), firstSegment); err != nil {
-		t.Fatalf("AppendSegment(first segment) error = %v", err)
+		t.Fatalf("AppendSegment(first) error = %v", err)
 	}
 
 	second, err := cat.OpenWriter(context.Background(), 1, [16]byte{2})
 	if err != nil {
 		t.Fatalf("OpenWriter(second) error = %v", err)
 	}
-	if _, err := first.AppendSegment(context.Background(), firstSegment); !errors.Is(err, pcatalog.ErrStaleWriter) {
-		t.Fatalf("stale retry after fence move error = %v, want %v", err, pcatalog.ErrStaleWriter)
-	}
 	if _, err := second.AppendSegment(context.Background(), testSegmentRef(1, 10, 19, second.Epoch())); err != nil {
-		t.Fatalf("AppendSegment(second segment) error = %v", err)
+		t.Fatalf("AppendSegment(second) error = %v", err)
+	}
+	request := pcatalog.RetentionRequest{
+		Version:       pcatalog.RetentionRequestVersion,
+		PolicyVersion: 1,
+		BeforeLSN:     10,
+		CreatedUnixMS: 1,
+	}
+	if _, err := cat.RequestRetention(context.Background(), 1, request); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+	retentionWriter := second.(pcatalog.RetentionWriterSession)
+	result, err := retentionWriter.ApplyPendingRetention(context.Background())
+	if err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
+	if result.Head.OldestLSN != 10 {
+		t.Fatalf("oldest_lsn = %d, want 10", result.Head.OldestLSN)
 	}
 
-	if _, err := first.AppendSegment(context.Background(), firstSegment); !errors.Is(err, pcatalog.ErrStaleWriter) {
-		t.Fatalf("stale retry error = %v, want %v", err, pcatalog.ErrStaleWriter)
+	if _, err := first.AppendSegment(context.Background(), firstSegment); !errors.Is(err, pcatalog.ErrCommitIndeterminate) {
+		t.Fatalf("AppendSegment(retained retry) error = %v, want %v", err, pcatalog.ErrCommitIndeterminate)
 	}
 }
