@@ -293,12 +293,43 @@ func TestWriterRejectsExhaustedLSNRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if err := w.Append(context.Background(), Record{LSN: ^uint64(0), TimestampMS: 100, Value: []byte("a")}); err != nil {
-		t.Fatalf("Append(max lsn) error = %v", err)
+	if err := w.Append(context.Background(), Record{LSN: segformat.ReservedLSN, TimestampMS: 100, Value: []byte("a")}); !errors.Is(err, ErrLSNExhausted) {
+		t.Fatalf("Append(reserved lsn) error = %v, want %v", err, ErrLSNExhausted)
 	}
-	if err := w.Append(context.Background(), Record{LSN: 0, TimestampMS: 101, Value: []byte("b")}); !errors.Is(err, ErrNonContiguousLSN) {
-		t.Fatalf("Append(after max lsn) error = %v, want %v", err, ErrNonContiguousLSN)
+
+	w, err = New(testWriterOptions(segformat.CodecNone), NewMemorySink("memory://lsn-exhausted-after-highest"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
+	if err := w.Append(context.Background(), Record{LSN: segformat.MaxRecordLSN, TimestampMS: 100, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append(max record lsn) error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: segformat.ReservedLSN, TimestampMS: 101, Value: []byte("b")}); !errors.Is(err, ErrLSNExhausted) {
+		t.Fatalf("Append(after max record lsn) error = %v, want %v", err, ErrLSNExhausted)
+	}
+}
+
+func TestWriterClosesSegmentEndingAtMaxRecordLSN(t *testing.T) {
+	t.Parallel()
+
+	sink := NewMemorySink("memory://max-lsn")
+	w, err := New(testWriterOptions(segformat.CodecNone), sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	want := Record{LSN: segformat.MaxRecordLSN, TimestampMS: 100, Value: []byte("last")}
+	if err := w.Append(context.Background(), want); err != nil {
+		t.Fatalf("Append(max record lsn) error = %v", err)
+	}
+	result, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if result.Trailer.LastLSN != segformat.MaxRecordLSN {
+		t.Fatalf("trailer last LSN = %d, want %d", result.Trailer.LastLSN, segformat.MaxRecordLSN)
+	}
+	decoded := decodeSegmentForTest(t, sink.Bytes())
+	assertRecordsEqual(t, decoded.records, []Record{want})
 }
 
 func TestBlockBufferRejectsTimestampRegression(t *testing.T) {

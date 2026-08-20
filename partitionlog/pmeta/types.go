@@ -2,7 +2,6 @@ package pmeta
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
 )
@@ -75,7 +74,7 @@ func (s SegmentRef) Validate() error {
 	if s.BaseLSN > s.LastLSN {
 		return fmt.Errorf("pmeta: base_lsn=%d last_lsn=%d", s.BaseLSN, s.LastLSN)
 	}
-	if s.LastLSN == math.MaxUint64 {
+	if s.LastLSN > segformat.MaxRecordLSN {
 		return fmt.Errorf("pmeta: lsn exhausted: last_lsn=%d", s.LastLSN)
 	}
 	wantRecords := s.LastLSN - s.BaseLSN + 1

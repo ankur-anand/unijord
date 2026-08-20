@@ -316,11 +316,14 @@ func (w *Writer) validateRecord(r Record) error {
 	if _, err := segformat.RecordSize(r.Headers, r.Value); err != nil {
 		return err
 	}
+	if r.LSN > segformat.MaxRecordLSN {
+		return fmt.Errorf("%w: lsn=%d is reserved", ErrLSNExhausted, r.LSN)
+	}
 	if !w.hasRecords {
 		return nil
 	}
-	if w.nextLSN == 0 {
-		return fmt.Errorf("%w: lsn range exhausted", ErrNonContiguousLSN)
+	if w.nextLSN > segformat.MaxRecordLSN {
+		return fmt.Errorf("%w: next_lsn=%d", ErrLSNExhausted, w.nextLSN)
 	}
 	if w.recordCount == segformat.MaxRecordCount {
 		return fmt.Errorf("%w: record_count=%d max=%d", segformat.ErrInvalidSegment, w.recordCount, segformat.MaxRecordCount)

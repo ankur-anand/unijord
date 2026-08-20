@@ -24,6 +24,11 @@ const (
 	DefaultHashAlgorithm    = HashXXH64
 )
 
+const (
+	MaxRecordLSN uint64 = ^uint64(0) - 1
+	ReservedLSN  uint64 = ^uint64(0)
+)
+
 var (
 	fileMagic    = [4]byte{'P', 'L', 'S', 'G'}
 	blockMagic   = [4]byte{'P', 'L', 'B', 'K'}

@@ -6,6 +6,9 @@ func (p FilePreamble) Validate() error {
 	if p.Flags != 0 {
 		return fmt.Errorf("%w: file preamble flags must be zero", ErrInvalidSegment)
 	}
+	if p.BaseLSN > MaxRecordLSN {
+		return fmt.Errorf("%w: base_lsn=%d is reserved", ErrInvalidSegment, p.BaseLSN)
+	}
 	if err := p.Codec.Validate(); err != nil {
 		return err
 	}
@@ -108,6 +111,9 @@ func (t Trailer) Validate(objectSize uint64) error {
 	}
 	if t.LastLSN < t.BaseLSN {
 		return fmt.Errorf("%w: last_lsn < base_lsn", ErrInvalidSegment)
+	}
+	if t.LastLSN > MaxRecordLSN {
+		return fmt.Errorf("%w: last_lsn=%d is reserved", ErrInvalidSegment, t.LastLSN)
 	}
 	if t.RecordCount == 0 {
 		return fmt.Errorf("%w: record_count must be positive", ErrInvalidSegment)
@@ -240,21 +246,22 @@ func ValidatePreambleTrailer(p FilePreamble, t Trailer) error {
 }
 
 func nextLSN(base uint64, count uint32) (uint64, error) {
-	if count == 0 {
-		return 0, fmt.Errorf("%w: record_count must be positive", ErrInvalidSegment)
-	}
-	if base > ^uint64(0)-uint64(count) {
-		return 0, fmt.Errorf("%w: lsn range overflows uint64", ErrInvalidSegment)
-	}
-	return base + uint64(count), nil
-}
-
-func lastLSN(base uint64, count uint32) (uint64, error) {
-	next, err := nextLSN(base, count)
+	last, err := lastLSN(base, count)
 	if err != nil {
 		return 0, err
 	}
-	return next - 1, nil
+	return last + 1, nil
+}
+
+func lastLSN(base uint64, count uint32) (uint64, error) {
+	if count == 0 {
+		return 0, fmt.Errorf("%w: record_count must be positive", ErrInvalidSegment)
+	}
+	delta := uint64(count - 1)
+	if base > MaxRecordLSN-delta {
+		return 0, fmt.Errorf("%w: lsn range exceeds max record lsn=%d", ErrInvalidSegment, MaxRecordLSN)
+	}
+	return base + delta, nil
 }
 
 func nextBlockOffset(offset uint64, storedSize uint32) (uint64, error) {

@@ -54,6 +54,8 @@ Regions are contiguous. There is no padding between regions.
 | `MAX_RECORD_VALUE_LEN` | `4 MiB` |
 | `MAX_BLOCK_COUNT` | `67,108,862` |
 | `MAX_RECORD_COUNT` | `2^32 - 1` |
+| `MAX_RECORD_LSN` | `2^64 - 2` |
+| `RESERVED_LSN` | `2^64 - 1` |
 
 `MAX_BLOCK_COUNT` is the largest block count whose index region fits in a
 `u32 block_index_length`.
@@ -115,6 +117,8 @@ Size: 64 bytes.
 
 The file preamble contains only fields known before block bytes are emitted.
 Final counts and sizes are in the trailer.
+
+`base_lsn` must be at most `MAX_RECORD_LSN`.
 
 ## Block Preamble
 
@@ -179,6 +183,10 @@ LSN is implicit:
 lsn = block.base_lsn + record_index
 ```
 
+Record LSN `2^64 - 1` is reserved as the exhausted `next_lsn` sentinel and
+must never be assigned to a record. Therefore every block and segment must
+have `base_lsn <= last_lsn <= MAX_RECORD_LSN`.
+
 Rules:
 
 - decoded bytes consumed must equal `raw_size`
@@ -191,6 +199,7 @@ Rules:
 - `value_len <= MAX_RECORD_VALUE_LEN`
 - timestamps are non-decreasing within a block
 - timestamps are inside `[min_timestamp_ms, max_timestamp_ms]`
+- every derived record LSN is at most `MAX_RECORD_LSN`
 
 ## Index Preamble
 
@@ -268,6 +277,7 @@ Size: 192 bytes. The trailer is the last region in the object.
 Trailer rules:
 
 - `last_lsn >= base_lsn`
+- `last_lsn <= MAX_RECORD_LSN`
 - `record_count == last_lsn - base_lsn + 1`
 - `block_count > 0`
 - `record_count > 0`

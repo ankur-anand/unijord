@@ -131,7 +131,36 @@ func TestSealRejectsInvalidMeta(t *testing.T) {
 	}
 }
 
-func TestSealRejectsLSNOverflow(t *testing.T) {
+func TestSealAllowsMaxRecordLSN(t *testing.T) {
+	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{
+		{TimestampMS: 100, Value: []byte("a")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	sealed, err := Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
+		BaseLSN:        segformat.MaxRecordLSN,
+		RecordCount:    1,
+		MinTimestampMS: 100,
+		MaxTimestampMS: 100,
+	})
+	if err != nil {
+		t.Fatalf("Seal() error = %v", err)
+	}
+	opened, err := Open(segformat.CodecNone, segformat.HashXXH64, sealed.Preamble, sealed.Stored)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	records, err := segformat.DecodeRawBlock(opened, sealed.Preamble)
+	if err != nil {
+		t.Fatalf("DecodeRawBlock() error = %v", err)
+	}
+	if got := records[len(records)-1].LSN; got != segformat.MaxRecordLSN {
+		t.Fatalf("last LSN = %d, want %d", got, segformat.MaxRecordLSN)
+	}
+}
+
+func TestSealRejectsReservedLSN(t *testing.T) {
 	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{
 		{TimestampMS: 100, Value: []byte("a")},
 		{TimestampMS: 101, Value: []byte("b")},
@@ -140,10 +169,30 @@ func TestSealRejectsLSNOverflow(t *testing.T) {
 		t.Fatalf("EncodeRawBlock() error = %v", err)
 	}
 	_, err = Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
-		BaseLSN:        ^uint64(0) - 1,
+		BaseLSN:        segformat.MaxRecordLSN,
 		RecordCount:    2,
 		MinTimestampMS: 100,
 		MaxTimestampMS: 101,
+	})
+	if !errors.Is(err, segformat.ErrInvalidSegment) {
+		t.Fatalf("Seal() error = %v, want %v", err, segformat.ErrInvalidSegment)
+	}
+}
+
+func TestSealRejectsLSNOverflow(t *testing.T) {
+	raw, err := segformat.EncodeRawBlock([]segformat.RawRecord{
+		{TimestampMS: 100, Value: []byte("a")},
+		{TimestampMS: 101, Value: []byte("b")},
+		{TimestampMS: 102, Value: []byte("c")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	_, err = Seal(segformat.CodecNone, segformat.HashXXH64, raw, Meta{
+		BaseLSN:        segformat.MaxRecordLSN,
+		RecordCount:    3,
+		MinTimestampMS: 100,
+		MaxTimestampMS: 102,
 	})
 	if !errors.Is(err, segformat.ErrInvalidSegment) {
 		t.Fatalf("Seal() error = %v, want %v", err, segformat.ErrInvalidSegment)

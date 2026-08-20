@@ -61,6 +61,18 @@ func TestFilePreambleMarshalParse(t *testing.T) {
 	}
 }
 
+func TestFilePreambleRejectsReservedLSN(t *testing.T) {
+	preamble := FilePreamble{
+		Codec:        CodecNone,
+		HashAlgo:     HashXXH64,
+		RecordFormat: RecordFormatV1,
+		BaseLSN:      ReservedLSN,
+	}
+	if err := preamble.Validate(); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("FilePreamble.Validate() error = %v, want %v", err, ErrInvalidSegment)
+	}
+}
+
 func TestTrailerValidateRejectsRangeOverflow(t *testing.T) {
 	t.Parallel()
 
@@ -507,10 +519,10 @@ func TestDecodeRawBlockRejectsImpossibleRecordCountBeforeAllocation(t *testing.T
 
 func TestBlockPreambleRejectsLSNOverflow(t *testing.T) {
 	block := BlockPreamble{
-		StoredSize:     RecordHeaderSize,
-		RawSize:        RecordHeaderSize,
-		RecordCount:    2,
-		BaseLSN:        ^uint64(0) - 1,
+		StoredSize:     3 * RecordHeaderSize,
+		RawSize:        3 * RecordHeaderSize,
+		RecordCount:    3,
+		BaseLSN:        MaxRecordLSN,
 		MinTimestampMS: 10,
 		MaxTimestampMS: 10,
 		BlockHash:      1,
@@ -520,7 +532,71 @@ func TestBlockPreambleRejectsLSNOverflow(t *testing.T) {
 	}
 }
 
+func TestBlockPreambleRejectsReservedLSN(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		base  uint64
+		count uint32
+	}{
+		{name: "reserved_base", base: ReservedLSN, count: 1},
+		{name: "range_ending_at_reserved", base: MaxRecordLSN, count: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block := BlockPreamble{
+				StoredSize:     tc.count * RecordHeaderSize,
+				RawSize:        tc.count * RecordHeaderSize,
+				RecordCount:    tc.count,
+				BaseLSN:        tc.base,
+				MinTimestampMS: 10,
+				MaxTimestampMS: 10,
+				BlockHash:      1,
+			}
+			if err := block.Validate(); !errors.Is(err, ErrInvalidSegment) {
+				t.Fatalf("BlockPreamble.Validate() error = %v, want %v", err, ErrInvalidSegment)
+			}
+		})
+	}
+}
+
+func TestBlockPreambleAllowsMaxRecordLSN(t *testing.T) {
+	block := BlockPreamble{
+		StoredSize:     RecordHeaderSize,
+		RawSize:        RecordHeaderSize,
+		RecordCount:    1,
+		BaseLSN:        MaxRecordLSN,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	if err := block.Validate(); err != nil {
+		t.Fatalf("BlockPreamble.Validate() error = %v", err)
+	}
+}
+
 func TestDecodeRawBlockRejectsLSNOverflow(t *testing.T) {
+	raw, err := EncodeRawBlock([]RawRecord{
+		{TimestampMS: 10, Value: []byte("a")},
+		{TimestampMS: 10, Value: []byte("b")},
+		{TimestampMS: 10, Value: []byte("c")},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRawBlock() error = %v", err)
+	}
+	block := BlockPreamble{
+		StoredSize:     uint32(len(raw)),
+		RawSize:        uint32(len(raw)),
+		RecordCount:    3,
+		BaseLSN:        MaxRecordLSN,
+		MinTimestampMS: 10,
+		MaxTimestampMS: 10,
+		BlockHash:      1,
+	}
+	if _, err := DecodeRawBlock(raw, block); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("DecodeRawBlock() error = %v, want %v", err, ErrInvalidSegment)
+	}
+}
+
+func TestDecodeRawBlockRejectsReservedLSN(t *testing.T) {
 	raw, err := EncodeRawBlock([]RawRecord{
 		{TimestampMS: 10, Value: []byte("a")},
 		{TimestampMS: 10, Value: []byte("b")},
@@ -532,7 +608,7 @@ func TestDecodeRawBlockRejectsLSNOverflow(t *testing.T) {
 		StoredSize:     uint32(len(raw)),
 		RawSize:        uint32(len(raw)),
 		RecordCount:    2,
-		BaseLSN:        ^uint64(0) - 1,
+		BaseLSN:        MaxRecordLSN,
 		MinTimestampMS: 10,
 		MaxTimestampMS: 10,
 		BlockHash:      1,
@@ -545,10 +621,10 @@ func TestDecodeRawBlockRejectsLSNOverflow(t *testing.T) {
 func TestBlockIndexEntryRejectsLSNOverflow(t *testing.T) {
 	entry := BlockIndexEntry{
 		BlockOffset:    FilePreambleSize,
-		StoredSize:     RecordHeaderSize,
-		RawSize:        RecordHeaderSize,
-		RecordCount:    2,
-		BaseLSN:        ^uint64(0) - 1,
+		StoredSize:     3 * RecordHeaderSize,
+		RawSize:        3 * RecordHeaderSize,
+		RecordCount:    3,
+		BaseLSN:        MaxRecordLSN,
 		MinTimestampMS: 10,
 		MaxTimestampMS: 10,
 		BlockHash:      1,
@@ -622,14 +698,14 @@ func TestValidateIndexRejectsTrailerIndexOffsetMismatch(t *testing.T) {
 	}
 }
 
-func TestValidateIndexRejectsLSNOverflow(t *testing.T) {
+func TestTrailerAndIndexRejectReservedLSN(t *testing.T) {
 	entries := []BlockIndexEntry{
 		{
 			BlockOffset:    FilePreambleSize,
 			StoredSize:     100,
 			RawSize:        120,
 			RecordCount:    2,
-			BaseLSN:        ^uint64(0) - 1,
+			BaseLSN:        MaxRecordLSN,
 			MinTimestampMS: 100,
 			MaxTimestampMS: 100,
 			BlockHash:      1,
@@ -639,8 +715,8 @@ func TestValidateIndexRejectsLSNOverflow(t *testing.T) {
 		Codec:            CodecNone,
 		HashAlgo:         HashXXH64,
 		RecordFormat:     RecordFormatV1,
-		BaseLSN:          ^uint64(0) - 1,
-		LastLSN:          ^uint64(0),
+		BaseLSN:          MaxRecordLSN,
+		LastLSN:          ReservedLSN,
 		MinTimestampMS:   100,
 		MaxTimestampMS:   100,
 		RecordCount:      2,
@@ -649,8 +725,46 @@ func TestValidateIndexRejectsLSNOverflow(t *testing.T) {
 		BlockIndexLength: IndexPreambleSize + BlockIndexEntrySize,
 	}
 	trailer.TotalSize = trailer.BlockIndexOffset + uint64(trailer.BlockIndexLength) + TrailerSize
+	if err := trailer.Validate(trailer.TotalSize); !errors.Is(err, ErrInvalidSegment) {
+		t.Fatalf("Trailer.Validate() error = %v, want %v", err, ErrInvalidSegment)
+	}
 	if err := ValidateIndex(entries, trailer); !errors.Is(err, ErrInvalidSegment) {
 		t.Fatalf("ValidateIndex() error = %v, want %v", err, ErrInvalidSegment)
+	}
+}
+
+func TestValidateIndexAllowsMaxRecordLSN(t *testing.T) {
+	entries := []BlockIndexEntry{
+		{
+			BlockOffset:    FilePreambleSize,
+			StoredSize:     100,
+			RawSize:        120,
+			RecordCount:    1,
+			BaseLSN:        MaxRecordLSN,
+			MinTimestampMS: 100,
+			MaxTimestampMS: 100,
+			BlockHash:      1,
+		},
+	}
+	trailer := Trailer{
+		Codec:            CodecNone,
+		HashAlgo:         HashXXH64,
+		RecordFormat:     RecordFormatV1,
+		BaseLSN:          MaxRecordLSN,
+		LastLSN:          MaxRecordLSN,
+		MinTimestampMS:   100,
+		MaxTimestampMS:   100,
+		RecordCount:      1,
+		BlockCount:       1,
+		BlockIndexOffset: FilePreambleSize + BlockPreambleSize + 100,
+		BlockIndexLength: IndexPreambleSize + BlockIndexEntrySize,
+	}
+	trailer.TotalSize = trailer.BlockIndexOffset + uint64(trailer.BlockIndexLength) + TrailerSize
+	if err := trailer.Validate(trailer.TotalSize); err != nil {
+		t.Fatalf("Trailer.Validate() error = %v", err)
+	}
+	if err := ValidateIndex(entries, trailer); err != nil {
+		t.Fatalf("ValidateIndex() error = %v", err)
 	}
 }
 
