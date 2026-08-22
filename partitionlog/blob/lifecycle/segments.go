@@ -65,11 +65,12 @@ func (r *Reclaimer) reclaimSegments(ctx context.Context, state *stateFile, token
 			}
 			checkpoint, err := r.executeDeletes(ctx, state, candidates, budget)
 			if err != nil {
+				var checkpointErr error
 				if checkpoint != state.SegmentAfterKey {
 					state.SegmentAfterKey = checkpoint
-					_ = r.saveState(ctx, state, token)
+					checkpointErr = r.saveState(ctx, state, token)
 				}
-				return err
+				return joinDeleteCheckpointError(err, checkpointErr)
 			}
 		}
 		if reachedFloor {

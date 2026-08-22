@@ -75,11 +75,12 @@ func (r *Reclaimer) reclaimPages(ctx context.Context, state *stateFile, token *s
 			}
 			checkpoint, err := r.executeDeletes(ctx, state, candidates, budget)
 			if err != nil {
+				var checkpointErr error
 				if checkpoint != state.PageAfterKey {
 					state.PageAfterKey = checkpoint
-					_ = r.saveState(ctx, state, token)
+					checkpointErr = r.saveState(ctx, state, token)
 				}
-				return err
+				return joinDeleteCheckpointError(err, checkpointErr)
 			}
 		}
 		if budgetStopped {

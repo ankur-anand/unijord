@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	catalogblob "github.com/ankur-anand/unijord/partitionlog/catalog/blob"
@@ -29,8 +30,8 @@ func (r *Reclaimer) RunPartition(ctx context.Context, partition uint32) (result 
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(parentCtx), r.leaseReleaseTimeout())
 		defer releaseCancel()
 		releaseErr := r.release(releaseCtx, releaseState, &token)
-		if err == nil && releaseErr != nil {
-			err = releaseErr
+		if releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("lifecycle: release lease: %w", releaseErr))
 		}
 	}()
 

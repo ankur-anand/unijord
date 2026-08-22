@@ -1,6 +1,7 @@
 package reader
 
 import (
+	"sync"
 	"time"
 
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
@@ -21,9 +22,11 @@ type Options struct {
 	MaxRecordsPerBatch      int
 	MaxCachedPartitionHeads int
 	SegmentOptions          segreader.Options
-	SegmentCache            *SegmentReaderCache
-	Refresh                 RefreshPolicy
-	Observer                Observer
+	// SegmentCache is cleared by Reader.Close. Do not share it with a Reader
+	// whose lifecycle is independent.
+	SegmentCache *SegmentReaderCache
+	Refresh      RefreshPolicy
+	Observer     Observer
 }
 
 type Reader struct {
@@ -31,6 +34,10 @@ type Reader struct {
 	store   SegmentStore
 	opts    Options
 	refresh *refreshCoordinator
+
+	lifecycleMu sync.Mutex
+	closed      bool
+	watches     map[*Watch]struct{}
 }
 
 type Record struct {

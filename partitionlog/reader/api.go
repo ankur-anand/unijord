@@ -38,6 +38,11 @@ func (r *Reader) Watch(ctx context.Context, opts WatchOptions) (*Watch, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	r.lifecycleMu.Lock()
+	if r.closed {
+		r.lifecycleMu.Unlock()
+		return nil, ErrClosed
+	}
 	wctx, cancel := context.WithCancel(ctx)
 	w := &Watch{
 		reader:            r,
@@ -48,10 +53,13 @@ func (r *Reader) Watch(ctx context.Context, opts WatchOptions) (*Watch, error) {
 	}
 	for _, partition := range opts.Partitions {
 		if err := w.addPartitionLocked(partition); err != nil {
+			r.lifecycleMu.Unlock()
 			cancel()
 			return nil, err
 		}
 	}
+	r.watches[w] = struct{}{}
+	r.lifecycleMu.Unlock()
 	go func() {
 		<-wctx.Done()
 		_ = w.Close()
@@ -79,6 +87,9 @@ func (p *PartitionReader) Head(ctx context.Context) (head pmeta.PartitionHead, e
 			Err:       err,
 		})
 	}()
+	if err := p.reader.checkOpen(); err != nil {
+		return pmeta.PartitionHead{}, err
+	}
 	head, err = p.reader.refresh.head(ctx, p.partition)
 	return head, err
 }
@@ -100,6 +111,9 @@ func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (result Rea
 			Err:       err,
 		})
 	}()
+	if err := p.reader.checkOpen(); err != nil {
+		return ReadResult{}, err
+	}
 	head, err := p.reader.refresh.headForRead(ctx, p.partition, req.StartLSN, req.Freshness)
 	if err != nil {
 		return ReadResult{}, err
@@ -114,6 +128,9 @@ func (p *PartitionReader) Read(ctx context.Context, req ReadRequest) (result Rea
 
 // Cursor returns a passive replay cursor over this partition.
 func (p *PartitionReader) Cursor(opts CursorOptions) (*Cursor, error) {
+	if err := p.reader.checkOpen(); err != nil {
+		return nil, err
+	}
 	if opts.Limit < 0 {
 		return nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, opts.Limit)
 	}
@@ -127,6 +144,9 @@ func (p *PartitionReader) Cursor(opts CursorOptions) (*Cursor, error) {
 // ResumeCursor restores a cursor after validating its stream identity,
 // partition, retention floor, and tail against the latest catalog head.
 func (p *PartitionReader) ResumeCursor(ctx context.Context, checkpoint CursorCheckpoint, opts CursorResumeOptions) (*Cursor, error) {
+	if err := p.reader.checkOpen(); err != nil {
+		return nil, err
+	}
 	if opts.Limit < 0 {
 		return nil, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, opts.Limit)
 	}
@@ -343,6 +363,7 @@ func (w *Watch) Close() error {
 	w.partitions = nil
 	w.mu.Unlock()
 	w.cancel()
+	w.reader.unregisterWatch(w)
 	for _, partition := range partitions {
 		w.reader.refresh.unwatchPartition(partition)
 	}
@@ -482,6 +503,7 @@ type refreshCoordinator struct {
 	nextGeneration          uint64
 	loopCancel              context.CancelFunc
 	loopDone                chan struct{}
+	closed                  bool
 }
 
 type partitionState struct {
@@ -571,6 +593,9 @@ func (c *refreshCoordinator) headForRead(ctx context.Context, partition uint32, 
 }
 
 func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
+	if c.isClosed() {
+		return pmeta.PartitionHead{}, ErrClosed
+	}
 	if err := ctx.Err(); err != nil {
 		return pmeta.PartitionHead{}, err
 	}
@@ -619,6 +644,9 @@ func (c *refreshCoordinator) observe(event MetricEvent) {
 func (c *refreshCoordinator) watchPartition(partition uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
 	state, ok := c.watches[partition]
 	if ok {
 		state.refs++
@@ -732,6 +760,9 @@ func (c *refreshCoordinator) snapshotWatched() []uint32 {
 func (c *refreshCoordinator) snapshot(partition uint32) (pmeta.PartitionHead, uint64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return pmeta.PartitionHead{}, 0, false
+	}
 	if state, ok := c.watches[partition]; ok && state.hasHead {
 		return state.head, state.generation, true
 	}
@@ -746,6 +777,9 @@ func (c *refreshCoordinator) snapshot(partition uint32) (pmeta.PartitionHead, ui
 func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<-chan struct{}, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil, false
+	}
 	state, ok := c.watches[partition]
 	if !ok || state.generation != generation {
 		return nil, false
@@ -756,6 +790,9 @@ func (c *refreshCoordinator) waitChannel(partition uint32, generation uint64) (<
 func (c *refreshCoordinator) updateHead(partition uint32, head pmeta.PartitionHead) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return 0
+	}
 	if state, ok := c.watches[partition]; ok {
 		if state.hasHead && state.head == head {
 			return state.generation
@@ -803,4 +840,37 @@ func (c *refreshCoordinator) nextGenerationLocked() uint64 {
 		c.nextGeneration++
 	}
 	return c.nextGeneration
+}
+
+func (c *refreshCoordinator) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func (c *refreshCoordinator) close() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	cancel := c.loopCancel
+	done := c.loopDone
+	c.loopCancel = nil
+	c.loopDone = nil
+	for partition, state := range c.watches {
+		delete(c.watches, partition)
+		close(state.changed)
+	}
+	clear(c.cachedHeads)
+	c.cachedHeadLRU.Init()
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
 }

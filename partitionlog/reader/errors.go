@@ -6,6 +6,7 @@ import (
 )
 
 var (
+	ErrClosed             = errors.New("partitionlog/reader: reader closed")
 	ErrInvalidOptions     = errors.New("partitionlog/reader: invalid options")
 	ErrInvalidRequest     = errors.New("partitionlog/reader: invalid request")
 	ErrLSNExpired         = errors.New("partitionlog/reader: lsn expired")

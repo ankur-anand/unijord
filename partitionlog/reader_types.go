@@ -65,6 +65,7 @@ const (
 )
 
 var (
+	ErrReaderClosed        = plreader.ErrClosed
 	ErrWatchClosed         = plreader.ErrWatchClosed
 	ErrPartitionNotWatched = plreader.ErrPartitionNotWatched
 	ErrCheckpointInvalid   = plreader.ErrCheckpointInvalid

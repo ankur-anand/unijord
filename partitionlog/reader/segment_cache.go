@@ -107,6 +107,18 @@ func (c *SegmentReaderCache) MaxEntries() int {
 	return c.maxEntries
 }
 
+// Clear releases all completed cache entries. In-flight opens are not
+// interrupted and their callers retain ownership of their results.
+func (c *SegmentReaderCache) Clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.ll.Init()
+	clear(c.items)
+	c.mu.Unlock()
+}
+
 func (c *SegmentReaderCache) get(key segmentCacheKey) (*segreader.Reader, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

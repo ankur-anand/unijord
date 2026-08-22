@@ -98,6 +98,14 @@ func (s *Store) ReadAt(ctx context.Context, uri string, off uint64, n uint64) ([
 	return append([]byte(nil), body...), nil
 }
 
+// ClearRangeCache releases cached ranges when the configured cache supports
+// it. In-flight reads are not interrupted.
+func (s *Store) ClearRangeCache() {
+	if cache, ok := s.cache.(interface{ Clear() }); ok {
+		cache.Clear()
+	}
+}
+
 func (s *Store) begin(key Key) (*inflightRead, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,6 +214,18 @@ func (c *LRU) MaxBytes() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.maxBytes
+}
+
+// Clear releases every cached range while retaining the configured budget.
+func (c *LRU) Clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.ll.Init()
+	clear(c.items)
+	c.bytes = 0
+	c.mu.Unlock()
 }
 
 func (c *LRU) evict() {

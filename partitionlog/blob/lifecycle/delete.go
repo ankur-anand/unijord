@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -132,6 +133,13 @@ func repeatedDeleteError(count int, err error) []error {
 		errs[i] = err
 	}
 	return errs
+}
+
+func joinDeleteCheckpointError(deleteErr, checkpointErr error) error {
+	if checkpointErr == nil {
+		return deleteErr
+	}
+	return errors.Join(deleteErr, fmt.Errorf("lifecycle: save delete checkpoint: %w", checkpointErr))
 }
 
 func (b *runBudget) canScheduleDelete(size, scheduledCount, scheduledBytes uint64) bool {

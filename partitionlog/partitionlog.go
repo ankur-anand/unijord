@@ -2,7 +2,9 @@ package partitionlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
@@ -18,7 +20,12 @@ type Options struct {
 	Store   Store
 	Reader  ReaderOptions
 	Metrics Metrics
+	// Clock supplies timestamps for durable metadata created through this Log.
+	// It must be safe for concurrent use. Nil uses the system UTC clock.
+	Clock func() time.Time
 }
+
+var ErrLogClosed = errors.New("partitionlog: log closed")
 
 // ReaderOptions configures the default reader created by Open.
 type ReaderOptions struct {
@@ -53,9 +60,12 @@ type WriterOptions struct {
 
 // Log is one partitionlog client over one configured store.
 type Log struct {
+	mu      sync.Mutex
 	store   Store
 	metrics Metrics
 	reader  *Reader
+	clock   func() time.Time
+	closed  bool
 }
 
 // Open validates a complete Store and prepares the default reader runtime.
@@ -67,17 +77,69 @@ func Open(opts Options) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Log{store: opts.Store, metrics: opts.Metrics, reader: r}, nil
+	clock := opts.Clock
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
+	return &Log{store: opts.Store, metrics: opts.Metrics, reader: r, clock: clock}, nil
+}
+
+// Close releases the default Reader runtime. Callers must stop using the Log
+// before Close. Readers returned by NewReader are independently owned and must
+// be closed by their callers. Close does not close the configured Store or
+// writers that were already opened.
+func (l *Log) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil
+	}
+	l.closed = true
+	r := l.reader
+	l.mu.Unlock()
+	if r == nil {
+		return nil
+	}
+	return r.Close()
+}
+
+func (l *Log) checkOpen() error {
+	if l == nil {
+		return fmt.Errorf("partitionlog: nil log")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return ErrLogClosed
+	}
+	if l.store == nil {
+		return fmt.Errorf("partitionlog: nil log")
+	}
+	return nil
 }
 
 // Reader returns the default reader runtime for this log.
 func (l *Log) Reader() *Reader {
+	if l == nil {
+		return nil
+	}
 	return l.reader
 }
 
 // NewReader creates an additional reader runtime over the same store.
 func (l *Log) NewReader(opts ReaderOptions) (*Reader, error) {
-	if l == nil || l.store == nil {
+	if l == nil {
+		return nil, fmt.Errorf("partitionlog: nil log")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, ErrLogClosed
+	}
+	if l.store == nil {
 		return nil, fmt.Errorf("partitionlog: nil log")
 	}
 	return newReader(l.store, opts, l.metrics)
@@ -86,8 +148,8 @@ func (l *Log) NewReader(opts ReaderOptions) (*Reader, error) {
 // InitializePartition creates an empty partition at a chosen next LSN only
 // when no durable catalog state exists yet.
 func (l *Log) InitializePartition(ctx context.Context, opts InitializePartition) (InitializePartitionResult, error) {
-	if l == nil || l.store == nil {
-		return InitializePartitionResult{}, fmt.Errorf("partitionlog: nil log")
+	if err := l.checkOpen(); err != nil {
+		return InitializePartitionResult{}, err
 	}
 	manager := l.store.WriterManager()
 	if manager == nil {
@@ -103,8 +165,8 @@ func (l *Log) InitializePartition(ctx context.Context, opts InitializePartition)
 // RequestRetention stores a monotonic retention request. It does not change
 // reader visibility until the active partition writer applies it.
 func (l *Log) RequestRetention(ctx context.Context, request RetentionRequest) (RetentionRequestState, error) {
-	if l == nil || l.store == nil {
-		return RetentionRequestState{}, fmt.Errorf("partitionlog: nil log")
+	if err := l.checkOpen(); err != nil {
+		return RetentionRequestState{}, err
 	}
 	manager := l.store.RetentionManager()
 	if manager == nil {
@@ -114,7 +176,7 @@ func (l *Log) RequestRetention(ctx context.Context, request RetentionRequest) (R
 		Version:       catalog.RetentionRequestVersion,
 		PolicyVersion: request.PolicyVersion,
 		BeforeLSN:     request.BeforeLSN,
-		CreatedUnixMS: time.Now().UTC().UnixMilli(),
+		CreatedUnixMS: l.clock().UTC().UnixMilli(),
 	})
 	if err != nil {
 		return RetentionRequestState{}, err
@@ -129,8 +191,8 @@ func (l *Log) RequestRetention(ctx context.Context, request RetentionRequest) (R
 
 // OpenWriter opens one fenced writer for one partition.
 func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, error) {
-	if l == nil || l.store == nil {
-		return nil, fmt.Errorf("partitionlog: nil log")
+	if err := l.checkOpen(); err != nil {
+		return nil, err
 	}
 	if err := validateWriterOptions(opts); err != nil {
 		return nil, err
@@ -145,6 +207,7 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 		return nil, fmt.Errorf("partitionlog: nil sink factory")
 	}
 	wopts := lowwriter.DefaultOptions(sinkFactory)
+	wopts.Clock = l.clock
 	if opts.Batch.MaxRecords > 0 {
 		wopts.Roll.MaxSegmentRecords = opts.Batch.MaxRecords
 	}

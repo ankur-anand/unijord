@@ -28,7 +28,65 @@ func New(cat catalog.Reader, store SegmentStore, opts Options) (*Reader, error) 
 		store:   store,
 		opts:    normalized,
 		refresh: newRefreshCoordinator(cat, normalized.Refresh, normalized.MaxCachedPartitionHeads, normalized.Observer),
+		watches: make(map[*Watch]struct{}),
 	}, nil
+}
+
+// Close stops background refresh, closes every Watch, and releases cache
+// entries owned by this Reader. Callers must stop starting foreground reads
+// before Close. It is safe to call more than once.
+func (r *Reader) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.lifecycleMu.Lock()
+	if r.closed {
+		r.lifecycleMu.Unlock()
+		return nil
+	}
+	r.closed = true
+	watches := make([]*Watch, 0, len(r.watches))
+	for watch := range r.watches {
+		watches = append(watches, watch)
+	}
+	r.watches = nil
+	r.lifecycleMu.Unlock()
+
+	var closeErrs []error
+	for _, watch := range watches {
+		if err := watch.Close(); err != nil {
+			closeErrs = append(closeErrs, err)
+		}
+	}
+	r.refresh.close()
+	if r.opts.SegmentCache != nil {
+		r.opts.SegmentCache.Clear()
+	}
+	if cache, ok := r.store.(interface{ ClearRangeCache() }); ok {
+		cache.ClearRangeCache()
+	}
+	return errors.Join(closeErrs...)
+}
+
+func (r *Reader) checkOpen() error {
+	if r == nil {
+		return fmt.Errorf("%w: nil reader", ErrInvalidOptions)
+	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
+	return nil
+}
+
+func (r *Reader) unregisterWatch(watch *Watch) {
+	if r == nil {
+		return
+	}
+	r.lifecycleMu.Lock()
+	delete(r.watches, watch)
+	r.lifecycleMu.Unlock()
 }
 
 func (r *Reader) Head(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
@@ -64,6 +122,9 @@ func (r *Reader) Fetch(ctx context.Context, req FetchRequest) (result FetchResul
 			Err:       err,
 		})
 	}()
+	if err := r.checkOpen(); err != nil {
+		return FetchResult{}, err
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 		return FetchResult{}, err
@@ -147,6 +208,9 @@ func (r *Reader) Consume(ctx context.Context, req ConsumeRequest) (ConsumeResult
 			Err:       err,
 		})
 	}()
+	if err = r.checkOpen(); err != nil {
+		return ConsumeResult{}, err
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 		return ConsumeResult{}, err
@@ -191,6 +255,9 @@ func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimest
 			Err:       err,
 		})
 	}()
+	if err := r.checkOpen(); err != nil {
+		return ConsumeResult{}, err
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 		return ConsumeResult{}, err

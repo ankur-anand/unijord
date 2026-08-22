@@ -14,6 +14,51 @@ import (
 )
 
 var errProviderThrottled = errors.New("provider throttled")
+var errDeleteFailed = errors.New("delete failed")
+var errCatalogLoadFailed = errors.New("catalog load failed")
+
+func TestDeleteFailureJoinsCheckpointLeaseLoss(t *testing.T) {
+	memory := blobmemory.New()
+	backend := &deleteAndCheckpointFailureBackend{Store: memory}
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Now().UTC())
+	catalog := &fakeCatalog{snapshot: maintenanceSnapshot(100, 200, 2, 0)}
+	putSegments(t, memory, layout, 0)
+	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{})
+
+	state := activeTestLease(r)
+	state.SafeFloorLSN = 100
+	token := "state-token"
+	result := Result{}
+	budget := runBudget{opts: r.opts, result: &result}
+	err := r.reclaimSegments(context.Background(), state, &token, &budget)
+	if !errors.Is(err, errDeleteFailed) {
+		t.Fatalf("reclaimSegments() error = %v, want %v", err, errDeleteFailed)
+	}
+	if !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("reclaimSegments() error = %v, checkpoint %v was discarded", err, ErrLeaseLost)
+	}
+}
+
+func TestPrimaryFailureJoinsLeaseReleaseLoss(t *testing.T) {
+	backend := &releaseConflictBackend{Store: blobmemory.New()}
+	r := newTestReclaimer(
+		t,
+		backend,
+		&loadFailureCatalog{},
+		segmentsink.NewLayout("root"),
+		newFakeClock(time.Now().UTC()),
+		Options{},
+	)
+
+	_, err := r.RunPartition(context.Background(), 7)
+	if !errors.Is(err, errCatalogLoadFailed) {
+		t.Fatalf("RunPartition() error = %v, want %v", err, errCatalogLoadFailed)
+	}
+	if !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("RunPartition() error = %v, release %v was discarded", err, ErrLeaseLost)
+	}
+}
 
 func TestReclaimerRetriesAfterListThrottleWithoutSkippingObjects(t *testing.T) {
 	t.Parallel()
@@ -144,6 +189,39 @@ type transientFailureBackend struct {
 	casCalls     int
 	failCASAt    int
 	blockDeletes bool
+}
+
+type deleteAndCheckpointFailureBackend struct {
+	*blobmemory.Store
+}
+
+func (b *deleteAndCheckpointFailureBackend) Delete(context.Context, string) error {
+	return errDeleteFailed
+}
+
+func (b *deleteAndCheckpointFailureBackend) CompareAndSwap(context.Context, string, string, []byte) (blobstore.Object, bool, error) {
+	return blobstore.Object{}, false, nil
+}
+
+type releaseConflictBackend struct {
+	*blobmemory.Store
+	casCalls int
+}
+
+func (b *releaseConflictBackend) CompareAndSwap(ctx context.Context, key, expectedToken string, body []byte) (blobstore.Object, bool, error) {
+	b.casCalls++
+	if b.casCalls > 1 {
+		return blobstore.Object{}, false, nil
+	}
+	return b.Store.CompareAndSwap(ctx, key, expectedToken, body)
+}
+
+type loadFailureCatalog struct {
+	Catalog
+}
+
+func (c *loadFailureCatalog) LoadMaintenanceSnapshot(context.Context, uint32) (catalogblob.MaintenanceSnapshot, error) {
+	return catalogblob.MaintenanceSnapshot{}, errCatalogLoadFailed
 }
 
 func (b *transientFailureBackend) failNextList() {

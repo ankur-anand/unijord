@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -39,8 +40,8 @@ func (r *Reclaimer) ScrubPartition(ctx context.Context, partition uint32) (resul
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(parentCtx), r.leaseReleaseTimeout())
 		defer releaseCancel()
 		releaseErr := r.release(releaseCtx, releaseState, &token)
-		if err == nil && releaseErr != nil {
-			err = releaseErr
+		if releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("lifecycle: release lease: %w", releaseErr))
 		}
 	}()
 
@@ -257,8 +258,8 @@ func (r *Reclaimer) scrubSegmentOrphans(ctx context.Context, snapshot catalogblo
 		if len(candidates) > 0 {
 			checkpoint, err := r.executeDeletes(ctx, state, candidates, budget)
 			if err != nil {
-				_ = r.checkpointOrphanSegment(ctx, state, token, checkpoint)
-				return false, err
+				checkpointErr := r.checkpointOrphanSegment(ctx, state, token, checkpoint)
+				return false, joinDeleteCheckpointError(err, checkpointErr)
 			}
 		}
 		if budgetStopped {
