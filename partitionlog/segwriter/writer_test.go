@@ -536,6 +536,36 @@ func TestWriterCloseContextCancelsLazyBegin(t *testing.T) {
 	}
 }
 
+func TestWriterCloseContextCancelsBeginStartedBeforeClose(t *testing.T) {
+	t.Parallel()
+
+	sink := newBlockingBeginSink()
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 32
+	opts.SealParallelism = 1
+	opts.BlockBufferCount = 3
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 1, TimestampMS: 1, Value: bytes.Repeat([]byte("a"), 24)}); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Append(context.Background(), Record{LSN: 2, TimestampMS: 2, Value: bytes.Repeat([]byte("b"), 24)}); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+	sink.waitStarted(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	cleanup := time.AfterFunc(time.Second, sink.unblock)
+	defer cleanup.Stop()
+
+	if _, err := w.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+}
+
 func TestWriterFailureCleanupUsesBestEffortAbortContext(t *testing.T) {
 	t.Parallel()
 
@@ -753,20 +783,29 @@ type blockingSink struct {
 }
 
 type blockingBeginSink struct {
-	started chan struct{}
-	once    sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 }
 
 func newBlockingBeginSink() *blockingBeginSink {
-	return &blockingBeginSink{started: make(chan struct{})}
+	return &blockingBeginSink{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
 }
 
 func (s *blockingBeginSink) Begin(ctx context.Context, _ Plan) (Txn, error) {
 	s.once.Do(func() {
 		close(s.started)
 	})
-	<-ctx.Done()
-	return nil, ctx.Err()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.release:
+		return nil, errors.New("blocking begin released")
+	}
 }
 
 func (s *blockingBeginSink) waitStarted(t *testing.T) {
@@ -776,6 +815,12 @@ func (s *blockingBeginSink) waitStarted(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for sink.Begin")
 	}
+}
+
+func (s *blockingBeginSink) unblock() {
+	s.releaseOnce.Do(func() {
+		close(s.release)
+	})
 }
 
 func newBlockingSink() *blockingSink {

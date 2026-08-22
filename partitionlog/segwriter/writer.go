@@ -243,6 +243,10 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 	if !w.hasRecords {
 		return Result{}, w.abortWith(ctx, ErrEmptySegment, true)
 	}
+	stopCloseCancellation := context.AfterFunc(ctx, func() {
+		w.setFirstErr(ctx.Err())
+	})
+	defer stopCloseCancellation()
 	restoreEmitCtx := w.setEmitContext(ctx)
 	defer restoreEmitCtx()
 	if w.active != nil && w.active.Len() > 0 {

@@ -137,6 +137,8 @@ Once a part has been accepted by the upload queue, the upload worker uses the
 packer lifetime context created by `newPacker`. Canceling a single write call
 does not cancel an already-enqueued upload. `Abort` cancels the packer lifetime
 context and calls `Txn.Abort` before waiting for upload workers to exit.
+Cancellation of the packer lifetime context also interrupts writes and
+completion waits, even when their individual caller contexts remain active.
 
 ## Backpressure
 

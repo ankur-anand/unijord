@@ -221,7 +221,8 @@ upload workers runs on the writer lifetime context until `Close` or `Abort`.
 
 `Close(ctx)` uses `ctx` for final enqueue, lazy `sink.Begin`, index/trailer
 writes, final flush, and `Txn.Complete`. Already-enqueued upload workers use the
-writer lifetime context; call `Abort` to cancel them.
+writer lifetime context. Canceling `ctx` makes the writer terminal, cancels that
+lifetime context, drains the pipeline, and aborts the sink transaction.
 
 `Abort(ctx)` cancels the writer lifetime context, drains internal workers, and
 aborts the sink transaction if one exists.

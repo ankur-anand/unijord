@@ -315,18 +315,27 @@ func (p *packer) pollResults() error {
 		case result := <-p.results:
 			p.recordResult(result)
 		default:
+			if p.firstErr == nil && p.ctx != nil && p.ctx.Err() != nil {
+				p.setFirstErr(p.ctx.Err())
+			}
 			return p.firstErr
 		}
 	}
 }
 
 func (p *packer) collectUntilDone(ctx context.Context) error {
+	var lifetimeDone <-chan struct{}
+	if p.ctx != nil {
+		lifetimeDone = p.ctx.Done()
+	}
 	for p.collected < p.enqueued && p.firstErr == nil {
 		select {
 		case result := <-p.results:
 			p.recordResult(result)
 		case <-ctx.Done():
 			p.setFirstErr(ctx.Err())
+		case <-lifetimeDone:
+			p.setFirstErr(p.ctx.Err())
 		}
 	}
 	if p.firstErr != nil {

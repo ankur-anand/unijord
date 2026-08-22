@@ -348,6 +348,33 @@ func TestPackerCompleteCancellationAbortsBeforeWaitingForWorker(t *testing.T) {
 	}
 }
 
+func TestPackerCollectUntilDoneHonorsLifetimeCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &packer{
+		ctx:      ctx,
+		cancel:   cancel,
+		results:  make(chan uploadResult),
+		enqueued: 1,
+	}
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.collectUntilDone(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("collectUntilDone() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("collectUntilDone ignored packer lifetime cancellation")
+	}
+}
+
 func TestPackerAbortDoesNotStartQueuedUploads(t *testing.T) {
 	t.Parallel()
 
