@@ -98,7 +98,7 @@ func DefaultOptions(factory SinkFactory) Options {
 			MaxInflightSegments: DefaultMaxInflightSegments,
 			MaxInflightBytes:    DefaultMaxInflightBytes,
 		},
-		Clock:   func() time.Time { return time.Now().UTC() },
+		Clock:   SystemClock{},
 		UUIDGen: randomUUID,
 	}
 }
@@ -206,7 +206,7 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 	w.active.records++
 	w.active.rawBytes += recordSize
 	if firstRecordInSegment {
-		w.active.firstRecordAt = time.Now()
+		w.active.firstRecordAt = w.opts.Clock.Now()
 		w.signalAgeLocked()
 	}
 
@@ -619,12 +619,12 @@ func (w *Writer) ageLoop() {
 			return
 		}
 
-		wait := time.Until(w.active.firstRecordAt.Add(w.opts.Roll.MaxSegmentAge))
+		wait := w.active.firstRecordAt.Add(w.opts.Roll.MaxSegmentAge).Sub(w.opts.Clock.Now())
 		if wait > 0 {
 			w.mu.Unlock()
-			timer := time.NewTimer(wait)
+			timer := w.opts.Clock.NewTimer(wait)
 			select {
-			case <-timer.C:
+			case <-timer.C():
 			case <-w.ageWake:
 				stopTimer(timer)
 			case <-w.workerCtx.Done():
@@ -720,7 +720,7 @@ func (w *Writer) startSegmentLocked(ctx context.Context) error {
 	if err != nil {
 		return wrapSegmentStart(err)
 	}
-	createdUnixMS := w.opts.Clock().UnixMilli()
+	createdUnixMS := w.opts.Clock.Now().UnixMilli()
 	info := SegmentInfo{
 		StreamID:      w.streamID,
 		Partition:     w.partition,
@@ -758,7 +758,7 @@ func (w *Writer) shouldCutBeforeLocked(nextRecordSize uint64) bool {
 	if w.opts.Roll.MaxSegmentRecords > 0 && w.active.records >= w.opts.Roll.MaxSegmentRecords {
 		return true
 	}
-	if w.opts.Roll.MaxSegmentAge > 0 && !w.active.firstRecordAt.IsZero() && time.Since(w.active.firstRecordAt) >= w.opts.Roll.MaxSegmentAge {
+	if w.opts.Roll.MaxSegmentAge > 0 && !w.active.firstRecordAt.IsZero() && w.opts.Clock.Now().Sub(w.active.firstRecordAt) >= w.opts.Roll.MaxSegmentAge {
 		return true
 	}
 	if w.opts.Roll.MaxSegmentRawBytes > 0 {
@@ -780,7 +780,7 @@ func (w *Writer) shouldCutAfterLocked() bool {
 	if w.opts.Roll.MaxSegmentRawBytes > 0 && w.active.rawBytes >= w.opts.Roll.MaxSegmentRawBytes {
 		return true
 	}
-	if w.opts.Roll.MaxSegmentAge > 0 && w.active.records > 0 && !w.active.firstRecordAt.IsZero() && time.Since(w.active.firstRecordAt) >= w.opts.Roll.MaxSegmentAge {
+	if w.opts.Roll.MaxSegmentAge > 0 && w.active.records > 0 && !w.active.firstRecordAt.IsZero() && w.opts.Clock.Now().Sub(w.active.firstRecordAt) >= w.opts.Roll.MaxSegmentAge {
 		return true
 	}
 	return false
@@ -1222,7 +1222,7 @@ func normalizeOptions(opts Options, snapshot Snapshot) (Options, error) {
 		return Options{}, fmt.Errorf("%w: negative max inflight segments %d", ErrInvalidOptions, opts.Queue.MaxInflightSegments)
 	}
 	if opts.Clock == nil {
-		opts.Clock = func() time.Time { return time.Now().UTC() }
+		opts.Clock = SystemClock{}
 	}
 	if opts.UUIDGen == nil {
 		opts.UUIDGen = randomUUID
@@ -1261,10 +1261,10 @@ func satMul(a, b uint64) uint64 {
 	return a * b
 }
 
-func stopTimer(timer *time.Timer) {
+func stopTimer(timer Timer) {
 	if !timer.Stop() {
 		select {
-		case <-timer.C:
+		case <-timer.C():
 		default:
 		}
 	}

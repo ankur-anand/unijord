@@ -152,6 +152,9 @@ func (b *runBudget) canScheduleDelete(size, scheduledCount, scheduledBytes uint6
 		return false
 	}
 	usedBytes := b.result.DeletedBytes + scheduledBytes
+	// Always permit the first candidate so an object larger than the byte
+	// budget cannot permanently wedge reclamation. Once one delete is pending
+	// or complete, the budget is enforced normally.
 	if b.result.DeletedObjects+int(scheduledCount) > 0 {
 		if usedBytes >= b.opts.MaxDeleteBytes || size > b.opts.MaxDeleteBytes-usedBytes {
 			b.exhausted = true

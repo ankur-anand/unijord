@@ -76,7 +76,7 @@ type Options struct {
     SegmentOptions segwriter.Options
     Roll           RollPolicy
     Queue          QueuePolicy
-    Clock          func() time.Time
+    Clock          Clock
     UUIDGen        UUIDGen
 }
 
@@ -247,6 +247,10 @@ Segments can be cut by:
 record is accepted into a segment, not when an empty segment object is created.
 The writer owns a small background age loop that cuts a non-empty active
 segment after the configured age even if no more appends arrive.
+
+The configured `Clock` supplies both `Now` and `NewTimer`, so segment metadata,
+age comparisons, and age-loop wakeups share one timeline. A manually advanced
+test clock must advance its timers as well as its current time.
 
 Age cuts still obey in-flight backpressure. If the writer cannot reserve
 in-flight capacity, the age loop waits until capacity is available or the

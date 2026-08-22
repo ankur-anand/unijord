@@ -72,6 +72,26 @@ func TestExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint(t *test
 	}
 }
 
+func TestRunBudgetAllowsOneOversizedDeleteForProgress(t *testing.T) {
+	t.Parallel()
+
+	result := Result{}
+	budget := runBudget{
+		opts: Options{
+			MaxDeletesPerRun: 10,
+			MaxDeleteBytes:   100,
+		},
+		result: &result,
+	}
+
+	if !budget.canScheduleDelete(250, 0, 0) {
+		t.Fatal("first oversized delete was rejected; GC cannot make progress")
+	}
+	if budget.canScheduleDelete(1, 1, 250) {
+		t.Fatal("second delete was accepted after the byte budget was exceeded")
+	}
+}
+
 func TestNewRejectsInvalidDeleteExecutionOptions(t *testing.T) {
 	t.Parallel()
 

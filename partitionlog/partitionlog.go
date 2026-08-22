@@ -16,13 +16,18 @@ import (
 	lowwriter "github.com/ankur-anand/unijord/partitionlog/writer"
 )
 
+type Clock = lowwriter.Clock
+type ClockFunc = lowwriter.ClockFunc
+type Timer = lowwriter.Timer
+type SystemClock = lowwriter.SystemClock
+
 type Options struct {
 	Store   Store
 	Reader  ReaderOptions
 	Metrics Metrics
-	// Clock supplies timestamps for durable metadata created through this Log.
-	// It must be safe for concurrent use. Nil uses the system UTC clock.
-	Clock func() time.Time
+	// Clock supplies timestamps and timers for durable metadata and age-based
+	// writer rolling. Nil uses the system clock.
+	Clock Clock
 }
 
 var ErrLogClosed = errors.New("partitionlog: log closed")
@@ -64,7 +69,7 @@ type Log struct {
 	store   Store
 	metrics Metrics
 	reader  *Reader
-	clock   func() time.Time
+	clock   lowwriter.Clock
 	closed  bool
 }
 
@@ -79,7 +84,7 @@ func Open(opts Options) (*Log, error) {
 	}
 	clock := opts.Clock
 	if clock == nil {
-		clock = func() time.Time { return time.Now().UTC() }
+		clock = lowwriter.SystemClock{}
 	}
 	return &Log{store: opts.Store, metrics: opts.Metrics, reader: r, clock: clock}, nil
 }
@@ -176,7 +181,7 @@ func (l *Log) RequestRetention(ctx context.Context, request RetentionRequest) (R
 		Version:       catalog.RetentionRequestVersion,
 		PolicyVersion: request.PolicyVersion,
 		BeforeLSN:     request.BeforeLSN,
-		CreatedUnixMS: l.clock().UTC().UnixMilli(),
+		CreatedUnixMS: l.clock.Now().UTC().UnixMilli(),
 	})
 	if err != nil {
 		return RetentionRequestState{}, err

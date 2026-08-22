@@ -111,7 +111,7 @@ func benchWriterOptions(factory SinkFactory, codec segformat.Codec) Options {
 			},
 		},
 	}
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(7)
 	opts.SegmentOptions.Codec = codec

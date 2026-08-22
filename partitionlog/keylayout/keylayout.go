@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -101,6 +102,19 @@ func CanonicalStreamID(streamID string) (string, error) {
 	}
 	if len(streamID) > MaxStreamIDBytes {
 		return "", fmt.Errorf("%w: length=%d max=%d", ErrInvalidStreamID, len(streamID), MaxStreamIDBytes)
+	}
+	for _, r := range streamID {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("%w: contains control character %q", ErrInvalidStreamID, r)
+		}
+	}
+	for _, segment := range strings.Split(streamID, "/") {
+		switch segment {
+		case "":
+			return "", fmt.Errorf("%w: contains an empty path segment", ErrInvalidStreamID)
+		case ".", "..":
+			return "", fmt.Errorf("%w: contains reserved path segment %q", ErrInvalidStreamID, segment)
+		}
 	}
 	return streamID, nil
 }

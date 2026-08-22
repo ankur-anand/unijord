@@ -82,7 +82,10 @@ type Options struct {
 	ListPageSize     int
 	MaxObjectsPerRun int
 	MaxDeletesPerRun int
-	MaxDeleteBytes   uint64
+	// MaxDeleteBytes is a soft per-run limit. To guarantee forward progress,
+	// the first candidate may exceed it; overshoot is bounded to that one
+	// object's size. Subsequent candidates are rejected once the limit is met.
+	MaxDeleteBytes uint64
 	// DeleteBatchSize bounds one provider batch or parallel delete wave.
 	DeleteBatchSize int
 	// DeleteConcurrency bounds individual Delete calls when the backend does

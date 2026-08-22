@@ -316,6 +316,7 @@ func TestWriterCutsByMaxSegmentAge(t *testing.T) {
 	cat := catalog.NewMemoryCatalog()
 	factory := newMemorySegmentFactory()
 	opts := testOptions(t, cat, factory)
+	opts.Clock = SystemClock{}
 	opts.Roll.MaxSegmentAge = 10 * time.Millisecond
 	w, err := New(opts)
 	if err != nil {
@@ -339,15 +340,49 @@ func TestWriterCutsByMaxSegmentAge(t *testing.T) {
 	}
 }
 
+func TestWriterMaxSegmentAgeUsesConfiguredClock(t *testing.T) {
+	cat := catalog.NewMemoryCatalog()
+	opts := testOptions(t, cat, newMemorySegmentFactory())
+	now := time.Unix(1_800_000_000, 0)
+	clock := newManualClock(now)
+	opts.Clock = clock
+	opts.Roll.MaxSegmentAge = time.Hour
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = w.Abort(context.Background()) })
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	w.mu.Lock()
+	firstRecordAt := w.active.firstRecordAt
+	w.mu.Unlock()
+	if !firstRecordAt.Equal(now) {
+		t.Fatalf("firstRecordAt = %s, want configured clock time %s", firstRecordAt, now)
+	}
+
+	select {
+	case <-clock.timerCreated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("age loop did not create a timer through the configured clock")
+	}
+	clock.Advance(time.Hour)
+	waitForWriterSegmentCount(t, w, 1)
+}
+
 func TestWriterMaxSegmentAgeStartsAtFirstRecordAfterPolicyCut(t *testing.T) {
 	cat := catalog.NewMemoryCatalog()
 	opts := testOptions(t, cat, newMemorySegmentFactory())
+	opts.Clock = SystemClock{}
 	opts.Roll.MaxSegmentRecords = 2
 	opts.Roll.MaxSegmentAge = time.Hour
 	w, err := New(opts)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	t.Cleanup(func() { _ = w.Abort(context.Background()) })
 
 	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
 		t.Fatalf("Append(first) error = %v", err)
@@ -606,7 +641,7 @@ func TestWriterCutFailureBeforeSwapKeepsWriterUsable(t *testing.T) {
 			return next, nil
 		},
 	}
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	opts.Roll.MaxSegmentRecords = 0
@@ -662,7 +697,7 @@ func TestWriterRollAfterStartFailureRetriesBeforeNextAppend(t *testing.T) {
 			return next, nil
 		},
 	}, factory)
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	opts.Roll.MaxSegmentRecords = 1
@@ -730,7 +765,7 @@ func TestWriterAppendStartFailureIsRetryable(t *testing.T) {
 			return next, nil
 		},
 	}, factory)
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	w, err := New(opts)
@@ -929,7 +964,7 @@ func TestWriterRejectsStaleEpochOnOpen(t *testing.T) {
 			},
 		},
 	}
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	if _, err := New(opts); !errors.Is(err, ErrStaleWriter) {
@@ -945,7 +980,7 @@ func testOptions(t *testing.T, cat interface {
 
 	opts := DefaultOptions(factory)
 	opts.Session = newCatalogSession(t, cat, 1, [16]byte{9, 8, 7})
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	opts.Queue = QueuePolicy{
@@ -975,7 +1010,7 @@ func waitForWriterSegmentCount(t *testing.T, w *Writer, want uint64) {
 func testSessionOptions(session Session, factory SinkFactory) Options {
 	opts := DefaultOptions(factory)
 	opts.Session = session
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = newSequenceUUIDGen()
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	opts.Roll.MaxSegmentRecords = 1

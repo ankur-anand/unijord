@@ -66,7 +66,17 @@ func TestCanonicalStreamID(t *testing.T) {
 		t.Fatalf("CanonicalStreamID() = %q", got)
 	}
 
-	for _, streamID := range []string{"", "///", string([]byte{0xff}), strings.Repeat("x", MaxStreamIDBytes+1)} {
+	for _, streamID := range []string{
+		"",
+		"///",
+		string([]byte{0xff}),
+		strings.Repeat("x", MaxStreamIDBytes+1),
+		"hosts//events",
+		"hosts/./events",
+		"hosts/../events",
+		"hosts/\nevents",
+		"hosts/\u0085events",
+	} {
 		if _, err := CanonicalStreamID(streamID); !errors.Is(err, ErrInvalidStreamID) {
 			t.Fatalf("CanonicalStreamID(%q) error = %v, want %v", streamID, err, ErrInvalidStreamID)
 		}

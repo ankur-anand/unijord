@@ -33,7 +33,7 @@ func TestLogRequestRetentionUsesConfiguredClock(t *testing.T) {
 	store := newTestStore(t)
 	opts := Options{
 		Store: store,
-		Clock: func() time.Time { return want },
+		Clock: ClockFunc(func() time.Time { return want }),
 	}
 
 	log, err := Open(opts)

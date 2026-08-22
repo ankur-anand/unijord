@@ -32,7 +32,7 @@ func TestBlobWriterEndToEndWithBlobCatalog(t *testing.T) {
 
 	opts := plwriter.DefaultOptions(factory)
 	opts.Session = newCatalogWriterSession(t, cat, 7, [16]byte{7, 7, 7})
-	opts.Clock = func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() }
+	opts.Clock = plwriter.ClockFunc(func() time.Time { return time.UnixMilli(1_776_263_000_000).UTC() })
 	opts.UUIDGen = sequenceUUIDGen()
 	opts.Roll.MaxSegmentRecords = 2
 	opts.SegmentOptions = segwriter.DefaultOptions(7)

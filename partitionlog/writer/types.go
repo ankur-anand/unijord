@@ -18,6 +18,52 @@ const (
 
 type UUIDGen func() ([16]byte, error)
 
+// Timer is a stoppable clock notification used by age-based segment rolling.
+type Timer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+// Clock supplies both the current time and timers on the same timeline.
+// Implementations must be safe for concurrent use.
+type Clock interface {
+	Now() time.Time
+	NewTimer(time.Duration) Timer
+}
+
+// ClockFunc adapts a current-time function to Clock using system timers. The
+// function must advance at the same rate as the system clock. Manually
+// controlled clocks should implement Clock directly so advancing them also
+// fires their timers.
+type ClockFunc func() time.Time
+
+func (f ClockFunc) Now() time.Time {
+	return f()
+}
+
+func (f ClockFunc) NewTimer(d time.Duration) Timer {
+	return SystemClock{}.NewTimer(d)
+}
+
+// SystemClock uses the process wall and monotonic clocks.
+type SystemClock struct{}
+
+func (SystemClock) Now() time.Time {
+	return time.Now()
+}
+
+func (SystemClock) NewTimer(d time.Duration) Timer {
+	return systemTimer{Timer: time.NewTimer(d)}
+}
+
+type systemTimer struct {
+	*time.Timer
+}
+
+func (t systemTimer) C() <-chan time.Time {
+	return t.Timer.C
+}
+
 type WriterIdentity struct {
 	Epoch uint64
 	Tag   [16]byte
@@ -78,7 +124,7 @@ type Options struct {
 	Queue          QueuePolicy
 	Observer       Observer
 
-	Clock   func() time.Time
+	Clock   Clock
 	UUIDGen UUIDGen
 }
 
