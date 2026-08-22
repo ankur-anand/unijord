@@ -24,10 +24,10 @@ func TestPathsAreSelfDescribing(t *testing.T) {
 	if got := PagePrefix("", "", 7); got != "catalog/661/p00000007/pages/" {
 		t.Fatalf("PagePrefix() = %q", got)
 	}
-	if got := LeafPagePath("", "", 7, 100, 199, 18, "abc"); got != "catalog/661/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc.json" {
+	if got := LeafPagePath("", "", 7, 100, 199, 18, "abc"); got != "catalog/661/p00000007/pages/l00/leaf-00000000000000000199-00000000000000000100-00000000000000000018-abc.json" {
 		t.Fatalf("LeafPagePath() = %q", got)
 	}
-	if got := IndexPagePath("", "", 7, 2, 100, 999, 22, "def"); got != "catalog/661/p00000007/pages/l02/index-l02-00000000000000000100-00000000000000000999-00000000000000000022-def.json" {
+	if got := IndexPagePath("", "", 7, 2, 100, 999, 22, "def"); got != "catalog/661/p00000007/pages/l02/index-l02-00000000000000000999-00000000000000000100-00000000000000000022-def.json" {
 		t.Fatalf("IndexPagePath() = %q", got)
 	}
 }
@@ -44,8 +44,9 @@ func TestPagePathRoundTripAndLowerBound(t *testing.T) {
 	if parsed.Kind != PageObjectLeaf || parsed.Level != 0 || parsed.SeqLo != 100 || parsed.SeqHi != 199 || parsed.Generation != 18 || parsed.PageID != pageID {
 		t.Fatalf("ParsePagePath(leaf) = %+v", parsed)
 	}
-	if lower := PageLowerBound("catalog", "hosts/host-a/events", 7, 0, 100); lower >= leaf {
-		t.Fatalf("leaf lower bound = %q, want below %q", lower, leaf)
+	leafBefore := LeafPagePath("catalog", "hosts/host-a/events", 7, 100, 198, 18, pageID)
+	if lower := PageEndLowerBound("catalog", "hosts/host-a/events", 7, 0, 199); leafBefore >= lower || lower >= leaf {
+		t.Fatalf("leaf keys = before %q, lower %q, boundary %q; want before < lower < boundary", leafBefore, lower, leaf)
 	}
 
 	index := IndexPagePath("catalog", "hosts/host-a/events", 7, 2, 100, 999, 22, pageID)
@@ -56,8 +57,38 @@ func TestPagePathRoundTripAndLowerBound(t *testing.T) {
 	if parsed.Kind != PageObjectIndex || parsed.Level != 2 || parsed.SeqLo != 100 || parsed.SeqHi != 999 || parsed.Generation != 22 || parsed.PageID != pageID {
 		t.Fatalf("ParsePagePath(index) = %+v", parsed)
 	}
-	if lower := PageLowerBound("catalog", "hosts/host-a/events", 7, 2, 100); lower >= index {
-		t.Fatalf("index lower bound = %q, want below %q", lower, index)
+	indexBefore := IndexPagePath("catalog", "hosts/host-a/events", 7, 2, 100, 998, 22, pageID)
+	if lower := PageEndLowerBound("catalog", "hosts/host-a/events", 7, 2, 999); indexBefore >= lower || lower >= index {
+		t.Fatalf("index keys = before %q, lower %q, boundary %q; want before < lower < boundary", indexBefore, lower, index)
+	}
+}
+
+func TestPagePathsOrderByInclusiveEndLSN(t *testing.T) {
+	t.Parallel()
+
+	const pageID = "0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		name   string
+		wide   string
+		narrow string
+	}{
+		{
+			name:   "leaf",
+			wide:   LeafPagePath("catalog", "hosts/host-a/events", 7, 0, 150, 1, pageID),
+			narrow: LeafPagePath("catalog", "hosts/host-a/events", 7, 50, 80, 2, pageID),
+		},
+		{
+			name:   "index",
+			wide:   IndexPagePath("catalog", "hosts/host-a/events", 7, 1, 0, 150, 1, pageID),
+			narrow: IndexPagePath("catalog", "hosts/host-a/events", 7, 1, 50, 80, 2, pageID),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if test.narrow >= test.wide {
+				t.Fatalf("narrow page %q sorts at or after spanning page %q; page retention requires SeqHi order", test.narrow, test.wide)
+			}
+		})
 	}
 }
 

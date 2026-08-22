@@ -31,6 +31,9 @@ type stateFile struct {
 	SegmentReclaimedThroughLSN uint64 `json:"segment_reclaimed_through_lsn,omitempty"`
 	SegmentAfterKey            string `json:"segment_after_key,omitempty"`
 
+	// PageReclaimedThroughLSN is an exclusive page-end watermark: after a
+	// completed pass, every level has processed all objects whose SeqHi is below
+	// this value.
 	PageReclaimedThroughLSN uint64 `json:"page_reclaimed_through_lsn,omitempty"`
 	PageLevel               uint8  `json:"page_level,omitempty"`
 	PageAfterKey            string `json:"page_after_key,omitempty"`

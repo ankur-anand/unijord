@@ -69,6 +69,54 @@ func TestReclaimerRetainsUntilDelayedFloorThenDeletesSegmentsPagesAndStaleStagin
 	assertExists(t, backend, segmentKeys[2], pageKeys[2], pageKeys[4], currentStaging)
 }
 
+func TestReclaimerDoesNotStrandEligiblePageBehindSpanningRange(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Now().UTC())
+	catalog := &fakeCatalog{snapshot: maintenanceSnapshot(100, 200, 2, 1)}
+	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{})
+
+	const pageID = "0123456789abcdef0123456789abcdef"
+	wideLeaf := catalogblob.LeafPagePath("root/catalog", testStreamID, 7, 0, 150, 1, pageID)
+	narrowLeaf := catalogblob.LeafPagePath("root/catalog", testStreamID, 7, 50, 80, 2, pageID)
+	wideIndex := catalogblob.IndexPagePath("root/catalog", testStreamID, 7, 1, 0, 150, 1, pageID)
+	narrowIndex := catalogblob.IndexPagePath("root/catalog", testStreamID, 7, 1, 50, 80, 2, pageID)
+	putKeys(t, backend, []string{wideLeaf, narrowLeaf, wideIndex, narrowIndex})
+
+	if _, err := r.RunPartition(ctx, 7); err != nil {
+		t.Fatalf("RunPartition(observe floor 100) error = %v", err)
+	}
+	clock.Advance(DefaultDeleteDelay + time.Millisecond)
+	result, err := r.RunPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("RunPartition(reclaim floor 100) error = %v", err)
+	}
+	if result.SafeFloorLSN != 100 || result.ReclaimedThroughLSN != 100 || result.DeletedObjects != 2 || result.HasMore {
+		t.Fatalf("RunPartition(reclaim floor 100) result = %+v", result)
+	}
+	assertMissing(t, backend, narrowLeaf, narrowIndex)
+	assertExists(t, backend, wideLeaf, wideIndex)
+
+	catalog.mu.Lock()
+	catalog.snapshot = maintenanceSnapshot(151, 200, 2, 1)
+	catalog.mu.Unlock()
+	if _, err := r.RunPartition(ctx, 7); err != nil {
+		t.Fatalf("RunPartition(observe floor 151) error = %v", err)
+	}
+	clock.Advance(DefaultDeleteDelay + time.Millisecond)
+	result, err = r.RunPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("RunPartition(reclaim floor 151) error = %v", err)
+	}
+	if result.SafeFloorLSN != 151 || result.ReclaimedThroughLSN != 151 || result.DeletedObjects != 2 || result.HasMore {
+		t.Fatalf("RunPartition(reclaim floor 151) result = %+v", result)
+	}
+	assertMissing(t, backend, wideLeaf, wideIndex)
+}
+
 func TestReclaimerResumesAfterDeleteFailureUsingLastObjectKey(t *testing.T) {
 	t.Parallel()
 

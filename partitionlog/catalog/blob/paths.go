@@ -41,27 +41,27 @@ catalog/
 
         pages/
           l00/
-            leaf-00000000000000000000-00000000000000000299-g01-A.json
-            leaf-00000000000000000300-00000000000000000599-g02-B.json
-            leaf-00000000000000000600-00000000000000000899-g03-C.json
+            leaf-00000000000000000299-00000000000000000000-g01-A.json
+            leaf-00000000000000000599-00000000000000000300-g02-B.json
+            leaf-00000000000000000899-00000000000000000600-g03-C.json
 
-            leaf-00000000000000000900-00000000000000001199-g04-D.json
-            leaf-00000000000000001200-00000000000000001499-g05-E.json
-            leaf-00000000000000001500-00000000000000001799-g06-F.json
+            leaf-00000000000000001199-00000000000000000900-g04-D.json
+            leaf-00000000000000001499-00000000000000001200-g05-E.json
+            leaf-00000000000000001799-00000000000000001500-g06-F.json
 
-            leaf-00000000000000001800-00000000000000002099-g07-G.json
-            leaf-00000000000000002100-00000000000000002399-g08-H.json
-            leaf-00000000000000002400-00000000000000002699-g09-I.json
+            leaf-00000000000000002099-00000000000000001800-g07-G.json
+            leaf-00000000000000002399-00000000000000002100-g08-H.json
+            leaf-00000000000000002699-00000000000000002400-g09-I.json
 
-            leaf-00000000000000002700-00000000000000002999-g10-J.json
+            leaf-00000000000000002999-00000000000000002700-g10-J.json
 
           l01/
-            index-l01-00000000000000000000-00000000000000000899-g03-X.json
-            index-l01-00000000000000000900-00000000000000001799-g06-Y.json
-            index-l01-00000000000000001800-00000000000000002699-g09-Z.json
+            index-l01-00000000000000000899-00000000000000000000-g03-X.json
+            index-l01-00000000000000001799-00000000000000000900-g06-Y.json
+            index-l01-00000000000000002699-00000000000000001800-g09-Z.json
 
           l02/
-            index-l02-00000000000000000000-00000000000000002699-g09-R.json
+            index-l02-00000000000000002699-00000000000000000000-g09-R.json
 
 Leaf Page: is where the real segment history lives. It Contains actual SegmentRf entries:
 leaf page 100:
@@ -115,26 +115,26 @@ pages/
 
 pages/
     l00/
-      leaf-0-299.json
-      leaf-300-599.json
-      leaf-600-899.json
-      leaf-900-1199.json
-      leaf-1200-1499.json
+      leaf-299-0.json
+      leaf-599-300.json
+      leaf-899-600.json
+      leaf-1199-900.json
+      leaf-1499-1200.json
 
     l01/
-      index-l01-0-899.json
-      index-l01-900-1799.json
+      index-l01-899-0.json
+      index-l01-1799-900.json
 
     l02/
-      index-l02-0-1799.json
+      index-l02-1799-0.json
 
 LeafPagePath:
 - A leaf page is level l00
 - Leaf pages contain actual SegmentRef entries
 
-catalog/<bucket>/streams/<sha256-stream-key>/p00000007/pages/l00/leaf-00000000000000000100-00000000000000000199-00000000000000000018-abc123.json
+catalog/<bucket>/streams/<sha256-stream-key>/p00000007/pages/l00/leaf-00000000000000000199-00000000000000000100-00000000000000000018-abc123.json
+seqHi      = 199 (first so physical listings are ordered by page end)
 seqLo      = 100
-seqHi      = 199
 generation = 18
 pageID     = abc123
 
@@ -143,11 +143,11 @@ Builds the object key for an index page
 Index pages start at l01
 They do not store SegmentRef directly
 They store pageRefs to lower-level pages
-catalog/<bucket>/streams/<sha256-stream-key>/p00000007/pages/l01/index-l01-00000000000000000100-00000000000000000999-00000000000000000022-def456.json
+catalog/<bucket>/streams/<sha256-stream-key>/p00000007/pages/l01/index-l01-00000000000000000999-00000000000000000100-00000000000000000022-def456.json
 
 - l01: index level 1
   - index-l01: index page at level 1
-  - 100-999: LSN range covered by children
+  - 999-100: inclusive high and low LSN bounds; high sorts first for retention
   - 22: catalog generation
   - def456: content-derived page ID
 
@@ -170,14 +170,14 @@ func PageLevelPrefix(prefix string, streamID string, partition uint32, level uin
 	return fmt.Sprintf("%sl%02d/", PagePrefix(prefix, streamID, partition), level)
 }
 
-// PageLowerBound returns a synthetic key immediately before pages at level
-// whose seq_lo equals seqLo.
-func PageLowerBound(prefix string, streamID string, partition uint32, level uint8, seqLo uint64) string {
+// PageEndLowerBound returns a synthetic key immediately before pages at level
+// whose inclusive upper LSN bound equals seqHi.
+func PageEndLowerBound(prefix string, streamID string, partition uint32, level uint8, seqHi uint64) string {
 	levelPrefix := PageLevelPrefix(prefix, streamID, partition, level)
 	if level == 0 {
-		return fmt.Sprintf("%sleaf-%020d-", levelPrefix, seqLo)
+		return fmt.Sprintf("%sleaf-%020d-", levelPrefix, seqHi)
 	}
-	return fmt.Sprintf("%sindex-l%02d-%020d-", levelPrefix, level, seqLo)
+	return fmt.Sprintf("%sindex-l%02d-%020d-", levelPrefix, level, seqHi)
 }
 
 func RetentionRequestPath(prefix string, streamID string, partition uint32) string {
@@ -191,14 +191,14 @@ func GCStatePath(prefix string, streamID string, partition uint32) string {
 func LeafPagePath(prefix string, streamID string, partition uint32, seqLo, seqHi, generation uint64, pageID string) string {
 	return fmt.Sprintf(
 		"%s/pages/l00/leaf-%020d-%020d-%020d-%s.json",
-		partitionPrefix(prefix, streamID, partition), seqLo, seqHi, generation, pageID,
+		partitionPrefix(prefix, streamID, partition), seqHi, seqLo, generation, pageID,
 	)
 }
 
 func IndexPagePath(prefix string, streamID string, partition uint32, level uint8, seqLo, seqHi, generation uint64, pageID string) string {
 	return fmt.Sprintf(
 		"%s/pages/l%02d/index-l%02d-%020d-%020d-%020d-%s.json",
-		partitionPrefix(prefix, streamID, partition), level, level, seqLo, seqHi, generation, pageID,
+		partitionPrefix(prefix, streamID, partition), level, level, seqHi, seqLo, generation, pageID,
 	)
 }
 
@@ -231,13 +231,13 @@ func ParsePagePath(prefix string, streamID string, partition uint32, key string)
 	if len(fields) != 4 || len(fields[0]) != 20 || len(fields[1]) != 20 || len(fields[2]) != 20 || len(fields[3]) != 32 {
 		return PageObjectKey{}, fmt.Errorf("%w: invalid page fields in %q", ErrCorruptCatalog, key)
 	}
-	seqLo, err := parsePageUint(fields[0])
+	seqHi, err := parsePageUint(fields[0])
 	if err != nil {
-		return PageObjectKey{}, fmt.Errorf("%w: invalid page seq_lo in %q", ErrCorruptCatalog, key)
-	}
-	seqHi, err := parsePageUint(fields[1])
-	if err != nil || seqHi < seqLo {
 		return PageObjectKey{}, fmt.Errorf("%w: invalid page seq_hi in %q", ErrCorruptCatalog, key)
+	}
+	seqLo, err := parsePageUint(fields[1])
+	if err != nil || seqHi < seqLo {
+		return PageObjectKey{}, fmt.Errorf("%w: invalid page seq_lo in %q", ErrCorruptCatalog, key)
 	}
 	generation, err := parsePageUint(fields[2])
 	if err != nil || generation == 0 {

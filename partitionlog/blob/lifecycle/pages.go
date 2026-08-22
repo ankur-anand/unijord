@@ -12,7 +12,7 @@ func (r *Reclaimer) reclaimPages(ctx context.Context, state *stateFile, token *s
 
 	for level <= state.MaxPageLevel && budget.available() {
 		if afterKey == "" {
-			afterKey = catalogblob.PageLowerBound(r.opts.CatalogPrefix, r.opts.StreamID, state.Partition, level, state.PageReclaimedThroughLSN)
+			afterKey = catalogblob.PageEndLowerBound(r.opts.CatalogPrefix, r.opts.StreamID, state.Partition, level, state.PageReclaimedThroughLSN)
 		}
 		limit := budget.listLimit()
 		if limit == 0 {
@@ -52,6 +52,8 @@ func (r *Reclaimer) reclaimPages(ctx context.Context, state *stateFile, token *s
 				continue
 			}
 			if parsed.SeqHi >= state.SafeFloorLSN {
+				// Page object names sort by SeqHi first, so this page and every
+				// valid page after it are outside the deletable prefix.
 				levelComplete = true
 				break
 			}
