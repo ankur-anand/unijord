@@ -38,8 +38,11 @@ func TestPackerRejectsMismatchedReceiptNumber(t *testing.T) {
 	txn := &shiftedReceiptTxn{recordingTxn: newRecordingTxn()}
 	p := newTestPacker(t, txn, packerOptions{PartSize: 1, UploadParallelism: 1})
 
-	if err := p.WriteBody(context.Background(), []byte("a")); err != nil {
-		t.Fatalf("WriteBody() error = %v", err)
+	// The upload worker may publish the invalid receipt before WriteBody's
+	// final result poll or afterward. Both timings are valid; once observed,
+	// the contract error must remain sticky through Complete.
+	if err := p.WriteBody(context.Background(), []byte("a")); err != nil && !errors.Is(err, ErrSinkContract) {
+		t.Fatalf("WriteBody() error = %v, want nil or %v", err, ErrSinkContract)
 	}
 	_ = p.BodyHash()
 	_, err := p.Complete(context.Background())
