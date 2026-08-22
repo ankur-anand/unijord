@@ -2,7 +2,6 @@ package writer
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"math"
@@ -12,6 +11,7 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/ankur-anand/unijord/partitionlog/segwriter"
+	"github.com/google/uuid"
 )
 
 const cleanupTimeout = 5 * time.Second
@@ -1275,13 +1275,8 @@ func isZeroSegmentOptions(opts segwriter.Options) bool {
 }
 
 func randomUUID() ([16]byte, error) {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return [16]byte{}, err
-	}
-	id[6] = (id[6] & 0x0f) | 0x40
-	id[8] = (id[8] & 0x3f) | 0x80
-	return id, nil
+	id, err := uuid.NewRandom()
+	return [16]byte(id), err
 }
 
 func waitGroupContext(ctx context.Context, wg *sync.WaitGroup) error {
