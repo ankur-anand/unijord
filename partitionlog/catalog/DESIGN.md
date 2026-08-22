@@ -167,13 +167,15 @@ A leaf page contains a bounded, ordered slice of `SegmentRef`s:
 
 ```go
 type LeafPage struct {
-    PageID      string
-    Partition   uint32
-    Generation  uint64
-    BaseLSN     uint64
-    LastLSN     uint64
-    Segments    []pmeta.SegmentRef
-    NextLeafRef string
+    PageID           string
+    Partition        uint32
+    Generation       uint64
+    BaseLSN          uint64
+    LastLSN          uint64
+    MinTimestampMS   int64
+    MaxTimestampMS   int64
+    Segments         []pmeta.SegmentRef
+    NextLeafRef      string
 }
 ```
 
@@ -182,6 +184,7 @@ Rules:
 - segments are ordered by `BaseLSN`;
 - segment ranges are contiguous;
 - timestamps are non-decreasing across segment boundaries;
+- the page timestamp range exactly matches its first and last segment;
 - page size is bounded;
 - pages are immutable after write.
 
@@ -191,19 +194,23 @@ A branch page indexes child pages by LSN range:
 
 ```go
 type BranchPage struct {
-    PageID      string
-    Partition   uint32
-    Level       uint32
-    Generation  uint64
-    BaseLSN     uint64
-    LastLSN     uint64
-    Children    []BranchChild
+    PageID           string
+    Partition        uint32
+    Level            uint32
+    Generation       uint64
+    BaseLSN          uint64
+    LastLSN          uint64
+    MinTimestampMS   int64
+    MaxTimestampMS   int64
+    Children         []BranchChild
 }
 
 type BranchChild struct {
-    BaseLSN  uint64
-    LastLSN  uint64
-    ChildRef string
+    BaseLSN        uint64
+    LastLSN        uint64
+    MinTimestampMS int64
+    MaxTimestampMS int64
+    ChildRef       string
 }
 ```
 
@@ -211,6 +218,8 @@ Rules:
 
 - children are ordered by `BaseLSN`;
 - child ranges are non-overlapping and contiguous;
+- child timestamp ranges are non-decreasing, and the branch range exactly
+  matches its first and last child;
 - branch fanout is bounded;
 - pages are immutable after write.
 
@@ -232,6 +241,7 @@ The read surface is bounded:
 ```go
 LoadPartition(ctx, partition) -> pmeta.PartitionHead
 FindSegment(ctx, partition, lsn) -> (pmeta.SegmentRef, bool, error)
+LookupTimestamp(ctx, partition, timestampMS) -> (head, pmeta.SegmentRef, bool, error)
 ListSegments(ctx, partition, fromLSN, limit) -> pmeta.SegmentPage
 ```
 
@@ -405,6 +415,21 @@ The head fast path is important for hot-tail reads.
 4. stop once `limit` is met.
 
 The caller gets a bounded `SegmentPage`, not the full partition history.
+
+### LookupTimestamp
+
+`LookupTimestamp(partition, timestampMS)` finds the earliest retained segment
+whose `MaxTimestampMS` is at least the requested timestamp:
+
+1. read and validate the head;
+2. binary search the reachable root timestamp ranges;
+3. descend one index path by child `MaxTimestampMS`;
+4. binary search the selected leaf's segment ranges;
+5. return the selected segment with the exact head snapshot used for lookup.
+
+The lookup costs `O(tree depth)` object reads and does not scan catalog pages
+from `OldestLSN`. Returning the head and segment together prevents a concurrent
+append or retention update from mixing two catalog snapshots.
 
 ## Visibility and Failure Semantics
 

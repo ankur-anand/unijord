@@ -17,7 +17,25 @@ const (
 type Reader interface {
 	LoadPartition(ctx context.Context, partition uint32) (pmeta.PartitionHead, error)
 	FindSegment(ctx context.Context, partition uint32, lsn uint64) (pmeta.SegmentRef, bool, error)
+	LookupTimestamp(ctx context.Context, req TimestampLookupRequest) (TimestampLookupResult, error)
 	ListSegments(ctx context.Context, req ListSegmentsRequest) (pmeta.SegmentPage, error)
+}
+
+// TimestampLookupRequest asks for the earliest retained segment whose maximum
+// timestamp is at least TimestampMS. Catalogs rely on their global
+// nondecreasing timestamp invariant to answer this without scanning by LSN.
+type TimestampLookupRequest struct {
+	Partition   uint32
+	TimestampMS int64
+}
+
+// TimestampLookupResult returns the segment and the exact partition-head
+// snapshot against which it was selected. Found is false when the partition is
+// empty or TimestampMS is newer than every retained segment.
+type TimestampLookupResult struct {
+	Head    pmeta.PartitionHead
+	Segment pmeta.SegmentRef
+	Found   bool
 }
 
 // WriterManager owns the write-side catalog surface for one partition.

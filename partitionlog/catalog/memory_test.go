@@ -94,6 +94,60 @@ func TestMemoryCatalogRejectsTimestampRegressionAcrossSegments(t *testing.T) {
 	}
 }
 
+func TestMemoryCatalogLookupTimestampReturnsEarliestMatchingSegmentAndHead(t *testing.T) {
+	t.Parallel()
+
+	cat := NewMemoryCatalog()
+	ws := mustOpenWriter(t, cat, 4, 1)
+	segments := []pmeta.SegmentRef{
+		testSegment(4, 0, 9, ws.Epoch()),
+		testSegment(4, 10, 19, ws.Epoch()),
+		testSegment(4, 20, 29, ws.Epoch()),
+	}
+	segments[0].MinTimestampMS, segments[0].MaxTimestampMS = 100, 199
+	segments[1].MinTimestampMS, segments[1].MaxTimestampMS = 199, 299
+	segments[2].MinTimestampMS, segments[2].MaxTimestampMS = 400, 499
+	for _, segment := range segments {
+		if _, err := ws.AppendSegment(context.Background(), segment); err != nil {
+			t.Fatalf("AppendSegment(%d) error = %v", segment.BaseLSN, err)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		timestamp int64
+		want      int
+	}{
+		{name: "before oldest", timestamp: 1, want: 0},
+		{name: "inside first", timestamp: 150, want: 0},
+		{name: "equal boundary chooses earlier", timestamp: 199, want: 0},
+		{name: "inside second", timestamp: 250, want: 1},
+		{name: "timestamp gap", timestamp: 350, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cat.LookupTimestamp(context.Background(), TimestampLookupRequest{Partition: 4, TimestampMS: tt.timestamp})
+			if err != nil {
+				t.Fatalf("LookupTimestamp() error = %v", err)
+			}
+			if !got.Found || got.Segment != segments[tt.want] {
+				t.Fatalf("LookupTimestamp() = (%+v, %v), want segment %+v", got.Segment, got.Found, segments[tt.want])
+			}
+			if got.Head != ws.Head() {
+				t.Fatalf("LookupTimestamp() head = %+v, want %+v", got.Head, ws.Head())
+			}
+		})
+	}
+
+	got, err := cat.LookupTimestamp(context.Background(), TimestampLookupRequest{Partition: 4, TimestampMS: 500})
+	if err != nil {
+		t.Fatalf("LookupTimestamp(newer than head) error = %v", err)
+	}
+	if got.Found || got.Head != ws.Head() {
+		t.Fatalf("LookupTimestamp(newer than head) = %+v", got)
+	}
+}
+
 func TestMemoryCatalogRejectsSegmentFromDifferentWriterIdentity(t *testing.T) {
 	t.Parallel()
 

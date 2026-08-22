@@ -297,6 +297,29 @@ func (c *MemoryCatalog) FindSegment(ctx context.Context, partition uint32, lsn u
 	return segment, true, nil
 }
 
+func (c *MemoryCatalog) LookupTimestamp(ctx context.Context, req TimestampLookupRequest) (TimestampLookupResult, error) {
+	if err := ctx.Err(); err != nil {
+		return TimestampLookupResult{}, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	data, ok := c.partitions[req.Partition]
+	if !ok {
+		return TimestampLookupResult{
+			Head: pmeta.PartitionHead{StreamID: c.streamID, Partition: req.Partition},
+		}, nil
+	}
+	result := TimestampLookupResult{Head: data.state}
+	i := firstSegmentAtOrAfterTimestamp(data.segments, req.TimestampMS)
+	if i == len(data.segments) {
+		return result, nil
+	}
+	result.Segment = data.segments[i]
+	result.Found = true
+	return result, nil
+}
+
 func (c *MemoryCatalog) ListSegments(ctx context.Context, req ListSegmentsRequest) (pmeta.SegmentPage, error) {
 	if err := ctx.Err(); err != nil {
 		return pmeta.SegmentPage{}, err
@@ -340,6 +363,12 @@ func (c *MemoryCatalog) getOrCreateLocked(partition uint32) *memoryPartition {
 func firstSegmentAtOrAfter(segments []pmeta.SegmentRef, lsn uint64) int {
 	return sort.Search(len(segments), func(i int) bool {
 		return segments[i].LastLSN >= lsn
+	})
+}
+
+func firstSegmentAtOrAfterTimestamp(segments []pmeta.SegmentRef, timestampMS int64) int {
+	return sort.Search(len(segments), func(i int) bool {
+		return segments[i].MaxTimestampMS >= timestampMS
 	})
 }
 

@@ -422,7 +422,7 @@ func TestConsumeFromTimestampAfterHeadReturnsEmptyAtHead(t *testing.T) {
 	}
 }
 
-func TestConsumeFromTimestampCrossesCatalogPageBoundary(t *testing.T) {
+func TestConsumeFromTimestampUsesCatalogTimestampLookup(t *testing.T) {
 	t.Parallel()
 
 	const partition = 7
@@ -460,16 +460,16 @@ func TestConsumeFromTimestampCrossesCatalogPageBoundary(t *testing.T) {
 	if len(result.Records) != 0 || result.NextLSN != uint64(segmentCount) {
 		t.Fatalf("ConsumeFromTimestamp(after head) = %+v", result)
 	}
-	if cat.listCalls != 2 {
-		t.Fatalf("ListSegments() calls = %d, want 2", cat.listCalls)
+	if cat.lookupCalls != 1 || cat.listCalls != 0 {
+		t.Fatalf("catalog calls = lookups:%d lists:%d, want lookups:1 lists:0", cat.lookupCalls, cat.listCalls)
 	}
 }
 
-func TestConsumeFromTimestampRejectsNonAdvancingCatalogPage(t *testing.T) {
+func TestConsumeFromTimestampRejectsLookupSegmentOutsideHead(t *testing.T) {
 	t.Parallel()
 
 	const partition = 7
-	segment := validSegmentRef(partition, 0, 0)
+	segment := validSegmentRef(partition, 2, 2)
 	head := pmeta.PartitionHead{
 		Partition:      partition,
 		NextLSN:        2,
@@ -479,19 +479,15 @@ func TestConsumeFromTimestampRejectsNonAdvancingCatalogPage(t *testing.T) {
 		HasLastSegment: true,
 	}
 	cat := &stubCatalog{
-		head: head,
-		pages: []pmeta.SegmentPage{{
-			Segments: []pmeta.SegmentRef{segment},
-			HasMore:  true,
-			NextLSN:  0,
-		}},
+		head:   head,
+		lookup: &catalog.TimestampLookupResult{Head: head, Segment: segment, Found: true},
 	}
 	r, err := New(cat, newTestSegmentStore(nil), Options{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	_, err = r.consumeFromTimestampFromHead(context.Background(), head, ConsumeFromTimestampRequest{
+	_, err = r.consumeFromTimestampLookup(context.Background(), ConsumeFromTimestampRequest{
 		Partition:   partition,
 		TimestampMS: 1,
 		Limit:       1,
@@ -950,8 +946,9 @@ func (s *countingSegmentStore) metadataReads(segment pmeta.SegmentRef) int {
 }
 
 type stubCatalog struct {
-	head  pmeta.PartitionHead
-	pages []pmeta.SegmentPage
+	head   pmeta.PartitionHead
+	pages  []pmeta.SegmentPage
+	lookup *catalog.TimestampLookupResult
 }
 
 func (s *stubCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {
@@ -960,6 +957,26 @@ func (s *stubCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.Partitio
 
 func (s *stubCatalog) FindSegment(_ context.Context, _ uint32, _ uint64) (pmeta.SegmentRef, bool, error) {
 	return pmeta.SegmentRef{}, false, nil
+}
+
+func (s *stubCatalog) LookupTimestamp(_ context.Context, req catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	if s.lookup != nil {
+		return *s.lookup, nil
+	}
+	result := catalog.TimestampLookupResult{Head: s.head}
+	for _, page := range s.pages {
+		for _, segment := range page.Segments {
+			if segment.LastLSN < s.head.OldestLSN || segment.BaseLSN >= s.head.NextLSN {
+				continue
+			}
+			if segment.MaxTimestampMS >= req.TimestampMS {
+				result.Segment = segment
+				result.Found = true
+				return result, nil
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *stubCatalog) ListSegments(_ context.Context, _ catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
@@ -972,9 +989,10 @@ func (s *stubCatalog) ListSegments(_ context.Context, _ catalog.ListSegmentsRequ
 }
 
 type timestampPagingCatalog struct {
-	head      pmeta.PartitionHead
-	segments  []pmeta.SegmentRef
-	listCalls int
+	head        pmeta.PartitionHead
+	segments    []pmeta.SegmentRef
+	listCalls   int
+	lookupCalls int
 }
 
 func (c *timestampPagingCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {
@@ -983,6 +1001,19 @@ func (c *timestampPagingCatalog) LoadPartition(_ context.Context, _ uint32) (pme
 
 func (c *timestampPagingCatalog) FindSegment(_ context.Context, _ uint32, _ uint64) (pmeta.SegmentRef, bool, error) {
 	return pmeta.SegmentRef{}, false, nil
+}
+
+func (c *timestampPagingCatalog) LookupTimestamp(_ context.Context, req catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	c.lookupCalls++
+	result := catalog.TimestampLookupResult{Head: c.head}
+	for _, segment := range c.segments {
+		if segment.MaxTimestampMS >= req.TimestampMS {
+			result.Segment = segment
+			result.Found = true
+			break
+		}
+	}
+	return result, nil
 }
 
 func (c *timestampPagingCatalog) ListSegments(_ context.Context, req catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {

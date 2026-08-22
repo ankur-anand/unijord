@@ -14,16 +14,24 @@ func TestValidatePageRef(t *testing.T) {
 	t.Parallel()
 
 	valid := pageRef{
-		Level:      1,
-		SeqLo:      100,
-		SeqHi:      199,
-		Generation: 2,
-		PageID:     "abc",
-		Path:       "catalog/p00000001/pages/l01/index.json",
-		Count:      3,
+		Level:             1,
+		SeqLo:             100,
+		SeqHi:             199,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    199,
+		HasTimestampRange: true,
+		Generation:        2,
+		PageID:            "abc",
+		Path:              "catalog/p00000001/pages/l01/index.json",
+		Count:             3,
 	}
 	if err := validatePageRef(valid, 1); err != nil {
 		t.Fatalf("validatePageRef(valid) error = %v", err)
+	}
+	missingTimestampRange := valid
+	missingTimestampRange.HasTimestampRange = false
+	if err := validatePageRef(missingTimestampRange, 1); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validatePageRef(missing timestamp range) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 
 	cases := []pageRef{
@@ -147,11 +155,14 @@ func TestValidateLeafPage(t *testing.T) {
 	t.Parallel()
 
 	valid := leafPage{
-		Version:   pageVersion,
-		Type:      "leaf",
-		Partition: 1,
-		SeqLo:     100,
-		SeqHi:     299,
+		Version:           pageVersion,
+		Type:              "leaf",
+		Partition:         1,
+		SeqLo:             100,
+		SeqHi:             299,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    299,
+		HasTimestampRange: true,
 		Segments: []pmeta.SegmentRef{
 			testSegmentRef(1, 100, 199, 1),
 			testSegmentRef(1, 200, 299, 1),
@@ -159,6 +170,11 @@ func TestValidateLeafPage(t *testing.T) {
 	}
 	if err := validateLeafPage(valid); err != nil {
 		t.Fatalf("validateLeafPage(valid) error = %v", err)
+	}
+	mismatchedRange := valid
+	mismatchedRange.MaxTimestampMS--
+	if err := validateLeafPage(mismatchedRange); !errors.Is(err, ErrCorruptCatalog) {
+		t.Fatalf("validateLeafPage(mismatched timestamp range) error = %v, want %v", err, ErrCorruptCatalog)
 	}
 
 	cases := []struct {
@@ -216,11 +232,14 @@ func TestValidateIndexPage(t *testing.T) {
 	t.Parallel()
 
 	valid := indexPage{
-		Version: pageVersion,
-		Type:    "index",
-		Level:   1,
-		SeqLo:   100,
-		SeqHi:   699,
+		Version:           pageVersion,
+		Type:              "index",
+		Level:             1,
+		SeqLo:             100,
+		SeqHi:             699,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    699,
+		HasTimestampRange: true,
 		Refs: []pageRef{
 			testPageRef(0, 100, 399, 2, "a", 3),
 			testPageRef(0, 400, 699, 3, "b", 3),
@@ -228,6 +247,12 @@ func TestValidateIndexPage(t *testing.T) {
 	}
 	if err := validateIndexPage(valid); err != nil {
 		t.Fatalf("validateIndexPage(valid) error = %v", err)
+	}
+	timestampRegression := valid
+	timestampRegression.Refs = append([]pageRef(nil), valid.Refs...)
+	timestampRegression.Refs[1].MinTimestampMS = timestampRegression.Refs[0].MaxTimestampMS - 1
+	if err := validateIndexPage(timestampRegression); !errors.Is(err, pcatalog.ErrTimestampOrder) {
+		t.Fatalf("validateIndexPage(timestamp regression) error = %v, want %v", err, pcatalog.ErrTimestampOrder)
 	}
 
 	cases := []struct {
@@ -277,23 +302,29 @@ func TestVerifyLeafRef(t *testing.T) {
 	t.Parallel()
 
 	page := leafPage{
-		Version:    pageVersion,
-		Type:       "leaf",
-		Partition:  1,
-		SeqLo:      100,
-		SeqHi:      199,
-		Generation: 2,
-		PageID:     "abc",
-		Segments:   []pmeta.SegmentRef{testSegmentRef(1, 100, 199, 1)},
+		Version:           pageVersion,
+		Type:              "leaf",
+		Partition:         1,
+		SeqLo:             100,
+		SeqHi:             199,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    199,
+		HasTimestampRange: true,
+		Generation:        2,
+		PageID:            "abc",
+		Segments:          []pmeta.SegmentRef{testSegmentRef(1, 100, 199, 1)},
 	}
 	ref := pageRef{
-		Level:      0,
-		SeqLo:      100,
-		SeqHi:      199,
-		Generation: 2,
-		PageID:     "abc",
-		Path:       "catalog/p00000001/pages/l00/leaf.json",
-		Count:      1,
+		Level:             0,
+		SeqLo:             100,
+		SeqHi:             199,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    199,
+		HasTimestampRange: true,
+		Generation:        2,
+		PageID:            "abc",
+		Path:              "catalog/p00000001/pages/l00/leaf.json",
+		Count:             1,
 	}
 	if err := verifyLeafRef(page, ref); err != nil {
 		t.Fatalf("verifyLeafRef(valid) error = %v", err)
@@ -308,24 +339,30 @@ func TestVerifyIndexRef(t *testing.T) {
 	t.Parallel()
 
 	page := indexPage{
-		Version:    pageVersion,
-		Type:       "index",
-		Level:      1,
-		Partition:  1,
-		SeqLo:      100,
-		SeqHi:      399,
-		Generation: 2,
-		PageID:     "abc",
-		Refs:       []pageRef{testPageRef(0, 100, 399, 2, "leaf", 3)},
+		Version:           pageVersion,
+		Type:              "index",
+		Level:             1,
+		Partition:         1,
+		SeqLo:             100,
+		SeqHi:             399,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    399,
+		HasTimestampRange: true,
+		Generation:        2,
+		PageID:            "abc",
+		Refs:              []pageRef{testPageRef(0, 100, 399, 2, "leaf", 3)},
 	}
 	ref := pageRef{
-		Level:      1,
-		SeqLo:      100,
-		SeqHi:      399,
-		Generation: 2,
-		PageID:     "abc",
-		Path:       "catalog/p00000001/pages/l01/index.json",
-		Count:      1,
+		Level:             1,
+		SeqLo:             100,
+		SeqHi:             399,
+		MinTimestampMS:    100,
+		MaxTimestampMS:    399,
+		HasTimestampRange: true,
+		Generation:        2,
+		PageID:            "abc",
+		Path:              "catalog/p00000001/pages/l01/index.json",
+		Count:             1,
 	}
 	if err := verifyIndexRef(page, ref); err != nil {
 		t.Fatalf("verifyIndexRef(valid) error = %v", err)
@@ -367,13 +404,16 @@ func TestVerifyPageID(t *testing.T) {
 
 func testPageRef(level uint8, seqLo, seqHi, generation uint64, pageID string, count int) pageRef {
 	return pageRef{
-		Level:      level,
-		SeqLo:      seqLo,
-		SeqHi:      seqHi,
-		Generation: generation,
-		PageID:     pageID,
-		Path:       fmt.Sprintf("catalog/p00000001/pages/l%02d/page-%s.json", level, pageID),
-		Count:      count,
+		Level:             level,
+		SeqLo:             seqLo,
+		SeqHi:             seqHi,
+		MinTimestampMS:    int64(seqLo),
+		MaxTimestampMS:    int64(seqHi),
+		HasTimestampRange: true,
+		Generation:        generation,
+		PageID:            pageID,
+		Path:              fmt.Sprintf("catalog/p00000001/pages/l%02d/page-%s.json", level, pageID),
+		Count:             count,
 	}
 }
 

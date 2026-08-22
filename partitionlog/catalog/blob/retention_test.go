@@ -107,6 +107,13 @@ func TestBlobCatalogRetentionCanTrimEverythingAndContinueAppending(t *testing.T)
 	if len(head.IndexFrontier) != 0 || head.LeafFrontier != nil || len(head.ActiveSegments) != 0 {
 		t.Fatalf("fully trimmed topology = %+v", head)
 	}
+	lookup, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{Partition: 1, TimestampMS: 0})
+	if err != nil {
+		t.Fatalf("LookupTimestamp(fully trimmed) error = %v", err)
+	}
+	if lookup.Found || lookup.Head != result.Head {
+		t.Fatalf("LookupTimestamp(fully trimmed) = %+v, want not found with committed head", lookup)
+	}
 
 	state, err := ws.AppendSegment(ctx, testSegmentRef(1, 40, 49, ws.Epoch()))
 	if err != nil {

@@ -229,6 +229,11 @@ func (c *headCacheCatalog) FindSegment(context.Context, uint32, uint64) (pmeta.S
 	return pmeta.SegmentRef{}, false, nil
 }
 
+func (c *headCacheCatalog) LookupTimestamp(ctx context.Context, req catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	head, err := c.LoadPartition(ctx, req.Partition)
+	return catalog.TimestampLookupResult{Head: head}, err
+}
+
 func (c *headCacheCatalog) ListSegments(context.Context, catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
 	return pmeta.SegmentPage{}, nil
 }

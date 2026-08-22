@@ -266,94 +266,57 @@ func (r *Reader) ConsumeFromTimestamp(ctx context.Context, req ConsumeFromTimest
 		return ConsumeResult{}, fmt.Errorf("%w: limit=%d", ErrInvalidRequest, req.Limit)
 	}
 	limit := r.normalizedLimit(req.Limit)
-	head, err := r.catalog.LoadPartition(ctx, req.Partition)
-	if err != nil {
-		return ConsumeResult{}, err
-	}
-	result, err = r.consumeFromTimestampFromHead(ctx, head, req, limit)
+	result, err = r.consumeFromTimestampLookup(ctx, req, limit)
 	if err == nil {
 		return result, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ConsumeResult{}, err
 	}
-	fresh, refreshErr := r.refresh.refresh(ctx, req.Partition)
+	_, refreshErr := r.refresh.refresh(ctx, req.Partition)
 	if refreshErr != nil {
 		return ConsumeResult{}, errors.Join(err, fmt.Errorf("refresh catalog after timestamp read anomaly: %w", refreshErr))
 	}
-	return r.consumeFromTimestampFromHead(ctx, fresh, req, limit)
+	return r.consumeFromTimestampLookup(ctx, req, limit)
 }
 
-func (r *Reader) consumeFromTimestampFromHead(ctx context.Context, head pmeta.PartitionHead, req ConsumeFromTimestampRequest, limit int) (ConsumeResult, error) {
+func (r *Reader) consumeFromTimestampLookup(ctx context.Context, req ConsumeFromTimestampRequest, limit int) (ConsumeResult, error) {
+	lookup, err := r.catalog.LookupTimestamp(ctx, catalog.TimestampLookupRequest{
+		Partition:   req.Partition,
+		TimestampMS: req.TimestampMS,
+	})
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	head := lookup.Head
 	result := ConsumeResult{
 		Head:    head,
 		NextLSN: head.NextLSN,
 	}
-	if !head.HasLastSegment {
+	if head.Partition != req.Partition {
+		return ConsumeResult{}, fmt.Errorf("%w: head partition=%d request partition=%d", ErrCorruptData, head.Partition, req.Partition)
+	}
+	if !lookup.Found {
 		return result, nil
 	}
-
-	from := head.OldestLSN
-	for from < head.NextLSN {
-		pageStart := from
-		page, err := r.catalog.ListSegments(ctx, catalog.ListSegmentsRequest{
-			Partition: req.Partition,
-			FromLSN:   pageStart,
-			Limit:     catalog.MaxSegmentPageLimit,
-		})
-		if err != nil {
-			return ConsumeResult{}, err
-		}
-		if len(page.Segments) == 0 {
-			return ConsumeResult{}, fmt.Errorf("%w: no segment for partition=%d lsn=%d head_next=%d", ErrCorruptData, req.Partition, from, head.NextLSN)
-		}
-
-		advanced := false
-		for _, segment := range page.Segments {
-			if from >= head.NextLSN {
-				break
-			}
-			if segment.Partition != req.Partition {
-				return ConsumeResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, req.Partition)
-			}
-			if segment.LastLSN < from {
-				continue
-			}
-			if segment.BaseLSN > from {
-				return ConsumeResult{}, fmt.Errorf("%w: gap before segment base_lsn=%d next_lsn=%d", ErrCorruptData, segment.BaseLSN, from)
-			}
-			if segment.MaxTimestampMS < req.TimestampMS {
-				from = segment.NextLSN()
-				advanced = true
-				continue
-			}
-
-			startLSN, ok, err := r.findTimestampStart(ctx, segment, req.TimestampMS)
-			if err != nil {
-				return ConsumeResult{}, err
-			}
-			if !ok {
-				return ConsumeResult{}, fmt.Errorf("%w: segment uri=%s max_timestamp_ms=%d but no record >= %d", ErrCorruptData, segment.URI, segment.MaxTimestampMS, req.TimestampMS)
-			}
-			if startLSN >= head.NextLSN {
-				return result, nil
-			}
-			return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
-		}
-		if page.HasMore {
-			if page.NextLSN <= pageStart {
-				return ConsumeResult{}, fmt.Errorf("%w: non-advancing page next_lsn=%d from_lsn=%d", ErrCorruptData, page.NextLSN, pageStart)
-			}
-			if page.NextLSN > from {
-				from = page.NextLSN
-			}
-			advanced = true
-		}
-		if !advanced {
-			break
-		}
+	segment := lookup.Segment
+	if segment.Partition != req.Partition {
+		return ConsumeResult{}, fmt.Errorf("%w: segment partition=%d request partition=%d", ErrCorruptData, segment.Partition, req.Partition)
 	}
-	return result, nil
+	if segment.MaxTimestampMS < req.TimestampMS {
+		return ConsumeResult{}, fmt.Errorf("%w: selected segment max_timestamp_ms=%d below requested timestamp_ms=%d", ErrCorruptData, segment.MaxTimestampMS, req.TimestampMS)
+	}
+	if segment.BaseLSN < head.OldestLSN || segment.LastLSN >= head.NextLSN {
+		return ConsumeResult{}, fmt.Errorf("%w: selected segment lsn=%d-%d outside head range=%d-%d", ErrCorruptData, segment.BaseLSN, segment.LastLSN, head.OldestLSN, head.NextLSN)
+	}
+	startLSN, ok, err := r.findTimestampStart(ctx, segment, req.TimestampMS)
+	if err != nil {
+		return ConsumeResult{}, err
+	}
+	if !ok {
+		return ConsumeResult{}, fmt.Errorf("%w: segment uri=%s max_timestamp_ms=%d but no record >= %d", ErrCorruptData, segment.URI, segment.MaxTimestampMS, req.TimestampMS)
+	}
+	return r.consumeFromHeadOnce(ctx, head, req.Partition, startLSN, limit)
 }
 
 func (r *Reader) consumeFromHead(ctx context.Context, head pmeta.PartitionHead, partition uint32, startLSN uint64, limit int) (ConsumeResult, error) {

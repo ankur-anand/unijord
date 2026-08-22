@@ -110,6 +110,9 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 		if prev.SeqHi == math.MaxUint64 || prev.SeqHi+1 != root.SeqLo {
 			return fmt.Errorf("%w: reachable roots are not contiguous", ErrCorruptCatalog)
 		}
+		if root.MinTimestampMS < prev.MaxTimestampMS {
+			return fmt.Errorf("%w: %w", ErrCorruptCatalog, csession.ErrTimestampOrder)
+		}
 	}
 	var firstLSN uint64
 	var lastLSN uint64
@@ -122,6 +125,9 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 			if lastLSN == math.MaxUint64 || lastLSN+1 != firstActive.BaseLSN {
 				return fmt.Errorf("%w: active segments are not contiguous with sealed roots", ErrCorruptCatalog)
 			}
+			if firstActive.MinTimestampMS < roots[len(roots)-1].MaxTimestampMS {
+				return fmt.Errorf("%w: %w", ErrCorruptCatalog, csession.ErrTimestampOrder)
+			}
 			lastLSN = head.ActiveSegments[len(head.ActiveSegments)-1].LastLSN
 		}
 	case len(head.ActiveSegments) > 0:
@@ -133,6 +139,15 @@ func validateHeadFile(head headFile, streamID string, partition uint32) error {
 	}
 	if lastLSN != head.LastSegment.LastLSN {
 		return fmt.Errorf("%w: last reachable lsn=%d last_lsn=%d", ErrCorruptCatalog, lastLSN, head.LastSegment.LastLSN)
+	}
+	var lastTimestampMS int64
+	if len(head.ActiveSegments) > 0 {
+		lastTimestampMS = head.ActiveSegments[len(head.ActiveSegments)-1].MaxTimestampMS
+	} else {
+		lastTimestampMS = roots[len(roots)-1].MaxTimestampMS
+	}
+	if lastTimestampMS != head.LastSegment.MaxTimestampMS {
+		return fmt.Errorf("%w: last reachable max_timestamp_ms=%d last segment max_timestamp_ms=%d", ErrCorruptCatalog, lastTimestampMS, head.LastSegment.MaxTimestampMS)
 	}
 	if len(head.ActiveSegments) > 0 && head.ActiveSegments[len(head.ActiveSegments)-1] != head.LastSegment {
 		return fmt.Errorf("%w: last active segment does not match head last segment", ErrCorruptCatalog)
@@ -182,6 +197,9 @@ func validatePageRef(ref pageRef, level uint8) error {
 	if ref.SeqLo > ref.SeqHi {
 		return fmt.Errorf("%w: page ref seq_lo=%d seq_hi=%d", ErrCorruptCatalog, ref.SeqLo, ref.SeqHi)
 	}
+	if !ref.HasTimestampRange || ref.MinTimestampMS > ref.MaxTimestampMS {
+		return fmt.Errorf("%w: invalid page ref timestamp range", ErrCorruptCatalog)
+	}
 	if ref.Generation == 0 || ref.PageID == "" || ref.Path == "" || ref.Count <= 0 {
 		return fmt.Errorf("%w: incomplete page ref", ErrCorruptCatalog)
 	}
@@ -223,6 +241,12 @@ func validateLeafPage(page leafPage) error {
 	if last.LastLSN != page.SeqHi {
 		return fmt.Errorf("%w: leaf seq_hi=%d last=%d", ErrCorruptCatalog, page.SeqHi, last.LastLSN)
 	}
+	if !page.HasTimestampRange || page.MinTimestampMS > page.MaxTimestampMS {
+		return fmt.Errorf("%w: invalid leaf timestamp range", ErrCorruptCatalog)
+	}
+	if page.MinTimestampMS != page.Segments[0].MinTimestampMS || page.MaxTimestampMS != last.MaxTimestampMS {
+		return fmt.Errorf("%w: leaf timestamp range mismatch", ErrCorruptCatalog)
+	}
 	return nil
 }
 
@@ -247,22 +271,31 @@ func validateIndexPage(page indexPage) error {
 		if prev.SeqHi == ^uint64(0) || ref.SeqLo != prev.SeqHi+1 {
 			return fmt.Errorf("%w: non-contiguous index refs", ErrCorruptCatalog)
 		}
+		if ref.MinTimestampMS < prev.MaxTimestampMS {
+			return fmt.Errorf("%w: %w", ErrCorruptCatalog, csession.ErrTimestampOrder)
+		}
 	}
 	if page.Refs[len(page.Refs)-1].SeqHi != page.SeqHi {
 		return fmt.Errorf("%w: index seq_hi mismatch", ErrCorruptCatalog)
+	}
+	if !page.HasTimestampRange || page.MinTimestampMS > page.MaxTimestampMS {
+		return fmt.Errorf("%w: invalid index timestamp range", ErrCorruptCatalog)
+	}
+	if page.MinTimestampMS != page.Refs[0].MinTimestampMS || page.MaxTimestampMS != page.Refs[len(page.Refs)-1].MaxTimestampMS {
+		return fmt.Errorf("%w: index timestamp range mismatch", ErrCorruptCatalog)
 	}
 	return nil
 }
 
 func verifyLeafRef(page leafPage, ref pageRef) error {
-	if ref.Level != 0 || ref.Count != len(page.Segments) || ref.SeqLo != page.SeqLo || ref.SeqHi != page.SeqHi || ref.Generation != page.Generation || ref.PageID != page.PageID {
+	if ref.Level != 0 || ref.Count != len(page.Segments) || ref.SeqLo != page.SeqLo || ref.SeqHi != page.SeqHi || ref.MinTimestampMS != page.MinTimestampMS || ref.MaxTimestampMS != page.MaxTimestampMS || ref.HasTimestampRange != page.HasTimestampRange || ref.Generation != page.Generation || ref.PageID != page.PageID {
 		return fmt.Errorf("%w: leaf ref mismatch", ErrCorruptCatalog)
 	}
 	return nil
 }
 
 func verifyIndexRef(page indexPage, ref pageRef) error {
-	if ref.Level != page.Level || ref.Count != len(page.Refs) || ref.SeqLo != page.SeqLo || ref.SeqHi != page.SeqHi || ref.Generation != page.Generation || ref.PageID != page.PageID {
+	if ref.Level != page.Level || ref.Count != len(page.Refs) || ref.SeqLo != page.SeqLo || ref.SeqHi != page.SeqHi || ref.MinTimestampMS != page.MinTimestampMS || ref.MaxTimestampMS != page.MaxTimestampMS || ref.HasTimestampRange != page.HasTimestampRange || ref.Generation != page.Generation || ref.PageID != page.PageID {
 		return fmt.Errorf("%w: index ref mismatch", ErrCorruptCatalog)
 	}
 	return nil

@@ -62,36 +62,45 @@ type headFile struct {
 }
 
 type pageRef struct {
-	Level      uint8  `json:"level,omitempty"`
-	SeqLo      uint64 `json:"seq_lo"`
-	SeqHi      uint64 `json:"seq_hi"`
-	Generation uint64 `json:"generation"`
-	PageID     string `json:"page_id"`
-	Path       string `json:"path"`
-	Count      int    `json:"count"`
+	Level             uint8  `json:"level,omitempty"`
+	SeqLo             uint64 `json:"seq_lo"`
+	SeqHi             uint64 `json:"seq_hi"`
+	MinTimestampMS    int64  `json:"min_timestamp_ms"`
+	MaxTimestampMS    int64  `json:"max_timestamp_ms"`
+	HasTimestampRange bool   `json:"has_timestamp_range"`
+	Generation        uint64 `json:"generation"`
+	PageID            string `json:"page_id"`
+	Path              string `json:"path"`
+	Count             int    `json:"count"`
 }
 
 type leafPage struct {
-	Version    int                `json:"version"`
-	Type       string             `json:"type"`
-	StreamID   string             `json:"stream_id,omitempty"`
-	Partition  uint32             `json:"partition"`
-	SeqLo      uint64             `json:"seq_lo"`
-	SeqHi      uint64             `json:"seq_hi"`
-	Generation uint64             `json:"generation"`
-	PageID     string             `json:"page_id,omitempty"`
-	Segments   []pmeta.SegmentRef `json:"segments"`
+	Version           int                `json:"version"`
+	Type              string             `json:"type"`
+	StreamID          string             `json:"stream_id,omitempty"`
+	Partition         uint32             `json:"partition"`
+	SeqLo             uint64             `json:"seq_lo"`
+	SeqHi             uint64             `json:"seq_hi"`
+	MinTimestampMS    int64              `json:"min_timestamp_ms"`
+	MaxTimestampMS    int64              `json:"max_timestamp_ms"`
+	HasTimestampRange bool               `json:"has_timestamp_range"`
+	Generation        uint64             `json:"generation"`
+	PageID            string             `json:"page_id,omitempty"`
+	Segments          []pmeta.SegmentRef `json:"segments"`
 }
 
 type indexPage struct {
-	Version    int       `json:"version"`
-	Type       string    `json:"type"`
-	Level      uint8     `json:"level"`
-	StreamID   string    `json:"stream_id,omitempty"`
-	Partition  uint32    `json:"partition"`
-	SeqLo      uint64    `json:"seq_lo"`
-	SeqHi      uint64    `json:"seq_hi"`
-	Generation uint64    `json:"generation"`
-	PageID     string    `json:"page_id,omitempty"`
-	Refs       []pageRef `json:"refs"`
+	Version           int       `json:"version"`
+	Type              string    `json:"type"`
+	Level             uint8     `json:"level"`
+	StreamID          string    `json:"stream_id,omitempty"`
+	Partition         uint32    `json:"partition"`
+	SeqLo             uint64    `json:"seq_lo"`
+	SeqHi             uint64    `json:"seq_hi"`
+	MinTimestampMS    int64     `json:"min_timestamp_ms"`
+	MaxTimestampMS    int64     `json:"max_timestamp_ms"`
+	HasTimestampRange bool      `json:"has_timestamp_range"`
+	Generation        uint64    `json:"generation"`
+	PageID            string    `json:"page_id,omitempty"`
+	Refs              []pageRef `json:"refs"`
 }

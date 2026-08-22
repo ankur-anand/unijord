@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
@@ -169,6 +170,136 @@ func assertCatalogModelsEqual(t *testing.T, ctx context.Context, memory, blobCat
 			t.Fatalf("FindSegment(%d) differs: blob=(%+v,%v) memory=(%+v,%v)", lsn, blobSegment, blobFound, memorySegment, memoryFound)
 		}
 	}
+
+	timestampProbes := []int64{-1, memoryHead.LastSegment.MaxTimestampMS, memoryHead.LastSegment.MaxTimestampMS + 1}
+	if len(memorySegments) > 0 {
+		timestampProbes = append(timestampProbes, memorySegments[0].MinTimestampMS, memorySegments[0].MaxTimestampMS)
+	}
+	for _, timestampMS := range timestampProbes {
+		req := pcatalog.TimestampLookupRequest{Partition: partition, TimestampMS: timestampMS}
+		memoryResult, err := memory.LookupTimestamp(ctx, req)
+		if err != nil {
+			t.Fatalf("memory LookupTimestamp(%d) error = %v", timestampMS, err)
+		}
+		blobResult, err := blobCatalog.LookupTimestamp(ctx, req)
+		if err != nil {
+			t.Fatalf("blob LookupTimestamp(%d) error = %v", timestampMS, err)
+		}
+		if blobResult != memoryResult {
+			t.Fatalf("LookupTimestamp(%d) differs: blob=%+v memory=%+v", timestampMS, blobResult, memoryResult)
+		}
+	}
+}
+
+func TestBlobCatalogLookupTimestampReadsOneTreePath(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	backend := &countingGetBackend{Backend: NewMemoryBackend()}
+	cat, err := New(backend, Options{LeafSegmentLimit: 2, IndexRefLimit: 2})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	writerID := [16]byte{1}
+	writer, err := cat.OpenWriter(ctx, 3, writerID)
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	var first pmeta.SegmentRef
+	for i := 0; i < 128; i++ {
+		base := uint64(i * 7)
+		segment := modelSegment(3, base, base+6, writer.Epoch(), writerID)
+		if i == 0 {
+			first = segment
+		}
+		if _, err := writer.AppendSegment(ctx, segment); err != nil {
+			t.Fatalf("AppendSegment(%d) error = %v", i, err)
+		}
+	}
+
+	head, _, err := cat.loadHead(ctx, 3)
+	if err != nil {
+		t.Fatalf("loadHead() error = %v", err)
+	}
+	roots := reachableRoots(head)
+	if len(roots) == 0 || roots[0].Level < 2 {
+		t.Fatalf("catalog did not build a multi-level tree: roots=%+v", roots)
+	}
+	backend.gets.Store(0)
+	got, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{Partition: 3, TimestampMS: first.MinTimestampMS})
+	if err != nil {
+		t.Fatalf("LookupTimestamp() error = %v", err)
+	}
+	if !got.Found || got.Segment != first {
+		t.Fatalf("LookupTimestamp() = %+v, want first segment %+v", got, first)
+	}
+	wantGets := int64(roots[0].Level) + 2 // head + one page at each tree level
+	if gotGets := backend.gets.Load(); gotGets != wantGets {
+		t.Fatalf("backend Get calls = %d, want one tree path (%d)", gotGets, wantGets)
+	}
+
+	backend.gets.Store(0)
+	missing, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{
+		Partition:   3,
+		TimestampMS: head.LastSegment.MaxTimestampMS + 1,
+	})
+	if err != nil {
+		t.Fatalf("LookupTimestamp(newer than head) error = %v", err)
+	}
+	if missing.Found {
+		t.Fatalf("LookupTimestamp(newer than head) = %+v, want not found", missing)
+	}
+	if gotGets := backend.gets.Load(); gotGets != 1 {
+		t.Fatalf("backend Get calls for newer timestamp = %d, want head only", gotGets)
+	}
+}
+
+func TestBlobCatalogLookupTimestampChoosesEarlierSegmentAtPageBoundary(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cat, err := NewMemory(Options{LeafSegmentLimit: 2, IndexRefLimit: 2})
+	if err != nil {
+		t.Fatalf("NewMemory() error = %v", err)
+	}
+	writerID := [16]byte{1}
+	writer, err := cat.OpenWriter(ctx, 9, writerID)
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	segments := []pmeta.SegmentRef{
+		modelSegment(9, 0, 6, writer.Epoch(), writerID),
+		modelSegment(9, 7, 13, writer.Epoch(), writerID),
+		modelSegment(9, 14, 20, writer.Epoch(), writerID),
+		modelSegment(9, 21, 27, writer.Epoch(), writerID),
+	}
+	segments[0].MinTimestampMS, segments[0].MaxTimestampMS = 100, 199
+	segments[1].MinTimestampMS, segments[1].MaxTimestampMS = 199, 299
+	segments[2].MinTimestampMS, segments[2].MaxTimestampMS = 299, 399
+	segments[3].MinTimestampMS, segments[3].MaxTimestampMS = 400, 499
+	for _, segment := range segments {
+		if _, err := writer.AppendSegment(ctx, segment); err != nil {
+			t.Fatalf("AppendSegment(%d) error = %v", segment.BaseLSN, err)
+		}
+	}
+
+	got, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{Partition: 9, TimestampMS: 199})
+	if err != nil {
+		t.Fatalf("LookupTimestamp() error = %v", err)
+	}
+	if !got.Found || got.Segment != segments[0] {
+		t.Fatalf("LookupTimestamp() = %+v, want earliest segment %+v", got, segments[0])
+	}
+}
+
+type countingGetBackend struct {
+	Backend
+	gets atomic.Int64
+}
+
+func (b *countingGetBackend) Get(ctx context.Context, key string) (Object, error) {
+	b.gets.Add(1)
+	return b.Backend.Get(ctx, key)
 }
 
 func collectModelSegments(t *testing.T, ctx context.Context, catalog pcatalog.Reader, partition uint32) []pmeta.SegmentRef {

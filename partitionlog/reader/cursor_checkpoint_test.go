@@ -313,7 +313,7 @@ func TestCachedReadRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
 		t.Fatalf("Read() error = %v", err)
 	}
 	assertRecordsEqual(t, result.Records, fixture.records[:1])
-	loads, lists, _ := cat.Calls()
+	loads, lists, _, _ := cat.Calls()
 	if loads != 2 || lists != 2 {
 		t.Fatalf("catalog calls = loads:%d lists:%d, want loads:2 lists:2", loads, lists)
 	}
@@ -346,7 +346,7 @@ func TestFetchRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
 		t.Fatal("Fetch() found=false, want true")
 	}
 	assertRecordsEqual(t, []Record{result.Record}, fixture.records[2:3])
-	loads, _, finds := cat.Calls()
+	loads, _, finds, _ := cat.Calls()
 	if loads != 2 || finds != 2 {
 		t.Fatalf("catalog calls = loads:%d finds:%d, want loads:2 finds:2", loads, finds)
 	}
@@ -362,10 +362,10 @@ func TestTimestampReadRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
 		t.Fatalf("LoadPartition() error = %v", err)
 	}
 	cat := &topologyRetryCatalog{
-		head:             head,
-		segment:          segment,
-		listFailuresLeft: 1,
-		listErr:          errors.New("stale timestamp index page"),
+		head:               head,
+		segment:            segment,
+		lookupFailuresLeft: 1,
+		lookupErr:          errors.New("stale timestamp index page"),
 	}
 	r, err := New(cat, fixture.store, Options{})
 	if err != nil {
@@ -381,9 +381,9 @@ func TestTimestampReadRetriesOnceAfterCatalogTopologyChanges(t *testing.T) {
 		t.Fatalf("ConsumeFromTimestamp() error = %v", err)
 	}
 	assertRecordsEqual(t, result.Records, fixture.records[2:3])
-	loads, lists, _ := cat.Calls()
-	if loads != 2 || lists != 3 {
-		t.Fatalf("catalog calls = loads:%d lists:%d, want loads:2 lists:3", loads, lists)
+	loads, lists, _, lookups := cat.Calls()
+	if loads != 1 || lists != 1 || lookups != 2 {
+		t.Fatalf("catalog calls = loads:%d lists:%d lookups:%d, want loads:1 lists:1 lookups:2", loads, lists, lookups)
 	}
 }
 
@@ -419,7 +419,7 @@ func TestCachedReadRetriesCatalogAnomalyAtMostOnce(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Read() error = %v, want %v", err, wantErr)
 	}
-	loads, lists, _ := cat.Calls()
+	loads, lists, _, _ := cat.Calls()
 	if loads != 2 || lists != 2 {
 		t.Fatalf("catalog calls = loads:%d lists:%d, want loads:2 lists:2", loads, lists)
 	}
@@ -470,6 +470,10 @@ func (c *checkpointCatalog) FindSegment(context.Context, uint32, uint64) (pmeta.
 	return pmeta.SegmentRef{}, false, nil
 }
 
+func (c *checkpointCatalog) LookupTimestamp(context.Context, catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	return catalog.TimestampLookupResult{Head: c.head}, nil
+}
+
 func (c *checkpointCatalog) ListSegments(context.Context, catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
 	return pmeta.SegmentPage{}, nil
 }
@@ -493,13 +497,16 @@ type topologyRetryCatalog struct {
 	head    pmeta.PartitionHead
 	segment pmeta.SegmentRef
 
-	listFailuresLeft int
-	listErr          error
-	findMissesLeft   int
+	listFailuresLeft   int
+	listErr            error
+	findMissesLeft     int
+	lookupFailuresLeft int
+	lookupErr          error
 
-	loads int
-	lists int
-	finds int
+	loads   int
+	lists   int
+	finds   int
+	lookups int
 }
 
 func (c *topologyRetryCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {
@@ -523,6 +530,22 @@ func (c *topologyRetryCatalog) FindSegment(_ context.Context, _ uint32, lsn uint
 	return c.segment, true, nil
 }
 
+func (c *topologyRetryCatalog) LookupTimestamp(_ context.Context, req catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lookups++
+	if c.lookupFailuresLeft > 0 {
+		c.lookupFailuresLeft--
+		return catalog.TimestampLookupResult{}, c.lookupErr
+	}
+	result := catalog.TimestampLookupResult{Head: c.head}
+	if c.segment.MaxTimestampMS >= req.TimestampMS {
+		result.Segment = c.segment
+		result.Found = true
+	}
+	return result, nil
+}
+
 func (c *topologyRetryCatalog) ListSegments(_ context.Context, req catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -537,10 +560,10 @@ func (c *topologyRetryCatalog) ListSegments(_ context.Context, req catalog.ListS
 	return pmeta.SegmentPage{Segments: []pmeta.SegmentRef{c.segment}}, nil
 }
 
-func (c *topologyRetryCatalog) Calls() (loads int, lists int, finds int) {
+func (c *topologyRetryCatalog) Calls() (loads int, lists int, finds int, lookups int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.loads, c.lists, c.finds
+	return c.loads, c.lists, c.finds, c.lookups
 }
 
 func (c *retentionRaceCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta.PartitionHead, error) {
@@ -556,6 +579,16 @@ func (c *retentionRaceCatalog) LoadPartition(_ context.Context, _ uint32) (pmeta
 
 func (c *retentionRaceCatalog) FindSegment(context.Context, uint32, uint64) (pmeta.SegmentRef, bool, error) {
 	return pmeta.SegmentRef{}, false, nil
+}
+
+func (c *retentionRaceCatalog) LookupTimestamp(context.Context, catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	index := c.loads
+	if index >= len(c.heads) {
+		index = len(c.heads) - 1
+	}
+	return catalog.TimestampLookupResult{Head: c.heads[index]}, nil
 }
 
 func (c *retentionRaceCatalog) ListSegments(context.Context, catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
