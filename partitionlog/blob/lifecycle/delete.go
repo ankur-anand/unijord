@@ -42,7 +42,15 @@ func (r *Reclaimer) executeDeletes(ctx context.Context, state *stateFile, candid
 				firstErr = err
 			}
 		}
-		if ctx.Err() != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if firstFailed < 0 && end < len(candidates) {
+				return candidates[end].beforeKey, fmt.Errorf(
+					"lifecycle: delete cancelled after %d/%d candidates: %w",
+					end,
+					len(candidates),
+					ctxErr,
+				)
+			}
 			break
 		}
 	}

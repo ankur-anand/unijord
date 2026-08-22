@@ -72,6 +72,75 @@ func TestExecuteDeletesUsesNativeBatchesAndReportsFirstFailureCheckpoint(t *test
 	}
 }
 
+func TestExecuteDeletesCancellationBetweenWavesPreservesFirstUnattemptedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &cancelAfterFirstBatchBackend{
+		Store:  blobmemory.New(),
+		cancel: cancel,
+	}
+	r := newTestReclaimer(t, backend, &fakeCatalog{snapshot: maintenanceSnapshot(0, 0, 1, 0)}, segmentsink.NewLayout("root"), newFakeClock(time.Now()), Options{
+		DeleteBatchSize: 2,
+	})
+	result := Result{}
+	budget := runBudget{opts: r.opts, result: &result}
+	candidates := []deleteCandidate{
+		{key: "a", beforeKey: "start"},
+		{key: "b", beforeKey: "a"},
+		{key: "c", beforeKey: "b"},
+		{key: "d", beforeKey: "c"},
+		{key: "e", beforeKey: "d"},
+	}
+
+	checkpoint, err := r.executeDeletes(ctx, activeTestLease(r), candidates, &budget)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("executeDeletes() error = %v, want %v", err, context.Canceled)
+	}
+	if checkpoint != "b" {
+		t.Fatalf("checkpoint = %q, want b before first unattempted candidate c", checkpoint)
+	}
+	if result.DeletedObjects != 2 {
+		t.Fatalf("deleted objects = %d, want 2", result.DeletedObjects)
+	}
+	backend.mu.Lock()
+	waves := append([]int(nil), backend.waves...)
+	backend.mu.Unlock()
+	if !equalInts(waves, []int{2}) {
+		t.Fatalf("delete waves = %v, want [2]", waves)
+	}
+}
+
+func TestExecuteDeletesCancellationAfterFinalWaveReportsSuccess(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := &cancelAfterFirstBatchBackend{
+		Store:  blobmemory.New(),
+		cancel: cancel,
+	}
+	r := newTestReclaimer(t, backend, &fakeCatalog{snapshot: maintenanceSnapshot(0, 0, 1, 0)}, segmentsink.NewLayout("root"), newFakeClock(time.Now()), Options{
+		DeleteBatchSize: 2,
+	})
+	result := Result{}
+	budget := runBudget{opts: r.opts, result: &result}
+	candidates := []deleteCandidate{
+		{key: "a", beforeKey: "start"},
+		{key: "b", beforeKey: "a"},
+	}
+
+	checkpoint, err := r.executeDeletes(ctx, activeTestLease(r), candidates, &budget)
+	if err != nil {
+		t.Fatalf("executeDeletes() error = %v, want nil after every candidate was attempted", err)
+	}
+	if checkpoint != "" {
+		t.Fatalf("checkpoint = %q, want empty after complete success", checkpoint)
+	}
+	if result.DeletedObjects != len(candidates) {
+		t.Fatalf("deleted objects = %d, want %d", result.DeletedObjects, len(candidates))
+	}
+}
+
 func TestRunBudgetAllowsOneOversizedDeleteForProgress(t *testing.T) {
 	t.Parallel()
 
@@ -148,6 +217,28 @@ type nativeBatchBackend struct {
 	mu      sync.Mutex
 	failKey string
 	waves   []int
+}
+
+type cancelAfterFirstBatchBackend struct {
+	*blobmemory.Store
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	waves  []int
+}
+
+func (b *cancelAfterFirstBatchBackend) Delete(context.Context, string) error {
+	panic("individual Delete called for native batch backend")
+}
+
+func (b *cancelAfterFirstBatchBackend) DeleteBatch(_ context.Context, keys []string) []error {
+	b.mu.Lock()
+	b.waves = append(b.waves, len(keys))
+	wave := len(b.waves)
+	b.mu.Unlock()
+	if wave == 1 {
+		b.cancel()
+	}
+	return make([]error, len(keys))
 }
 
 func (b *nativeBatchBackend) Delete(context.Context, string) error {
