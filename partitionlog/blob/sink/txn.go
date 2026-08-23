@@ -42,6 +42,12 @@ func (t *segmentTxn) Abort(ctx context.Context) error {
 
 func mapStreamSegmentError(err error) error {
 	switch {
+	case errors.Is(err, uploadstream.ErrCommitIndeterminate), errors.Is(err, multipart.ErrCommitIndeterminate):
+		mapped := fmt.Errorf("%w: %w", segwriter.ErrTxnCommitIndeterminate, err)
+		if errors.Is(err, uploadstream.ErrBackendContract) {
+			return fmt.Errorf("%w: %w", segwriter.ErrSinkContract, mapped)
+		}
+		return mapped
 	case errors.Is(err, uploadstream.ErrAborted):
 		return fmt.Errorf("%w: %w", segwriter.ErrTxnAborted, err)
 	case errors.Is(err, uploadstream.ErrClosed):
@@ -57,6 +63,8 @@ func mapStreamSegmentError(err error) error {
 
 func mapMultipartSegmentError(err error) error {
 	switch {
+	case errors.Is(err, multipart.ErrCommitIndeterminate):
+		return fmt.Errorf("%w: %w", segwriter.ErrTxnCommitIndeterminate, err)
 	case errors.Is(err, multipart.ErrCleaned):
 		return fmt.Errorf("%w: %w", segwriter.ErrTxnAborted, err)
 	case errors.Is(err, multipart.ErrCommitted):

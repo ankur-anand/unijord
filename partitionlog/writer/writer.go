@@ -1150,6 +1150,10 @@ func wrapSegmentWrite(err error) error {
 	if errors.Is(err, ErrSegmentWriteFailed) {
 		return err
 	}
+	if errors.Is(err, segwriter.ErrTxnCommitIndeterminate) {
+		indeterminate := fmt.Errorf("%w: %w", ErrSegmentCommitIndeterminate, err)
+		return fmt.Errorf("%w: %w", ErrSegmentWriteFailed, indeterminate)
+	}
 	return fmt.Errorf("%w: %w", ErrSegmentWriteFailed, err)
 }
 

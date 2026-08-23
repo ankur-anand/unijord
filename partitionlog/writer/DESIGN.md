@@ -411,6 +411,7 @@ Foreground write errors:
 - `ErrTimestampOrder`
 - `ErrLSNExhausted`
 - `ErrSegmentWriteFailed`
+- `ErrSegmentCommitIndeterminate`
 
 Publish errors:
 
@@ -434,6 +435,9 @@ Rules:
 - `ErrSegmentStartFailed` is retryable and does not make the writer terminal;
 - `ErrTimestampOrder`, `ErrLSNExhausted`, and `ErrSegmentWriteFailed` are
   terminal;
+- `ErrSegmentCommitIndeterminate` also matches `ErrSegmentWriteFailed`, but
+  specifically means that the final segment object may already be durable and
+  must not be treated as a definite failed object creation;
 - an asynchronous finalize or publish failure is recorded and returned by the
   next foreground call once;
 - `Err()` returns the first terminal cause.

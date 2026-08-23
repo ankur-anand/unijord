@@ -21,8 +21,16 @@ var limits = multipart.Limits{
 	MaxObjectSize: (5 << 30) * 10_000,
 }
 
+type s3API interface {
+	CreateMultipartUpload(context.Context, *awss3.CreateMultipartUploadInput, ...func(*awss3.Options)) (*awss3.CreateMultipartUploadOutput, error)
+	UploadPart(context.Context, *awss3.UploadPartInput, ...func(*awss3.Options)) (*awss3.UploadPartOutput, error)
+	CompleteMultipartUpload(context.Context, *awss3.CompleteMultipartUploadInput, ...func(*awss3.Options)) (*awss3.CompleteMultipartUploadOutput, error)
+	HeadObject(context.Context, *awss3.HeadObjectInput, ...func(*awss3.Options)) (*awss3.HeadObjectOutput, error)
+	AbortMultipartUpload(context.Context, *awss3.AbortMultipartUploadInput, ...func(*awss3.Options)) (*awss3.AbortMultipartUploadOutput, error)
+}
+
 type Store struct {
-	client *awss3.Client
+	client s3API
 	bucket string
 }
 
@@ -41,6 +49,9 @@ func NewStore(client *awss3.Client, bucket string) (*Store, error) {
 func (s *Store) Limits() multipart.Limits { return limits }
 
 func (s *Store) Begin(ctx context.Context, key string, opts multipart.Options) (multipart.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	opts, err := multipart.NormalizeOptions(key, opts)
 	if err != nil {
 		return nil, err
@@ -70,7 +81,7 @@ func (s *Store) Begin(ctx context.Context, key string, opts multipart.Options) (
 type session struct {
 	mu sync.Mutex
 
-	client   *awss3.Client
+	client   s3API
 	bucket   string
 	key      string
 	opts     multipart.Options
@@ -83,6 +94,9 @@ type session struct {
 	cleaned     bool
 	cleanupDone chan struct{}
 	cleanupErr  error
+
+	partsInFlight int
+	partsDone     chan struct{}
 }
 
 type s3Part struct {
@@ -195,6 +209,9 @@ func (u *session) Commit(ctx context.Context, request multipart.CommitRequest) (
 }
 
 func (u *session) Cleanup(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	u.mu.Lock()
 	if u.committed != nil {
 		u.mu.Unlock()
@@ -222,24 +239,31 @@ func (u *session) Cleanup(ctx context.Context) error {
 		return nil
 	}
 	u.cleaning = true
+	u.cleaned = true
 	u.cleanupDone = make(chan struct{})
 	done := u.cleanupDone
+	partsDone := u.partsDone
+	if u.partsInFlight == 0 {
+		partsDone = nil
+	}
+	for _, part := range u.parts {
+		part.signal()
+	}
 	u.mu.Unlock()
 
+	if partsDone != nil {
+		select {
+		case <-partsDone:
+		case <-ctx.Done():
+			u.finishCleanup(ctx.Err(), done)
+			return ctx.Err()
+		}
+	}
 	_, err := u.client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
 		Bucket: aws.String(u.bucket), Key: aws.String(u.key), UploadId: aws.String(u.uploadID),
 	})
 	err = mapCleanupError(err)
-	u.mu.Lock()
-	u.cleaning = false
-	u.cleaned = true
-	u.cleanupErr = err
-	for _, part := range u.parts {
-		part.signal()
-	}
-	u.parts = nil
-	u.mu.Unlock()
-	close(done)
+	u.finishCleanup(err, done)
 	return err
 }
 
@@ -267,12 +291,17 @@ func (u *session) reservePart(part multipart.Part) (*s3Part, bool, *multipart.Re
 	}
 	entry := &s3Part{checksum: part.ChecksumSHA256, done: make(chan struct{})}
 	u.parts[part.Number] = entry
+	if u.partsInFlight == 0 {
+		u.partsDone = make(chan struct{})
+	}
+	u.partsInFlight++
 	return entry, true, nil, nil
 }
 
 func (u *session) finishPart(number int, entry *s3Part, receipt multipart.Receipt, success bool) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	defer u.finishPartAttemptLocked()
 	current := u.parts[number]
 	if current != entry {
 		entry.signal()
@@ -292,6 +321,25 @@ func (u *session) finishPart(number int, entry *s3Part, receipt multipart.Receip
 	entry.complete = true
 	entry.signal()
 	return nil
+}
+
+func (u *session) finishPartAttemptLocked() {
+	u.partsInFlight--
+	if u.partsInFlight < 0 {
+		panic("blob/sink/s3: negative in-flight part count")
+	}
+	if u.partsInFlight == 0 {
+		close(u.partsDone)
+	}
+}
+
+func (u *session) finishCleanup(err error, done chan struct{}) {
+	u.mu.Lock()
+	u.cleaning = false
+	u.cleanupErr = err
+	u.parts = nil
+	u.mu.Unlock()
+	close(done)
 }
 
 func (p *s3Part) signal() {

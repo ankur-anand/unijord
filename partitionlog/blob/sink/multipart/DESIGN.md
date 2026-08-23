@@ -29,6 +29,12 @@ mistaking another writer's object for its own.
 Every `Part` contains a SHA-256 checksum. Providers validate the checksum before
 performing I/O.
 
+This checksum identifies the logical part across retries. Receipts currently
+carry that identity back to the common stream; they do not attest that the
+provider independently recomputed SHA-256 over its stored bytes. Native
+provider checksums, when enabled by an adapter or SDK transport, are a separate
+end-to-end integrity mechanism.
+
 `PutPart` has these semantics:
 
 - a new part number uploads normally;
@@ -77,7 +83,8 @@ success.
 
 Provider behavior:
 
-- S3 calls `AbortMultipartUpload`.
+- S3 waits for every part request owned by the session to return, then calls
+  `AbortMultipartUpload`, so a late part cannot land behind the abort.
 - Azure marks the session terminal locally; Azure owns expiry of uncommitted
   blocks.
 - GCS waits for part attempts to finish and deletes all known session-specific

@@ -56,6 +56,11 @@ state before deciding whether the operation committed.
 If provider cleanup fails, `Abort` may be called again with a fresh context.
 The byte stream remains stopped; only staging cleanup is retried.
 
+Every constructed stream must end with a successful `Commit` or an `Abort`.
+`Commit` on an empty stream returns `ErrEmptyUpload` and deliberately leaves the
+stream open so the caller may still write data. A caller that abandons that
+stream must call `Abort` to stop its workers.
+
 The context passed to `Write` controls only that call's wait for buffers and
 queue capacity. Upload workers use the stream lifetime context, so one request
 deadline cannot cancel work already accepted from an earlier call. If a Write
@@ -75,3 +80,9 @@ The wrapped `multipart.Session` must:
 
 Final-object write-once preconditions remain in the provider adapters, while
 ordering, buffering, and lifecycle decisions remain in this package.
+
+The SHA-256 values in parts, receipts, and commit metadata are logical content
+identities used for retry conflict detection, contract validation, and commit
+reconciliation. They are not, by themselves, provider-attested proof that the
+remote service stored those bytes. Provider-native transport checksums are a
+separate integrity layer.

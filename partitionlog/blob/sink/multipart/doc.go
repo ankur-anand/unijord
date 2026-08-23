@@ -7,5 +7,7 @@
 //
 // Commit requires at least one receipt, and receipt numbers must be contiguous
 // starting at 1. PutPart retries are content-identified, Commit reconciles an
-// already-created final object, and Cleanup only refers to staging work.
+// already-created final object, and Cleanup only refers to staging work. Part
+// SHA-256 values are logical retry identities, not provider checksum
+// attestations unless a provider adapter explicitly supplies that guarantee.
 package multipart

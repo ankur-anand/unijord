@@ -19,7 +19,10 @@ type Txn interface {
 	Write(ctx context.Context, bytes []byte) error
 
 	// Commit publishes the complete byte stream. A successful result must have a
-	// non-empty URI and report the exact committed byte size.
+	// non-empty URI and report the exact committed byte size. When the sink cannot
+	// establish whether the object became durable, it returns an error matching
+	// ErrTxnCommitIndeterminate. Callers must not treat that outcome as a definite
+	// failure.
 	Commit(ctx context.Context) (CommittedObject, error)
 
 	// Abort stops the transaction and cleans staging work. It must be idempotent.

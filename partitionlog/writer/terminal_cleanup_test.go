@@ -86,6 +86,32 @@ func TestWriterFinalizeFailureAbortsEveryOpenSegmentTransaction(t *testing.T) {
 	assertAbortCalls(t, factory.sink(t, 2), 1)
 }
 
+func TestWriterPreservesIndeterminateSegmentCommit(t *testing.T) {
+	session := &sessionStub{snapshot: terminalCleanupSnapshot()}
+	factory := newTerminalCleanupFactory(0)
+	w := newTerminalCleanupWriter(t, session, factory)
+
+	appendOpenTransaction(t, w, factory, 0, 1)
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut() error = %v", err)
+	}
+	factory.sink(t, 0).waitCompleteStarted(t)
+	factory.sink(t, 0).failComplete(fmt.Errorf("%w: injected response loss", segwriter.ErrTxnCommitIndeterminate))
+
+	waitForWriterWorkers(t, w)
+	got := w.Err()
+	for _, target := range []error{
+		ErrSegmentWriteFailed,
+		ErrSegmentCommitIndeterminate,
+		segwriter.ErrTxnCommitIndeterminate,
+	} {
+		if !errors.Is(got, target) {
+			t.Fatalf("Writer.Err() = %v, want errors.Is(%v)", got, target)
+		}
+	}
+	assertAbortCalls(t, factory.sink(t, 0), 1)
+}
+
 func terminalCleanupSnapshot() Snapshot {
 	return Snapshot{
 		Head: pmeta.PartitionHead{

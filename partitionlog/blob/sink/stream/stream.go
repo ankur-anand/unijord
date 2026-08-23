@@ -33,6 +33,8 @@ var (
 // buffer bound is reached. Commit and Abort are safe to call concurrently.
 // Once Commit starts the backend's final commit, Abort returns
 // ErrCommitInProgress rather than claiming that the final object is absent.
+// A caller that abandons an upload without a successful Commit must call Abort;
+// this includes an empty upload whose Commit returned ErrEmptyUpload.
 type Upload interface {
 	Write(context.Context, []byte) error
 	Commit(context.Context) (multipart.ObjectAttrs, error)

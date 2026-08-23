@@ -120,7 +120,9 @@ type Txn interface {
 
 `Txn.Write` calls are serialized and must consume or copy the complete slice
 before returning. `Txn.Commit` must return a non-empty URI and the exact
-committed object size. `Txn.Abort` must be idempotent. All blocking sink calls
+committed object size. If it cannot establish whether the object became
+durable, its error must match `ErrTxnCommitIndeterminate`. `Txn.Abort` must be
+idempotent. All blocking sink calls
 must return when their context is canceled. Contract violations make the
 writer terminal and are reported through `ErrSinkContract`.
 
