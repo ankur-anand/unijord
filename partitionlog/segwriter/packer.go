@@ -4,53 +4,23 @@ import (
 	"context"
 	"fmt"
 	"hash"
-	"sort"
-	"sync"
 
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
 	"github.com/cespare/xxhash/v2"
 )
 
-type packerOptions struct {
-	PartSize          int
-	UploadParallelism int
-	UploadQueueSize   int
-	HashAlgo          segformat.HashAlgo
-	UploadLimiter     UploadLimiter
-}
-
+// packer preserves segment byte order, tracks offsets, and computes the body
+// hash. Multipart splitting and upload concurrency belong to the sink.
 type packer struct {
 	txn Txn
 
-	partSize int
-	limiter  UploadLimiter
-
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	parts   chan Part
-	results chan uploadResult
-	wg      sync.WaitGroup
-
-	buf        []byte
 	offset     uint64
-	nextPart   int
-	enqueued   int
-	collected  int
-	receipts   []PartReceipt
 	firstErr   error
 	bodySealed bool
 	completed  bool
 	aborted    bool
-	txnAborted bool
-	partsClose bool
 
 	hasher digest64
-}
-
-type uploadResult struct {
-	receipt PartReceipt
-	err     error
 }
 
 type digest64 interface {
@@ -66,53 +36,36 @@ func (d crc32Digest) Sum64() uint64 {
 	return uint64(d.Sum32())
 }
 
-func newPacker(ctx context.Context, txn Txn, opts packerOptions) (*packer, error) {
+func newPacker(txn Txn, hashAlgo segformat.HashAlgo) (*packer, error) {
 	if txn == nil {
 		return nil, fmt.Errorf("%w: txn is nil", ErrInvalidOptions)
 	}
-	if opts.PartSize <= 0 {
-		return nil, fmt.Errorf("%w: part_size must be positive", ErrInvalidOptions)
-	}
-	if opts.UploadParallelism <= 0 {
-		opts.UploadParallelism = 1
-	}
-	if opts.UploadQueueSize <= 0 {
-		opts.UploadQueueSize = opts.UploadParallelism
-	}
-	if err := opts.HashAlgo.Validate(); err != nil {
+	if err := hashAlgo.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidOptions, err)
 	}
-	hasher, err := newDigest(opts.HashAlgo)
+	hasher, err := newDigest(hashAlgo)
 	if err != nil {
 		return nil, err
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	p := &packer{
-		txn:      txn,
-		partSize: opts.PartSize,
-		limiter:  opts.UploadLimiter,
-		ctx:      workerCtx,
-		cancel:   cancel,
-		parts:    make(chan Part, opts.UploadQueueSize),
-		results:  make(chan uploadResult, opts.UploadParallelism),
-		hasher:   hasher,
-	}
-	for i := 0; i < opts.UploadParallelism; i++ {
-		p.wg.Add(1)
-		go p.uploadWorker()
-	}
-	return p, nil
+	return &packer{txn: txn, hasher: hasher}, nil
 }
 
 func (p *packer) Offset() uint64 {
 	return p.offset
 }
 
-func (p *packer) WriteBody(ctx context.Context, b []byte) error {
+func (p *packer) WriteBody(ctx context.Context, bytes []byte) error {
 	if p.bodySealed {
 		return ErrBodySealed
 	}
-	return p.write(ctx, b, true)
+	if err := p.write(ctx, bytes); err != nil {
+		return err
+	}
+	if _, err := p.hasher.Write(bytes); err != nil {
+		p.setFirstErr(err)
+		return err
+	}
+	return nil
 }
 
 func (p *packer) BodyHash() uint64 {
@@ -120,11 +73,11 @@ func (p *packer) BodyHash() uint64 {
 	return p.hasher.Sum64()
 }
 
-func (p *packer) WriteFinal(ctx context.Context, b []byte) error {
+func (p *packer) WriteFinal(ctx context.Context, bytes []byte) error {
 	if !p.bodySealed {
 		return ErrBodyNotSealed
 	}
-	return p.write(ctx, b, false)
+	return p.write(ctx, bytes)
 }
 
 func (p *packer) Complete(ctx context.Context) (CommittedObject, error) {
@@ -134,50 +87,36 @@ func (p *packer) Complete(ctx context.Context) (CommittedObject, error) {
 	if p.aborted {
 		return CommittedObject{}, ErrPackerAborted
 	}
+	if p.firstErr != nil {
+		return CommittedObject{}, p.firstErr
+	}
 	if !p.bodySealed {
 		return CommittedObject{}, ErrBodyNotSealed
 	}
 	if p.offset == 0 {
 		return CommittedObject{}, ErrEmptyObject
 	}
-	if err := p.pollResults(); err != nil {
-		p.abortAfterFailure()
+	if err := ctx.Err(); err != nil {
 		return CommittedObject{}, err
 	}
-	if err := p.flushPart(ctx); err != nil {
-		p.abortAfterFailure()
-		return CommittedObject{}, err
-	}
-	p.closeParts()
-	if err := p.collectUntilDone(ctx); err != nil {
-		p.abortAfterFailure()
-		return CommittedObject{}, err
-	}
-	p.wg.Wait()
-	if p.firstErr != nil {
-		return CommittedObject{}, p.firstErr
-	}
-	sort.Slice(p.receipts, func(i, j int) bool {
-		return p.receipts[i].Number < p.receipts[j].Number
-	})
-	obj, err := p.txn.Complete(ctx, p.receipts)
+
+	obj, err := p.txn.Commit(ctx)
 	if err != nil {
 		return CommittedObject{}, err
 	}
 	if obj.URI == "" {
-		err := fmt.Errorf("%w: complete returned an empty object URI", ErrSinkContract)
+		err := fmt.Errorf("%w: commit returned an empty object URI", ErrSinkContract)
 		p.setFirstErr(err)
 		p.abortAfterFailure()
 		return CommittedObject{}, err
 	}
 	if obj.SizeBytes != p.offset {
-		err := fmt.Errorf("%w: complete size=%d accepted_bytes=%d", ErrSinkContract, obj.SizeBytes, p.offset)
+		err := fmt.Errorf("%w: commit size=%d accepted_bytes=%d", ErrSinkContract, obj.SizeBytes, p.offset)
 		p.setFirstErr(err)
 		p.abortAfterFailure()
 		return CommittedObject{}, err
 	}
 	p.completed = true
-	p.cancel()
 	return obj, nil
 }
 
@@ -186,10 +125,10 @@ func (p *packer) Abort(ctx context.Context) error {
 		return nil
 	}
 	p.aborted = true
-	return p.abortAndWait(ctx)
+	return p.txn.Abort(ctx)
 }
 
-func (p *packer) write(ctx context.Context, b []byte, hashBody bool) error {
+func (p *packer) write(ctx context.Context, bytes []byte) error {
 	if p.completed {
 		return ErrPackerClosed
 	}
@@ -199,167 +138,23 @@ func (p *packer) write(ctx context.Context, b []byte, hashBody bool) error {
 	if p.aborted {
 		return ErrPackerAborted
 	}
-	if err := p.pollResults(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	for len(b) > 0 {
-		if p.buf == nil {
-			p.buf = make([]byte, 0, initialPartCapacity(p.partSize, len(b)))
-		}
-		n := p.partSize - len(p.buf)
-		if n > len(b) {
-			n = len(b)
-		}
-		chunk := b[:n]
-		p.buf = append(p.buf, chunk...)
-		if hashBody {
-			if _, err := p.hasher.Write(chunk); err != nil {
-				return err
-			}
-		}
-		p.offset += uint64(n)
-		b = b[n:]
-		if len(p.buf) == p.partSize {
-			if err := p.flushPart(ctx); err != nil {
-				return err
-			}
-		}
+	if len(bytes) == 0 {
+		return nil
 	}
-	return p.pollResults()
-}
-
-func (p *packer) flushPart(ctx context.Context) error {
-	if len(p.buf) == 0 {
-		return p.pollResults()
-	}
-	if err := p.pollResults(); err != nil {
-		return err
-	}
-	p.nextPart++
-	part := Part{
-		Number: p.nextPart,
-		Bytes:  p.buf,
-	}
-	p.buf = nil
-	select {
-	case p.parts <- part:
-		p.enqueued++
-		return p.pollResults()
-	case <-ctx.Done():
-		p.setFirstErr(ctx.Err())
-		return ctx.Err()
-	case <-p.ctx.Done():
-		err := p.ctx.Err()
+	if err := p.txn.Write(ctx, bytes); err != nil {
 		p.setFirstErr(err)
 		return err
 	}
-}
-
-func initialPartCapacity(partSize int, pendingBytes int) int {
-	if pendingBytes >= partSize {
-		return partSize
-	}
-	capacity := 64 << 10
-	if pendingBytes > capacity {
-		capacity = pendingBytes
-	}
-	if capacity > partSize {
-		capacity = partSize
-	}
-	return capacity
-}
-
-func (p *packer) uploadWorker() {
-	defer p.wg.Done()
-	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		case part, ok := <-p.parts:
-			if !ok {
-				return
-			}
-			if p.ctx.Err() != nil {
-				return
-			}
-			receipt, err := p.uploadPart(part)
-			if err == nil && receipt.Number != part.Number {
-				err = fmt.Errorf("%w: upload part=%d returned receipt=%d", ErrSinkContract, part.Number, receipt.Number)
-			}
-			result := uploadResult{receipt: receipt, err: err}
-			select {
-			case p.results <- result:
-			case <-p.ctx.Done():
-				return
-			}
-		}
-	}
-}
-
-func (p *packer) uploadPart(part Part) (PartReceipt, error) {
-	if p.limiter != nil {
-		if err := p.limiter.Acquire(p.ctx); err != nil {
-			return PartReceipt{}, err
-		}
-		defer p.limiter.Release()
-	}
-	return p.txn.UploadPart(p.ctx, part)
-}
-
-func (p *packer) pollResults() error {
-	// Results drained here are intentionally counted in p.collected.
-	// collectUntilDone waits on collected < enqueued, so early polling during
-	// writes cannot cause Complete to wait for already-observed uploads.
-	for {
-		select {
-		case result := <-p.results:
-			p.recordResult(result)
-		default:
-			if p.firstErr == nil && p.ctx != nil && p.ctx.Err() != nil {
-				p.setFirstErr(p.ctx.Err())
-			}
-			return p.firstErr
-		}
-	}
-}
-
-func (p *packer) collectUntilDone(ctx context.Context) error {
-	var lifetimeDone <-chan struct{}
-	if p.ctx != nil {
-		lifetimeDone = p.ctx.Done()
-	}
-	for p.collected < p.enqueued && p.firstErr == nil {
-		select {
-		case result := <-p.results:
-			p.recordResult(result)
-		case <-ctx.Done():
-			p.setFirstErr(ctx.Err())
-		case <-lifetimeDone:
-			p.setFirstErr(p.ctx.Err())
-		}
-	}
-	if p.firstErr != nil {
-		return p.firstErr
-	}
+	p.offset += uint64(len(bytes))
 	return nil
 }
 
-func (p *packer) recordResult(result uploadResult) {
-	p.collected++
-	if result.err != nil {
-		p.setFirstErr(result.err)
-		return
-	}
-	p.receipts = append(p.receipts, result.receipt)
-}
-
 func (p *packer) setFirstErr(err error) {
-	if err == nil {
-		return
-	}
-	if p.firstErr == nil {
+	if err != nil && p.firstErr == nil {
 		p.firstErr = err
-		p.cancel()
 	}
 }
 
@@ -367,27 +162,7 @@ func (p *packer) abortAfterFailure() {
 	p.aborted = true
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = p.abortAndWait(ctx)
-}
-
-func (p *packer) abortAndWait(ctx context.Context) error {
-	p.cancel()
-	p.closeParts()
-	var err error
-	if !p.txnAborted {
-		p.txnAborted = true
-		err = p.txn.Abort(ctx)
-	}
-	p.wg.Wait()
-	return err
-}
-
-func (p *packer) closeParts() {
-	if p.partsClose {
-		return
-	}
-	close(p.parts)
-	p.partsClose = true
+	_ = p.txn.Abort(ctx)
 }
 
 func newDigest(algo segformat.HashAlgo) (digest64, error) {

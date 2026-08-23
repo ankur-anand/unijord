@@ -16,7 +16,11 @@ import (
 	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
 )
 
-const maxBlockNumber = 50_000
+var limits = multipart.Limits{
+	MaxPartSize:   4_000 << 20,
+	MaxPartCount:  50_000,
+	MaxObjectSize: (4_000 << 20) * 50_000,
+}
 
 type Store struct {
 	container *container.Client
@@ -31,7 +35,9 @@ func NewStore(container *container.Client) (*Store, error) {
 	return &Store{container: container}, nil
 }
 
-func (s *Store) BeginMultipart(ctx context.Context, key string, opts multipart.Options) (multipart.Upload, error) {
+func (s *Store) Limits() multipart.Limits { return limits }
+
+func (s *Store) Begin(ctx context.Context, key string, opts multipart.Options) (multipart.Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -39,180 +45,301 @@ func (s *Store) BeginMultipart(ctx context.Context, key string, opts multipart.O
 	if err != nil {
 		return nil, err
 	}
-	return &upload{
+	return &session{
 		blob:  s.container.NewBlockBlobClient(key),
 		key:   key,
 		opts:  opts,
-		parts: make(map[int]azurePart),
+		parts: make(map[int]*azurePart),
 	}, nil
 }
 
-type upload struct {
-	mu        sync.Mutex
-	blob      *blockblob.Client
-	key       string
-	opts      multipart.Options
-	parts     map[int]azurePart
-	aborted   bool
-	completed bool
+type session struct {
+	mu sync.Mutex
+
+	blob  *blockblob.Client
+	key   string
+	opts  multipart.Options
+	parts map[int]*azurePart
+
+	committing bool
+	committed  *multipart.ObjectAttrs
+	cleaned    bool
 }
 
 type azurePart struct {
-	blockID string
-	size    uint64
-	done    bool
+	blockID  string
+	checksum [32]byte
+	done     chan struct{}
+	doneOnce sync.Once
+	receipt  multipart.Receipt
+	complete bool
 }
 
-func (u *upload) UploadPart(ctx context.Context, part multipart.Part) (multipart.Receipt, error) {
-	if err := multipart.ValidatePart(part); err != nil {
+func (u *session) Limits() multipart.Limits { return limits }
+
+func (u *session) PutPart(ctx context.Context, part multipart.Part) (multipart.Receipt, error) {
+	if err := multipart.ValidatePartLimits(part, limits); err != nil {
 		return multipart.Receipt{}, err
 	}
-	if part.Number > maxBlockNumber {
-		return multipart.Receipt{}, fmt.Errorf("%w: azure block number=%d max=%d", multipart.ErrInvalidStore, part.Number, maxBlockNumber)
-	}
-	blockID := blockID(part.Number)
-	if err := u.reservePart(part.Number, blockID); err != nil {
-		return multipart.Receipt{}, err
-	}
+	for {
+		entry, owner, cached, err := u.reservePart(part)
+		if err != nil {
+			return multipart.Receipt{}, err
+		}
+		if cached != nil {
+			return *cached, nil
+		}
+		if !owner {
+			select {
+			case <-entry.done:
+				continue
+			case <-ctx.Done():
+				return multipart.Receipt{}, ctx.Err()
+			}
+		}
 
-	body := readSeekCloser{Reader: bytes.NewReader(part.Bytes)}
-	if _, err := u.blob.StageBlock(ctx, blockID, body, nil); err != nil {
-		u.dropPart(part.Number)
-		return multipart.Receipt{}, mapError(err)
+		body := readSeekCloser{Reader: bytes.NewReader(part.Bytes)}
+		if _, err := u.blob.StageBlock(ctx, entry.blockID, body, nil); err != nil {
+			u.finishPart(part.Number, entry, multipart.Receipt{}, false)
+			return multipart.Receipt{}, mapError(err)
+		}
+		receipt := multipart.Receipt{
+			Number:         part.Number,
+			Token:          entry.blockID,
+			SizeBytes:      uint64(len(part.Bytes)),
+			ChecksumSHA256: part.ChecksumSHA256,
+		}
+		if err := u.finishPart(part.Number, entry, receipt, true); err != nil {
+			return multipart.Receipt{}, err
+		}
+		return receipt, nil
 	}
-
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.aborted {
-		delete(u.parts, part.Number)
-		return multipart.Receipt{}, multipart.ErrAborted
-	}
-	u.parts[part.Number] = azurePart{blockID: blockID, size: uint64(len(part.Bytes)), done: true}
-	return multipart.Receipt{
-		Number:    part.Number,
-		Token:     blockID,
-		SizeBytes: uint64(len(part.Bytes)),
-	}, nil
 }
 
-func (u *upload) Complete(ctx context.Context, receipts []multipart.Receipt) (multipart.ObjectAttrs, error) {
-	if err := multipart.ValidateReceipts(receipts); err != nil {
+func (u *session) Commit(ctx context.Context, request multipart.CommitRequest) (multipart.ObjectAttrs, error) {
+	if err := multipart.ValidateCommitRequest(request, limits); err != nil {
 		return multipart.ObjectAttrs{}, err
 	}
-	blockIDs, size, err := u.blocksFor(receipts)
-	if err != nil {
-		return multipart.ObjectAttrs{}, err
+	blockIDs, attrs, done, err := u.beginCommit(request)
+	if done || err != nil {
+		return attrs, err
 	}
 
 	none := azcore.ETag("*")
-	out, err := u.blob.CommitBlockList(ctx, blockIDs, &blockblob.CommitBlockListOptions{
-		HTTPHeaders: &azblobblob.HTTPHeaders{
-			BlobContentType: &u.opts.ContentType,
-		},
+	out, commitErr := u.blob.CommitBlockList(ctx, blockIDs, &blockblob.CommitBlockListOptions{
+		HTTPHeaders: &azblobblob.HTTPHeaders{BlobContentType: &u.opts.ContentType},
+		Metadata:    pointerMetadata(multipart.CommitMetadata(u.opts, request)),
 		AccessConditions: &azblobblob.AccessConditions{
-			ModifiedAccessConditions: &azblobblob.ModifiedAccessConditions{
-				IfNoneMatch: &none,
-			},
+			ModifiedAccessConditions: &azblobblob.ModifiedAccessConditions{IfNoneMatch: &none},
 		},
 	})
-	if err != nil {
-		return multipart.ObjectAttrs{}, mapError(err)
+	if commitErr != nil {
+		return u.finishCommitError(ctx, request, mapError(commitErr))
 	}
-	token := etagString(out.ETag)
+
+	attrs = multipart.ObjectAttrs{
+		Key: u.key, SizeBytes: request.SizeBytes, Token: etagString(out.ETag), SessionID: u.opts.SessionID, ObjectSHA256: request.ObjectSHA256,
+	}
 	if props, err := u.blob.BlobClient().GetProperties(ctx, nil); err == nil {
 		if props.ContentLength != nil && *props.ContentLength >= 0 {
-			size = uint64(*props.ContentLength)
+			attrs.SizeBytes = uint64(*props.ContentLength)
 		}
 		if props.ETag != nil {
-			token = etagString(props.ETag)
+			attrs.Token = etagString(props.ETag)
 		}
 	}
-
-	u.mu.Lock()
-	u.completed = true
-	u.mu.Unlock()
-
-	return multipart.ObjectAttrs{Key: u.key, SizeBytes: size, Token: token}, nil
+	if attrs.SizeBytes != request.SizeBytes {
+		u.endCommit(nil)
+		return multipart.ObjectAttrs{}, fmt.Errorf("%w: azure committed size=%d want=%d", multipart.ErrCommitIndeterminate, attrs.SizeBytes, request.SizeBytes)
+	}
+	u.endCommit(&attrs)
+	return attrs, nil
 }
 
-func (u *upload) Abort(ctx context.Context) error {
+// Cleanup is intentionally local-only for Azure. Uncommitted blocks are not a
+// final object and Azure expires them. The method refuses while CommitBlockList
+// is running, so it can never report successful cleanup while publication may
+// be landing.
+func (u *session) Cleanup(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.completed || u.aborted {
+	if u.committed != nil || u.cleaned {
 		return nil
 	}
-	u.aborted = true
+	if u.committing {
+		return multipart.ErrCommitInProgress
+	}
+	u.cleaned = true
+	for _, part := range u.parts {
+		part.signal()
+	}
 	u.parts = nil
 	return nil
 }
 
-func (u *upload) reservePart(number int, blockID string) error {
+func (u *session) reservePart(part multipart.Part) (*azurePart, bool, *multipart.Receipt, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.aborted {
-		return multipart.ErrAborted
+	if u.cleaned {
+		return nil, false, nil, multipart.ErrCleaned
 	}
-	if u.completed {
-		return multipart.ErrCompleted
+	if u.committed != nil {
+		return nil, false, nil, multipart.ErrCommitted
 	}
-	if _, exists := u.parts[number]; exists {
-		return fmt.Errorf("%w: duplicate part %d", multipart.ErrInvalidStore, number)
+	if u.committing {
+		return nil, false, nil, multipart.ErrCommitInProgress
 	}
-	u.parts[number] = azurePart{blockID: blockID}
+	if existing := u.parts[part.Number]; existing != nil {
+		if existing.checksum != part.ChecksumSHA256 {
+			return nil, false, nil, fmt.Errorf("%w: azure part %d", multipart.ErrPartConflict, part.Number)
+		}
+		if existing.complete {
+			receipt := existing.receipt
+			return existing, false, &receipt, nil
+		}
+		return existing, false, nil, nil
+	}
+	entry := &azurePart{
+		blockID: blockID(u.opts.SessionID, part.Number), checksum: part.ChecksumSHA256, done: make(chan struct{}),
+	}
+	u.parts[part.Number] = entry
+	return entry, true, nil, nil
+}
+
+func (u *session) finishPart(number int, entry *azurePart, receipt multipart.Receipt, success bool) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.parts[number] != entry {
+		entry.signal()
+		return multipart.ErrCleaned
+	}
+	if !success {
+		delete(u.parts, number)
+		entry.signal()
+		return nil
+	}
+	if u.cleaned {
+		delete(u.parts, number)
+		entry.signal()
+		return multipart.ErrCleaned
+	}
+	entry.receipt = receipt
+	entry.complete = true
+	entry.signal()
 	return nil
 }
 
-func (u *upload) dropPart(number int) {
+func (p *azurePart) signal() { p.doneOnce.Do(func() { close(p.done) }) }
+
+func (u *session) beginCommit(request multipart.CommitRequest) ([]string, multipart.ObjectAttrs, bool, error) {
 	u.mu.Lock()
-	delete(u.parts, number)
+	defer u.mu.Unlock()
+	if u.cleaned {
+		return nil, multipart.ObjectAttrs{}, true, multipart.ErrCleaned
+	}
+	if u.committed != nil {
+		attrs := *u.committed
+		if attrs.SizeBytes != request.SizeBytes || request.ObjectSHA256 != ([32]byte{}) && attrs.ObjectSHA256 != request.ObjectSHA256 {
+			return nil, multipart.ObjectAttrs{}, true, multipart.ErrPreconditionFailed
+		}
+		return nil, attrs, true, nil
+	}
+	if u.committing {
+		return nil, multipart.ObjectAttrs{}, true, multipart.ErrCommitInProgress
+	}
+	if len(u.parts) != len(request.Receipts) {
+		return nil, multipart.ObjectAttrs{}, true, fmt.Errorf("%w: session has %d parts but commit has %d receipts", multipart.ErrPartConflict, len(u.parts), len(request.Receipts))
+	}
+	blockIDs := make([]string, 0, len(request.Receipts))
+	for _, receipt := range request.Receipts {
+		part := u.parts[receipt.Number]
+		if part == nil || !part.complete || part.receipt != receipt {
+			return nil, multipart.ObjectAttrs{}, true, fmt.Errorf("%w: receipt mismatch for azure block %d", multipart.ErrPartConflict, receipt.Number)
+		}
+		blockIDs = append(blockIDs, part.blockID)
+	}
+	u.committing = true
+	return blockIDs, multipart.ObjectAttrs{}, false, nil
+}
+
+func (u *session) finishCommitError(ctx context.Context, request multipart.CommitRequest, commitErr error) (multipart.ObjectAttrs, error) {
+	attrs, found, reconcileErr := u.reconcile(ctx, request)
+	if reconcileErr == nil && found {
+		u.endCommit(&attrs)
+		return attrs, nil
+	}
+	u.endCommit(nil)
+	if errors.Is(reconcileErr, multipart.ErrPreconditionFailed) {
+		return multipart.ObjectAttrs{}, reconcileErr
+	}
+	if errors.Is(commitErr, multipart.ErrPreconditionFailed) && reconcileErr == nil {
+		return multipart.ObjectAttrs{}, commitErr
+	}
+	return multipart.ObjectAttrs{}, errors.Join(multipart.ErrCommitIndeterminate, commitErr, reconcileErr)
+}
+
+func (u *session) reconcile(ctx context.Context, request multipart.CommitRequest) (multipart.ObjectAttrs, bool, error) {
+	props, err := u.blob.BlobClient().GetProperties(ctx, nil)
+	if err != nil {
+		if isStatus(err, 404) {
+			return multipart.ObjectAttrs{}, false, nil
+		}
+		return multipart.ObjectAttrs{}, false, mapError(err)
+	}
+	size := uint64(0)
+	if props.ContentLength != nil && *props.ContentLength >= 0 {
+		size = uint64(*props.ContentLength)
+	}
+	if !multipart.MatchesCommittedObject(size, valueMetadata(props.Metadata), u.opts, request, true) {
+		return multipart.ObjectAttrs{}, false, multipart.ErrPreconditionFailed
+	}
+	return multipart.ObjectAttrs{
+		Key: u.key, SizeBytes: size, Token: etagString(props.ETag), SessionID: u.opts.SessionID, ObjectSHA256: request.ObjectSHA256,
+	}, true, nil
+}
+
+func (u *session) endCommit(attrs *multipart.ObjectAttrs) {
+	u.mu.Lock()
+	u.committing = false
+	if attrs != nil {
+		copy := *attrs
+		u.committed = &copy
+		u.parts = nil
+	}
 	u.mu.Unlock()
 }
 
-func (u *upload) blocksFor(receipts []multipart.Receipt) ([]string, uint64, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.aborted {
-		return nil, 0, multipart.ErrAborted
-	}
-	if u.completed {
-		return nil, 0, multipart.ErrCompleted
-	}
-	if len(receipts) == 0 {
-		return nil, 0, fmt.Errorf("%w: no receipts", multipart.ErrInvalidStore)
-	}
-
-	blockIDs := make([]string, 0, len(receipts))
-	var size uint64
-	for _, receipt := range receipts {
-		part, ok := u.parts[receipt.Number]
-		if !ok || !part.done {
-			return nil, 0, fmt.Errorf("%w: missing azure block %d", multipart.ErrInvalidStore, receipt.Number)
-		}
-		if receipt.Token != "" && receipt.Token != part.blockID {
-			return nil, 0, fmt.Errorf("%w: token mismatch for azure block %d", multipart.ErrInvalidStore, receipt.Number)
-		}
-		blockIDs = append(blockIDs, part.blockID)
-		size += part.size
-	}
-	return blockIDs, size, nil
-}
-
-type readSeekCloser struct {
-	*bytes.Reader
-}
+type readSeekCloser struct{ *bytes.Reader }
 
 var _ io.ReadSeekCloser = readSeekCloser{}
 
-func (r readSeekCloser) Close() error {
-	return nil
+func (r readSeekCloser) Close() error { return nil }
+
+func blockID(sessionID string, number int) string {
+	raw := fmt.Sprintf("unijord-%s-%06d", sessionID, number)
+	return base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
-func blockID(number int) string {
-	raw := fmt.Sprintf("partitionlog-block-%06d", number)
-	return base64.StdEncoding.EncodeToString([]byte(raw))
+func pointerMetadata(metadata map[string]string) map[string]*string {
+	out := make(map[string]*string, len(metadata))
+	for key, value := range metadata {
+		value := value
+		out[key] = &value
+	}
+	return out
+}
+
+func valueMetadata(metadata map[string]*string) map[string]string {
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if value != nil {
+			out[key] = *value
+		}
+	}
+	return out
 }
 
 func etagString(etag *azcore.ETag) string {
@@ -226,14 +353,16 @@ func mapError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var responseErr *azcore.ResponseError
-	if errors.As(err, &responseErr) {
-		switch responseErr.StatusCode {
-		case 404:
-			return fmt.Errorf("%w: %w", multipart.ErrAborted, err)
-		case 409, 412:
-			return fmt.Errorf("%w: %w", multipart.ErrPreconditionFailed, err)
-		}
+	if isStatus(err, 404) {
+		return fmt.Errorf("%w: %w", multipart.ErrCleaned, err)
+	}
+	if isStatus(err, 409) || isStatus(err, 412) {
+		return fmt.Errorf("%w: %w", multipart.ErrPreconditionFailed, err)
 	}
 	return err
+}
+
+func isStatus(err error, status int) bool {
+	var responseErr *azcore.ResponseError
+	return errors.As(err, &responseErr) && responseErr.StatusCode == status
 }

@@ -394,8 +394,10 @@ func runPublicAPIEndToEnd(t *testing.T, store partitionlog.Store) {
 			MaxPendingBytes:   8 << 20,
 		},
 		Pipeline: partitionlog.WriterPipelineOptions{
-			BlockBytes:        256,
-			PartBytes:         512,
+			BlockBytes: 256,
+			// Keep the shared cross-provider case valid for S3, whose multipart
+			// API requires every non-final part to be at least 5 MiB.
+			PartBytes:         5 << 20,
 			SealParallelism:   1,
 			BlockBuffers:      3,
 			UploadParallelism: 2,

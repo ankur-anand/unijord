@@ -853,22 +853,22 @@ type blockingTxn struct {
 	size uint64
 }
 
-func (t *blockingTxn) UploadPart(ctx context.Context, part Part) (PartReceipt, error) {
+func (t *blockingTxn) Write(ctx context.Context, bytes []byte) error {
 	t.sink.once.Do(func() {
 		close(t.sink.started)
 	})
 	select {
 	case <-t.sink.release:
 	case <-ctx.Done():
-		return PartReceipt{}, ctx.Err()
+		return ctx.Err()
 	}
 	t.mu.Lock()
-	t.size += uint64(len(part.Bytes))
+	t.size += uint64(len(bytes))
 	t.mu.Unlock()
-	return PartReceipt{Number: part.Number, Token: fmt.Sprintf("blocked-%d", part.Number)}, nil
+	return nil
 }
 
-func (t *blockingTxn) Complete(context.Context, []PartReceipt) (CommittedObject, error) {
+func (t *blockingTxn) Commit(context.Context) (CommittedObject, error) {
 	t.mu.Lock()
 	size := t.size
 	t.mu.Unlock()
@@ -893,12 +893,12 @@ type failingTxn struct {
 	sink *failingSink
 }
 
-func (t *failingTxn) UploadPart(context.Context, Part) (PartReceipt, error) {
-	return PartReceipt{}, t.sink.failErr
+func (t *failingTxn) Write(context.Context, []byte) error {
+	return t.sink.failErr
 }
 
-func (t *failingTxn) Complete(context.Context, []PartReceipt) (CommittedObject, error) {
-	return CommittedObject{}, fmt.Errorf("complete should not be called")
+func (t *failingTxn) Commit(context.Context) (CommittedObject, error) {
+	return CommittedObject{}, fmt.Errorf("commit should not be called")
 }
 
 func (t *failingTxn) Abort(context.Context) error {
@@ -959,14 +959,14 @@ type cleanupAwareTxn struct {
 	abortErr        error
 }
 
-func (t *cleanupAwareTxn) UploadPart(_ context.Context, part Part) (PartReceipt, error) {
+func (t *cleanupAwareTxn) Write(_ context.Context, bytes []byte) error {
 	t.mu.Lock()
-	t.size += uint64(len(part.Bytes))
+	t.size += uint64(len(bytes))
 	t.mu.Unlock()
-	return PartReceipt{Number: part.Number, Token: fmt.Sprintf("cleanup-%d", part.Number)}, nil
+	return nil
 }
 
-func (t *cleanupAwareTxn) Complete(ctx context.Context, _ []PartReceipt) (CommittedObject, error) {
+func (t *cleanupAwareTxn) Commit(ctx context.Context) (CommittedObject, error) {
 	t.completeOnce.Do(func() {
 		close(t.completeStarted)
 	})

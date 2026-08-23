@@ -1,16 +1,11 @@
 # segwriter packer
 
-The packer is an internal `segwriter` component that converts an ordered stream
-of segment bytes into ordered sink parts.
+The packer is the small boundary between segment-format assembly and a sink's
+ordered byte transaction. It has no multipart or provider knowledge.
 
-It has no segment-format knowledge. The writer decides which bytes to emit; the
-packer preserves byte order, computes the segment-body hash, splits bytes into
-parts, sends full parts asynchronously, and completes or aborts the sink
-transaction.
+## Byte model
 
-## Byte Model
-
-The writer emits this ordered stream:
+The writer emits one ordered stream:
 
 ```text
 file preamble
@@ -21,22 +16,13 @@ index preamble + index entries
 trailer
 ```
 
-The packer turns that stream into numbered parts:
-
-```text
-part 1
-part 2
-...
-part N
-```
-
-Part boundaries are independent from segment-format boundaries. A part may cut
-through any format region.
-
-## API Shape
+The packer forwards those byte slices to `Txn.Write` in exactly that order. It
+tracks the accepted offset and computes the segment-body hash. The trailer is
+written through `WriteFinal`, so it is intentionally excluded from
+`segment_hash`.
 
 ```go
-func newPacker(ctx context.Context, txn Txn, opts packerOptions) (*packer, error)
+func newPacker(txn Txn, hashAlgo segformat.HashAlgo) (*packer, error)
 
 func (p *packer) Offset() uint64
 func (p *packer) WriteBody(ctx context.Context, b []byte) error
@@ -46,132 +32,41 @@ func (p *packer) Complete(ctx context.Context) (CommittedObject, error)
 func (p *packer) Abort(ctx context.Context) error
 ```
 
-`WriteBody` appends bytes to the object and includes them in the segment-body
-hash. `WriteFinal` appends bytes without hashing them. `BodyHash` seals the
-body hash and must be called before `WriteFinal` or `Complete`.
-
-The segment trailer is written through `WriteFinal`, so it is outside
-`segment_hash`.
-
-## Sink Contract
+## Sink contract
 
 ```go
 type Txn interface {
-    UploadPart(ctx context.Context, part Part) (PartReceipt, error)
-    Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
+    Write(ctx context.Context, bytes []byte) error
+    Commit(ctx context.Context) (CommittedObject, error)
     Abort(ctx context.Context) error
 }
 ```
 
-`UploadPart` must be concurrency-safe, must fully consume or copy `part.Bytes`
-before returning, and must return the input part number in its receipt.
-`Complete` receives sorted contiguous receipts and must return a non-empty URI
-and the exact committed byte size. `Abort` must be idempotent, safe while
-uploads are running, and must interrupt in-flight uploads. Every blocking
-transaction method must return after its context is canceled. The packer
-rejects violations with `ErrSinkContract` rather than publishing inconsistent
-metadata.
+`Write` calls are serialized. A successful call must consume or copy the whole
+slice before returning. `Commit` must return a non-empty URI and the exact
+accepted byte size. `Abort` stops the transaction and cleans staging work.
 
-## Part Splitting
+The packer rejects an invalid committed URI or size with `ErrSinkContract` and
+aborts the transaction.
 
-The packer appends writes into an active part buffer. When the buffer reaches
-`PartSize`, it transfers that buffer to an upload worker and starts a new
-buffer.
+## Multipart ownership
 
-```text
-WriteBody("abc")
-WriteBody("defgh")
-PartSize = 4
+Part splitting, payload buffer pooling, upload queues, concurrent provider
+requests, receipt ordering, checksums, commit reconciliation, and staging
+cleanup are deliberately outside `segwriter`.
 
-part 1 = "abcd"
-part 2 = "efgh"
-```
+For object-backed segments, `partitionlog/blob/sink` adapts this ordered byte
+transaction to `blob/sink/stream`, which owns those multipart concerns. Other
+sinks may implement the ordered transaction directly; the in-memory sink simply
+appends each write.
 
-Non-final parts are exactly `PartSize` bytes. The final part is flushed by
-`Complete` and may be smaller.
-
-## Ownership
-
-When a part is flushed, ownership of the byte slice transfers to an upload
-worker:
-
-```go
-part := Part{Number: n, Bytes: p.buf}
-p.buf = nil
-```
-
-The packer never mutates the part bytes after enqueueing. The sink owns the
-bytes for the duration of `UploadPart`; after `UploadPart` returns, ownership
-ends.
-
-## Async Upload
-
-The packer starts `UploadParallelism` workers. Full parts are sent to the sink
-while the writer continues producing later bytes.
-
-```text
-writer goroutine
-  -> WriteBody / WriteFinal
-  -> enqueue full part
-
-upload workers
-  -> Txn.UploadPart concurrently
-  -> return receipts or first error
-
-Complete
-  -> flush final part
-  -> wait for uploads
-  -> sort receipts
-  -> Txn.Complete
-```
-
-Part numbers are assigned in byte order. Uploads may finish out of order; the
-packer sorts receipts before completion.
-
-## Contexts
-
-The context passed to `WriteBody`, `WriteFinal`, or `Complete` controls the
-caller while it is enqueueing a part or waiting for completion.
-
-Once a part has been accepted by the upload queue, the upload worker uses the
-packer lifetime context created by `newPacker`. Canceling a single write call
-does not cancel an already-enqueued upload. `Abort` cancels the packer lifetime
-context and calls `Txn.Abort` before waiting for upload workers to exit.
-Cancellation of the packer lifetime context also interrupts writes and
-completion waits, even when their individual caller contexts remain active.
-
-## Backpressure
-
-The upload queue is bounded by `UploadQueueSize`. If uploads are slower than
-writes and the queue fills, `WriteBody` / `WriteFinal` block until capacity is
-available, an upload fails, or the caller context is canceled.
-
-Approximate part-buffer memory:
-
-```text
-(1 active buffer + UploadQueueSize queued + UploadParallelism uploading) * PartSize
-```
-
-`UploadLimiter` is optional and sits below `UploadParallelism`. Use it to share
-a broader concurrency cap across many packers.
-
-## Error Semantics
-
-The first upload or sink error wins. After the first error:
-
-- future writes return that error;
-- `Complete` returns that error;
-- the writer should call `Abort`.
-
-`Complete` returns an error for an empty object. `Abort` is idempotent. After a
-successful `Complete`, future writes and completes fail, while `Abort` is a
-no-op.
+This separation keeps segment-format assembly independent from object-store
+limits and prevents two layers from buffering and scheduling the same bytes.
 
 ## Invariants
 
-- `Offset()` equals total accepted object bytes.
-- Part numbers are contiguous starting at `1`.
-- Non-final parts have `len(Bytes) == PartSize`.
-- Receipts passed to `Txn.Complete` are sorted by part number.
+- `Offset()` equals the bytes accepted by successful `Txn.Write` calls.
+- `Txn.Write` observes exactly the segment format's byte order.
 - `BodyHash()` excludes bytes written through `WriteFinal`.
-- Part byte slices are never mutated after enqueue.
+- `Complete` is rejected before `BodyHash` or for an empty object.
+- After the first write failure, later writes and completion return that error.

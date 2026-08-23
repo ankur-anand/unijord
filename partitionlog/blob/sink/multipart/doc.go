@@ -5,6 +5,7 @@
 // parts, and receipts; it does not know about partitions, LSNs, segment files,
 // catalogs, or retention.
 //
-// Complete requires at least one receipt, and receipt numbers must be contiguous
-// starting at 1. Provider implementations may add stricter limits.
+// Commit requires at least one receipt, and receipt numbers must be contiguous
+// starting at 1. PutPart retries are content-identified, Commit reconciles an
+// already-created final object, and Cleanup only refers to staging work.
 package multipart

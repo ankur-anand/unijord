@@ -1,12 +1,14 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ankur-anand/unijord/partitionlog/blob/sink/internal/sinktest"
 	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -28,17 +30,17 @@ func TestStoreMultipartEndToEndWithFakeS3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	upload, err := store.BeginMultipart(ctx, "partitionlog/segments/p00000001/test.plseg", multipart.Options{
+	upload, err := store.Begin(ctx, "partitionlog/segments/p00000001/test.plseg", multipart.Options{
 		ContentType: "application/octet-stream",
 	})
 	if err != nil {
 		t.Fatalf("BeginMultipart() error = %v", err)
 	}
-	receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte("hello s3 multipart")})
+	receipt, err := upload.PutPart(ctx, multipart.NewPart(1, []byte("hello s3 multipart")))
 	if err != nil {
 		t.Fatalf("UploadPart() error = %v", err)
 	}
-	attrs, err := upload.Complete(ctx, []multipart.Receipt{receipt})
+	attrs, err := upload.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt}))
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -69,7 +71,52 @@ func TestStoreMultipartEndToEndWithFakeS3(t *testing.T) {
 	}
 }
 
-func TestStoreAbortWithFakeS3(t *testing.T) {
+func TestStoreSessionRetryContractWithFakeS3(t *testing.T) {
+	client := newFakeS3Client(t, "segments")
+	store, err := NewStore(client, "segments")
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	sinktest.RunSessionRetryContract(t, store, "partitionlog/retry-contract")
+}
+
+func TestS3CommitReconcilesMatchingFinalObject(t *testing.T) {
+	ctx := context.Background()
+	const (
+		bucket    = "segments"
+		key       = "partitionlog/reconciled.seg"
+		sessionID = "00000000-0000-4000-8000-000000000003"
+	)
+	client := newFakeS3Client(t, bucket)
+	store, err := NewStore(client, bucket)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	started, err := store.Begin(ctx, key, multipart.Options{SessionID: sessionID})
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	body := []byte("already committed")
+	receipt, err := started.PutPart(ctx, multipart.NewPart(1, body))
+	if err != nil {
+		t.Fatalf("PutPart() error = %v", err)
+	}
+	if _, err := client.PutObject(ctx, &awss3.PutObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(body),
+		Metadata: map[string]string{multipart.MetadataSessionID: sessionID},
+	}); err != nil {
+		t.Fatalf("PutObject(existing final) error = %v", err)
+	}
+	attrs, err := started.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt}))
+	if err != nil {
+		t.Fatalf("Commit() error = %v, want reconciled success", err)
+	}
+	if attrs.SessionID != sessionID || attrs.SizeBytes != uint64(len(body)) {
+		t.Fatalf("Commit() attrs = %+v", attrs)
+	}
+}
+
+func TestStoreCleanupWithFakeS3(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -80,19 +127,19 @@ func TestStoreAbortWithFakeS3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	upload, err := store.BeginMultipart(ctx, "partitionlog/segments/p00000001/aborted.plseg", multipart.Options{})
+	upload, err := store.Begin(ctx, "partitionlog/segments/p00000001/aborted.plseg", multipart.Options{})
 	if err != nil {
 		t.Fatalf("BeginMultipart() error = %v", err)
 	}
-	receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte("abc")})
+	receipt, err := upload.PutPart(ctx, multipart.NewPart(1, []byte("abc")))
 	if err != nil {
 		t.Fatalf("UploadPart() error = %v", err)
 	}
-	if err := upload.Abort(ctx); err != nil {
-		t.Fatalf("Abort() error = %v", err)
+	if err := upload.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if _, err := upload.Complete(ctx, []multipart.Receipt{receipt}); !errors.Is(err, multipart.ErrAborted) {
-		t.Fatalf("Complete(after abort) error = %v, want %v", err, multipart.ErrAborted)
+	if _, err := upload.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt})); !errors.Is(err, multipart.ErrCleaned) {
+		t.Fatalf("Commit(after cleanup) error = %v, want %v", err, multipart.ErrCleaned)
 	}
 }
 
@@ -111,7 +158,7 @@ func TestStoreRejectsBadInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	if _, err := store.BeginMultipart(context.Background(), "", multipart.Options{}); !errors.Is(err, multipart.ErrInvalidStore) {
+	if _, err := store.Begin(context.Background(), "", multipart.Options{}); !errors.Is(err, multipart.ErrInvalidStore) {
 		t.Fatalf("BeginMultipart(empty key) error = %v, want %v", err, multipart.ErrInvalidStore)
 	}
 }

@@ -134,27 +134,21 @@ func (s *discardSink) Begin(context.Context, Plan) (Txn, error) {
 }
 
 type discardTxn struct {
-	mu    sync.Mutex
-	size  uint64
-	parts int
+	mu   sync.Mutex
+	size uint64
 }
 
-func (t *discardTxn) UploadPart(_ context.Context, part Part) (PartReceipt, error) {
+func (t *discardTxn) Write(_ context.Context, bytes []byte) error {
 	t.mu.Lock()
-	t.size += uint64(len(part.Bytes))
-	t.parts++
+	t.size += uint64(len(bytes))
 	t.mu.Unlock()
-	return PartReceipt{Number: part.Number, Token: fmt.Sprintf("discard-%d", part.Number)}, nil
+	return nil
 }
 
-func (t *discardTxn) Complete(_ context.Context, receipts []PartReceipt) (CommittedObject, error) {
+func (t *discardTxn) Commit(_ context.Context) (CommittedObject, error) {
 	t.mu.Lock()
 	size := t.size
-	parts := t.parts
 	t.mu.Unlock()
-	if len(receipts) != parts {
-		return CommittedObject{}, fmt.Errorf("receipts=%d parts=%d", len(receipts), parts)
-	}
 	return CommittedObject{
 		URI:       "discard://segment",
 		SizeBytes: size,

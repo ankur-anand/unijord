@@ -3,6 +3,7 @@
 //
 // It provides:
 //   - Factory, which writes immutable segment objects through a multipart.Store
+//   - bounded ordered streaming between segwriter and provider multipart calls
 //   - object key layout helpers for segment and staging paths
 //   - provider-specific multipart stores in subpackages such as s3, gcs, azure
 //

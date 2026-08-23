@@ -1,64 +1,97 @@
-# blob/sink/multipart Design
+# Multipart provider sessions
 
-`partitionlog/blob/sink/multipart` defines the small object-assembly contract
-used by `partitionlog/blob/sink`.
-
-It does not know about partitions, LSNs, segment files, catalog pages, or
-retention. Higher layers choose keys and adapt `Upload` into `segwriter.Txn`.
+`partitionlog/blob/sink/multipart` is the provider boundary beneath the common
+ordered-stream layer. It knows about object keys, staging sessions, numbered
+parts and final-object identity. It does not know about partitions, LSNs,
+segments, catalogs or retention.
 
 ## Contract
 
 ```go
-upload, err := store.BeginMultipart(ctx, key, multipart.Options{...})
-receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: b})
-attrs, err := upload.Complete(ctx, []multipart.Receipt{receipt})
-err := upload.Abort(ctx)
+session, err := store.Begin(ctx, key, multipart.Options{...})
+part := multipart.NewPart(1, bytes)
+receipt, err := session.PutPart(ctx, part)
+request := multipart.NewCommitRequest([]multipart.Receipt{receipt})
+attrs, err := session.Commit(ctx, request)
+err := session.Cleanup(ctx)
 ```
 
-Rules:
+Every store and opened session publishes the same `Limits`. The common stream
+selects a part size that satisfies those limits and rejects an object that
+would exceed its byte or part-count limit before accepting that `Write`.
 
-- part numbers are positive
-- receipts passed to `Complete` are contiguous starting at 1
-- `Complete` commits parts in receipt order
-- final object creation must be conditional on non-existence
-- blocking methods return when their context is canceled
-- `Abort` is idempotent, safe during part uploads, and interrupts in-flight uploads
-- provider precondition failures map to `ErrPreconditionFailed`
+Every session receives a UUID. The UUID isolates staging objects and is copied
+to final-object metadata so an ambiguous commit can be reconciled without
+mistaking another writer's object for its own.
 
-## Provider Mapping
+## Part identity and retries
 
-S3 uses native multipart upload:
+Every `Part` contains a SHA-256 checksum. Providers validate the checksum before
+performing I/O.
+
+`PutPart` has these semantics:
+
+- a new part number uploads normally;
+- retrying the same number and checksum is safe and returns the same logical
+  receipt;
+- reusing a number with different content returns `ErrPartConflict`;
+- different part numbers may upload concurrently.
+
+S3 safely overwrites an upload's part number. Azure safely re-stages a
+session-specific block ID. GCS creates a fresh attempt object for every remote
+attempt, so an old object whose success response was lost cannot make all later
+retries fail with a precondition error.
+
+## Commit identity and reconciliation
+
+`CommitRequest` carries ordered receipts, expected total size, and an optional
+whole-object SHA-256. Final object creation remains conditional on the key not
+existing.
+
+If publication returns an error, the provider inspects the final key:
 
 ```text
-CreateMultipartUpload
-UploadPart(part_number, bytes)
-CompleteMultipartUpload(receipts)
-AbortMultipartUpload
+matching session identity and size/checksum -> return success
+different final object                     -> ErrPreconditionFailed
+outcome cannot be established              -> ErrCommitIndeterminate
 ```
 
-GCS has no S3-style multipart commit API. It uploads each part as a temporary
-object and commits by composing temporary objects into the final object. GCS
-compose accepts at most 32 sources per call, so large commits are composed in
-levels under the staging prefix.
+Azure and GCS attach the final size and SHA-256 as metadata during commit. S3
+must attach metadata when its native multipart upload begins, before the final
+checksum is known, so S3 reconciliation uses the unique session UUID plus the
+native object size. A caller that supplies a SessionID is responsible for never
+reusing it for different content.
+
+Successful `Commit` is idempotent within the session. A retry returns the same
+`ObjectAttrs`.
+
+## Cleanup is not rollback
+
+`Cleanup` means:
+
+> stop using the session and make a best-effort attempt to remove staging work.
+
+It never promises that the final object is absent. Once the provider's final
+commit has started, `Cleanup` returns `ErrCommitInProgress` instead of claiming
+success.
+
+Provider behavior:
+
+- S3 calls `AbortMultipartUpload`.
+- Azure marks the session terminal locally; Azure owns expiry of uncommitted
+  blocks.
+- GCS waits for part attempts to finish and deletes all known session-specific
+  staging objects. Failed cleanup can be retried.
+
+## GCS composition
+
+GCS compose accepts at most 32 sources per request, so the adapter builds a
+tree. Every commit retry receives a unique subtree:
 
 ```text
-temporary object per part
-compose temp objects into final object with DoesNotExist precondition
-delete temporary objects best-effort
+<staging-session>/compose/<commit-attempt>/level-00/group-000000
 ```
 
-Azure Blob Storage uses block blobs:
-
-```text
-StageBlock(block_id, bytes)
-CommitBlockList(block_ids, If-None-Match: *)
-```
-
-Azure has no explicit abort for staged blocks. `Abort` marks the upload
-terminal locally; uncommitted blocks are provider-owned garbage and expire per
-Azure Blob Storage rules.
-
-## Memory Store
-
-The in-memory store implements the same contract for tests. It is not part of
-the production storage path.
+A partial tree from a failed attempt therefore cannot collide with the next
+attempt. The final key alone remains stable and write-once. Source generations
+are pinned in compose requests and staging deletion.

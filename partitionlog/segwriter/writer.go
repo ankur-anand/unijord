@@ -488,21 +488,18 @@ func (w *Writer) ensurePacker(ctx context.Context) (*packer, error) {
 	default:
 	}
 	txn, err := w.sink.Begin(ctx, Plan{
-		Partition: w.opts.Partition,
-		Codec:     w.opts.Codec,
-		HashAlgo:  w.opts.HashAlgo,
-		PartSize:  w.opts.PartSize,
+		Partition:         w.opts.Partition,
+		Codec:             w.opts.Codec,
+		HashAlgo:          w.opts.HashAlgo,
+		PartSize:          w.opts.PartSize,
+		UploadParallelism: w.opts.UploadParallelism,
+		UploadQueueSize:   w.opts.UploadQueueSize,
+		UploadLimiter:     w.opts.UploadLimiter,
 	})
 	if err != nil {
 		return nil, err
 	}
-	p, err := newPacker(w.ctx, txn, packerOptions{
-		PartSize:          w.opts.PartSize,
-		UploadParallelism: w.opts.UploadParallelism,
-		UploadQueueSize:   w.opts.UploadQueueSize,
-		HashAlgo:          w.opts.HashAlgo,
-		UploadLimiter:     w.opts.UploadLimiter,
-	})
+	p, err := newPacker(txn, w.opts.HashAlgo)
 	if err != nil {
 		abortTxnBestEffort(txn)
 		return nil, err

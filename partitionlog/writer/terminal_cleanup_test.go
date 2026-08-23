@@ -267,17 +267,17 @@ type terminalCleanupTxn struct {
 	abortCalls      atomic.Int32
 }
 
-func (t *terminalCleanupTxn) UploadPart(ctx context.Context, part segwriter.Part) (segwriter.PartReceipt, error) {
+func (t *terminalCleanupTxn) Write(ctx context.Context, bytes []byte) error {
 	if err := ctx.Err(); err != nil {
-		return segwriter.PartReceipt{}, err
+		return err
 	}
 	t.mu.Lock()
-	t.size += uint64(len(part.Bytes))
+	t.size += uint64(len(bytes))
 	t.mu.Unlock()
-	return segwriter.PartReceipt{Number: part.Number, Token: fmt.Sprintf("part-%d", part.Number)}, nil
+	return nil
 }
 
-func (t *terminalCleanupTxn) Complete(ctx context.Context, _ []segwriter.PartReceipt) (segwriter.CommittedObject, error) {
+func (t *terminalCleanupTxn) Commit(ctx context.Context) (segwriter.CommittedObject, error) {
 	t.completeOnce.Do(func() { close(t.completeStarted) })
 	if t.completeResult != nil {
 		select {

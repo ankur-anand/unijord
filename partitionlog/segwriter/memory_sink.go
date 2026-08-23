@@ -1,9 +1,7 @@
 package segwriter
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"sync"
 )
 
@@ -27,8 +25,7 @@ func (s *MemorySink) Begin(_ context.Context, _ Plan) (Txn, error) {
 	s.beginCount++
 	s.mu.Unlock()
 	return &memoryTxn{
-		sink:  s,
-		parts: make(map[int][]byte),
+		sink: s,
 	}, nil
 }
 
@@ -47,31 +44,31 @@ func (s *MemorySink) BeginCount() int {
 type memoryTxn struct {
 	mu        sync.Mutex
 	sink      *MemorySink
-	parts     map[int][]byte
+	bytes     []byte
 	aborted   bool
 	completed bool
 }
 
-func (t *memoryTxn) UploadPart(_ context.Context, part Part) (PartReceipt, error) {
+func (t *memoryTxn) Write(ctx context.Context, bytes []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.aborted {
-		return PartReceipt{}, ErrTxnAborted
+		return ErrTxnAborted
 	}
 	if t.completed {
-		return PartReceipt{}, ErrTxnCompleted
+		return ErrTxnCompleted
 	}
-	if part.Number <= 0 {
-		return PartReceipt{}, fmt.Errorf("%w: invalid part number %d", ErrInvalidOptions, part.Number)
-	}
-	t.parts[part.Number] = append([]byte(nil), part.Bytes...)
-	return PartReceipt{
-		Number: part.Number,
-		Token:  fmt.Sprintf("memory-part-%d", part.Number),
-	}, nil
+	t.bytes = append(t.bytes, bytes...)
+	return nil
 }
 
-func (t *memoryTxn) Complete(_ context.Context, receipts []PartReceipt) (CommittedObject, error) {
+func (t *memoryTxn) Commit(ctx context.Context) (CommittedObject, error) {
+	if err := ctx.Err(); err != nil {
+		return CommittedObject{}, err
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.aborted {
@@ -81,19 +78,7 @@ func (t *memoryTxn) Complete(_ context.Context, receipts []PartReceipt) (Committ
 		return CommittedObject{}, ErrTxnCompleted
 	}
 
-	var out bytes.Buffer
-	for i, receipt := range receipts {
-		want := i + 1
-		if receipt.Number != want {
-			return CommittedObject{}, fmt.Errorf("%w: receipt number=%d want=%d", ErrInvalidOptions, receipt.Number, want)
-		}
-		part, ok := t.parts[receipt.Number]
-		if !ok {
-			return CommittedObject{}, fmt.Errorf("%w: missing part %d", ErrInvalidOptions, receipt.Number)
-		}
-		out.Write(part)
-	}
-	object := out.Bytes()
+	object := append([]byte(nil), t.bytes...)
 	t.completed = true
 
 	t.sink.mu.Lock()
@@ -117,7 +102,7 @@ func (t *memoryTxn) Abort(_ context.Context) error {
 		return nil
 	}
 	t.aborted = true
-	t.parts = nil
+	t.bytes = nil
 	t.mu.Unlock()
 	return nil
 }

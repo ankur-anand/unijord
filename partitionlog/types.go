@@ -131,8 +131,8 @@ type WriterPipelineOptions struct {
 	// UploadParallelism is the number of concurrent multipart part uploads.
 	UploadParallelism int
 
-	// UploadQueueSize is the number of sealed parts that may wait for upload
-	// workers before backpressuring the segment emitter.
+	// UploadQueueSize is the number of full multipart buffers that may wait for
+	// upload workers before backpressuring the segment emitter.
 	UploadQueueSize int
 
 	// UploadLimiter optionally coordinates upload concurrency across writers.

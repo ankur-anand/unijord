@@ -7,8 +7,9 @@ It owns only segment-object mechanics:
 
 - segment object key naming
 - staging prefix naming
-- adapting `multipart.Upload` to `segwriter.Txn`
-- preserving provider receipts until `Complete`
+- adapting the ordered `segwriter.Txn` byte stream to `stream.MultipartUpload`
+- bounded part buffering, concurrent upload, receipt ordering, and commit
+  reconciliation
 
 It does not own catalog metadata, retention, reader lookup, or cache
 invalidation.
@@ -57,15 +58,22 @@ closed. Last LSN belongs in catalog metadata.
 ## Upload Flow
 
 ```text
-segwriter packer
-  -> UploadPart(part_number, bytes)
-  -> Complete(receipts in order)
+segwriter ordered bytes
+  -> blob sink transaction
+  -> bounded multipart stream
+  -> PutPart(part_number, bytes, sha256)
+  -> Commit(receipts in order, expected size and checksum)
   -> final segment object becomes visible
 ```
 
 The object store reassembles bytes by part order. Multipart parts are not
 segment-format blocks; a part may contain multiple blocks or cut through a
 block boundary.
+
+The segment writer passes `PartSize`, upload parallelism, queue size, and an
+optional process-wide upload limiter in `segwriter.Plan`. `Options.BufferPool`
+can additionally impose one payload-memory bound across every segment upload
+created by a factory.
 
 ## Failure Model
 

@@ -3,12 +3,19 @@ package multipart
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
-	"path"
+	"math"
 	"sort"
 	"strings"
 	"sync"
 )
+
+var memoryLimits = Limits{
+	MaxPartSize:   uint64(math.MaxInt),
+	MaxPartCount:  math.MaxInt,
+	MaxObjectSize: math.MaxUint64,
+}
 
 type MemoryStore struct {
 	mu         sync.RWMutex
@@ -17,15 +24,18 @@ type MemoryStore struct {
 }
 
 type memoryObject struct {
-	body  []byte
-	attrs ObjectAttrs
+	body     []byte
+	attrs    ObjectAttrs
+	metadata map[string]string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{objects: make(map[string]memoryObject)}
 }
 
-func (s *MemoryStore) BeginMultipart(ctx context.Context, key string, opts Options) (Upload, error) {
+func (s *MemoryStore) Limits() Limits { return memoryLimits }
+
+func (s *MemoryStore) Begin(ctx context.Context, key string, opts Options) (Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -33,7 +43,7 @@ func (s *MemoryStore) BeginMultipart(ctx context.Context, key string, opts Optio
 	if err != nil {
 		return nil, err
 	}
-	return &memoryUpload{
+	return &memorySession{
 		store: s,
 		key:   key,
 		opts:  opts,
@@ -71,7 +81,7 @@ func (s *MemoryStore) List(ctx context.Context, prefix string) ([]ObjectAttrs, e
 	return out, nil
 }
 
-type memoryUpload struct {
+type memorySession struct {
 	mu sync.Mutex
 
 	store *MemoryStore
@@ -79,110 +89,150 @@ type memoryUpload struct {
 	opts  Options
 	parts map[int]memoryPart
 
-	aborted   bool
-	completed bool
+	cleaned    bool
+	committing bool
+	committed  *ObjectAttrs
 }
 
 type memoryPart struct {
-	bytes []byte
-	token string
+	bytes   []byte
+	receipt Receipt
 }
 
-func (u *memoryUpload) UploadPart(ctx context.Context, part Part) (Receipt, error) {
+func (u *memorySession) Limits() Limits { return memoryLimits }
+
+func (u *memorySession) PutPart(ctx context.Context, part Part) (Receipt, error) {
 	if err := ctx.Err(); err != nil {
 		return Receipt{}, err
 	}
-	if err := ValidatePart(part); err != nil {
+	if err := ValidatePartLimits(part, memoryLimits); err != nil {
 		return Receipt{}, err
 	}
 
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.aborted {
-		return Receipt{}, ErrAborted
+	if u.cleaned {
+		return Receipt{}, ErrCleaned
 	}
-	if u.completed {
-		return Receipt{}, ErrCompleted
+	if u.committed != nil {
+		return Receipt{}, ErrCommitted
 	}
-	if _, ok := u.parts[part.Number]; ok {
-		return Receipt{}, fmt.Errorf("%w: duplicate part %d", ErrInvalidStore, part.Number)
+	if u.committing {
+		return Receipt{}, ErrCommitInProgress
+	}
+	if existing, ok := u.parts[part.Number]; ok {
+		if existing.receipt.ChecksumSHA256 != part.ChecksumSHA256 || !bytes.Equal(existing.bytes, part.Bytes) {
+			return Receipt{}, fmt.Errorf("%w: part %d", ErrPartConflict, part.Number)
+		}
+		return existing.receipt, nil
 	}
 
-	token := fmt.Sprintf("memory-part-%06d-%d", part.Number, len(part.Bytes))
-	u.parts[part.Number] = memoryPart{
-		bytes: append([]byte(nil), part.Bytes...),
-		token: token,
+	receipt := Receipt{
+		Number:         part.Number,
+		Token:          fmt.Sprintf("memory-part-%06d-%x", part.Number, part.ChecksumSHA256[:8]),
+		SizeBytes:      uint64(len(part.Bytes)),
+		ChecksumSHA256: part.ChecksumSHA256,
 	}
-	return Receipt{
-		Number:    part.Number,
-		Token:     token,
-		SizeBytes: uint64(len(part.Bytes)),
-	}, nil
+	u.parts[part.Number] = memoryPart{bytes: append([]byte(nil), part.Bytes...), receipt: receipt}
+	return receipt, nil
 }
 
-func (u *memoryUpload) Complete(ctx context.Context, receipts []Receipt) (ObjectAttrs, error) {
+func (u *memorySession) Commit(ctx context.Context, request CommitRequest) (ObjectAttrs, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectAttrs{}, err
 	}
-	if err := ValidateReceipts(receipts); err != nil {
+	if err := ValidateCommitRequest(request, memoryLimits); err != nil {
 		return ObjectAttrs{}, err
 	}
 
 	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.aborted {
-		return ObjectAttrs{}, ErrAborted
+	if u.cleaned {
+		u.mu.Unlock()
+		return ObjectAttrs{}, ErrCleaned
 	}
-	if u.completed {
-		return ObjectAttrs{}, ErrCompleted
+	if u.committed != nil {
+		attrs := *u.committed
+		u.mu.Unlock()
+		if attrs.SizeBytes != request.SizeBytes || request.ObjectSHA256 != ([sha256.Size]byte{}) && attrs.ObjectSHA256 != request.ObjectSHA256 {
+			return ObjectAttrs{}, ErrPreconditionFailed
+		}
+		return attrs, nil
+	}
+	if u.committing {
+		u.mu.Unlock()
+		return ObjectAttrs{}, ErrCommitInProgress
 	}
 
 	body := bytes.Buffer{}
-	for _, receipt := range receipts {
+	for _, receipt := range request.Receipts {
 		part, ok := u.parts[receipt.Number]
 		if !ok {
+			u.mu.Unlock()
 			return ObjectAttrs{}, fmt.Errorf("%w: missing part %d", ErrInvalidStore, receipt.Number)
 		}
-		if receipt.Token != "" && receipt.Token != part.token {
-			return ObjectAttrs{}, fmt.Errorf("%w: token mismatch for part %d", ErrInvalidStore, receipt.Number)
+		if receipt != part.receipt {
+			u.mu.Unlock()
+			return ObjectAttrs{}, fmt.Errorf("%w: receipt mismatch for part %d", ErrPartConflict, receipt.Number)
 		}
-		body.Write(part.bytes)
+		_, _ = body.Write(part.bytes)
 	}
+	assembled := append([]byte(nil), body.Bytes()...)
+	if request.ObjectSHA256 != ([sha256.Size]byte{}) && sha256.Sum256(assembled) != request.ObjectSHA256 {
+		u.mu.Unlock()
+		return ObjectAttrs{}, fmt.Errorf("%w: final object checksum mismatch", ErrPartConflict)
+	}
+	u.committing = true
+	u.mu.Unlock()
 
+	metadata := CommitMetadata(u.opts, request)
 	u.store.mu.Lock()
-	defer u.store.mu.Unlock()
-	if _, ok := u.store.objects[u.key]; ok {
+	if existing, ok := u.store.objects[u.key]; ok {
+		u.store.mu.Unlock()
+		u.mu.Lock()
+		u.committing = false
+		u.mu.Unlock()
+		if MatchesCommittedObject(uint64(len(existing.body)), existing.metadata, u.opts, request, true) {
+			attrs := existing.attrs
+			u.mu.Lock()
+			u.committed = &attrs
+			u.parts = nil
+			u.mu.Unlock()
+			return attrs, nil
+		}
 		return ObjectAttrs{}, ErrPreconditionFailed
 	}
 	u.store.generation++
 	attrs := ObjectAttrs{
-		Key:       u.key,
-		SizeBytes: uint64(body.Len()),
-		Token:     fmt.Sprintf("memory-generation-%d", u.store.generation),
+		Key:          u.key,
+		SizeBytes:    uint64(len(assembled)),
+		Token:        fmt.Sprintf("memory-generation-%d", u.store.generation),
+		SessionID:    u.opts.SessionID,
+		ObjectSHA256: request.ObjectSHA256,
 	}
-	u.store.objects[u.key] = memoryObject{
-		body:  append([]byte(nil), body.Bytes()...),
-		attrs: attrs,
-	}
-	u.completed = true
+	u.store.objects[u.key] = memoryObject{body: assembled, attrs: attrs, metadata: metadata}
+	u.store.mu.Unlock()
+
+	u.mu.Lock()
+	u.committing = false
+	u.committed = &attrs
 	u.parts = nil
+	u.mu.Unlock()
 	return attrs, nil
 }
 
-func (u *memoryUpload) Abort(ctx context.Context) error {
+func (u *memorySession) Cleanup(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.completed || u.aborted {
+	if u.committed != nil || u.cleaned {
 		return nil
 	}
-	u.aborted = true
+	if u.committing {
+		return ErrCommitInProgress
+	}
+	u.cleaned = true
 	u.parts = nil
 	return nil
-}
-
-func StagingPartKey(stagingPrefix string, number int) string {
-	return path.Join(stagingPrefix, fmt.Sprintf("part-%06d", number))
 }

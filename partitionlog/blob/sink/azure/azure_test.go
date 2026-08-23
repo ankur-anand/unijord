@@ -13,8 +13,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	"github.com/ankur-anand/unijord/partitionlog/blob/sink/internal/sinktest"
 	"github.com/ankur-anand/unijord/partitionlog/blob/sink/multipart"
 )
 
@@ -26,19 +28,19 @@ func TestStoreMultipartEndToEndWithFakeAzure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore error = %v", err)
 	}
-	upload, err := store.BeginMultipart(ctx, "segments/p-1.seg", multipart.Options{})
+	upload, err := store.Begin(ctx, "segments/p-1.seg", multipart.Options{})
 	if err != nil {
 		t.Fatalf("BeginMultipart error = %v", err)
 	}
-	r1, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte("hello ")})
+	r1, err := upload.PutPart(ctx, multipart.NewPart(1, []byte("hello ")))
 	if err != nil {
 		t.Fatalf("UploadPart(1) error = %v", err)
 	}
-	r2, err := upload.UploadPart(ctx, multipart.Part{Number: 2, Bytes: []byte("world")})
+	r2, err := upload.PutPart(ctx, multipart.NewPart(2, []byte("world")))
 	if err != nil {
 		t.Fatalf("UploadPart(2) error = %v", err)
 	}
-	attrs, err := upload.Complete(ctx, []multipart.Receipt{r1, r2})
+	attrs, err := upload.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{r1, r2}))
 	if err != nil {
 		t.Fatalf("Complete error = %v", err)
 	}
@@ -56,7 +58,17 @@ func TestStoreMultipartEndToEndWithFakeAzure(t *testing.T) {
 	}
 }
 
-func TestStoreAbortWithFakeAzure(t *testing.T) {
+func TestStoreSessionRetryContractWithFakeAzure(t *testing.T) {
+	server := newFakeAzureBlobServer(t)
+	client := newFakeAzureContainerClient(t, server.URL, "container")
+	store, err := NewStore(client)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	sinktest.RunSessionRetryContract(t, store, "segments/retry-contract")
+}
+
+func TestStoreCleanupWithFakeAzure(t *testing.T) {
 	ctx := context.Background()
 	server := newFakeAzureBlobServer(t)
 	client := newFakeAzureContainerClient(t, server.URL, "container")
@@ -64,22 +76,94 @@ func TestStoreAbortWithFakeAzure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore error = %v", err)
 	}
-	upload, err := store.BeginMultipart(ctx, "segments/abort.seg", multipart.Options{})
+	upload, err := store.Begin(ctx, "segments/abort.seg", multipart.Options{})
 	if err != nil {
 		t.Fatalf("BeginMultipart error = %v", err)
 	}
-	receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte("x")})
+	receipt, err := upload.PutPart(ctx, multipart.NewPart(1, []byte("x")))
 	if err != nil {
 		t.Fatalf("UploadPart error = %v", err)
 	}
-	if err := upload.Abort(ctx); err != nil {
-		t.Fatalf("Abort error = %v", err)
+	if err := upload.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup error = %v", err)
 	}
-	if _, err := upload.Complete(ctx, []multipart.Receipt{receipt}); !errors.Is(err, multipart.ErrAborted) {
-		t.Fatalf("Complete after abort error = %v, want %v", err, multipart.ErrAborted)
+	if _, err := upload.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt})); !errors.Is(err, multipart.ErrCleaned) {
+		t.Fatalf("Commit after cleanup error = %v, want %v", err, multipart.ErrCleaned)
 	}
 	if got := server.object("segments/abort.seg"); got != nil {
-		t.Fatalf("object exists after abort: %q", got)
+		t.Fatalf("object exists after cleanup: %q", got)
+	}
+}
+
+func TestCleanupRefusesWhileAzureCommitIsLanding(t *testing.T) {
+	ctx := context.Background()
+	server := newFakeAzureBlobServer(t)
+	server.commitStarted = make(chan struct{})
+	server.commitGate = make(chan struct{})
+	client := newFakeAzureContainerClient(t, server.URL, "container")
+	store, err := NewStore(client)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	session, err := store.Begin(ctx, "segments/commit-race.seg", multipart.Options{})
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	receipt, err := session.PutPart(ctx, multipart.NewPart(1, []byte("payload")))
+	if err != nil {
+		t.Fatalf("PutPart() error = %v", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := session.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt}))
+		result <- err
+	}()
+	select {
+	case <-server.commitStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Azure CommitBlockList did not start")
+	}
+	if err := session.Cleanup(ctx); !errors.Is(err, multipart.ErrCommitInProgress) {
+		t.Fatalf("Cleanup() error = %v, want ErrCommitInProgress", err)
+	}
+	close(server.commitGate)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Commit() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Commit() did not return")
+	}
+	if got := server.object("segments/commit-race.seg"); string(got) != "payload" {
+		t.Fatalf("committed object = %q", got)
+	}
+}
+
+func TestAzureCommitReconcilesLostSuccessResponse(t *testing.T) {
+	ctx := context.Background()
+	server := newFakeAzureBlobServer(t)
+	server.loseNextCommitResponse = true
+	client := newFakeAzureContainerClient(t, server.URL, "container")
+	store, err := NewStore(client)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	session, err := store.Begin(ctx, "segments/reconcile.seg", multipart.Options{})
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	receipt, err := session.PutPart(ctx, multipart.NewPart(1, []byte("committed")))
+	if err != nil {
+		t.Fatalf("PutPart() error = %v", err)
+	}
+	request := multipart.NewCommitRequest([]multipart.Receipt{receipt})
+	attrs, err := session.Commit(ctx, request)
+	if err != nil {
+		t.Fatalf("Commit() error = %v, want reconciled success", err)
+	}
+	if attrs.SessionID == "" || attrs.SizeBytes != uint64(len("committed")) {
+		t.Fatalf("Commit() attrs = %+v", attrs)
 	}
 }
 
@@ -92,15 +176,15 @@ func TestStoreAzurePreconditionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore error = %v", err)
 	}
-	upload, err := store.BeginMultipart(ctx, "segments/existing.seg", multipart.Options{})
+	upload, err := store.Begin(ctx, "segments/existing.seg", multipart.Options{})
 	if err != nil {
 		t.Fatalf("BeginMultipart error = %v", err)
 	}
-	receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte("new")})
+	receipt, err := upload.PutPart(ctx, multipart.NewPart(1, []byte("new")))
 	if err != nil {
 		t.Fatalf("UploadPart error = %v", err)
 	}
-	if _, err := upload.Complete(ctx, []multipart.Receipt{receipt}); !errors.Is(err, multipart.ErrPreconditionFailed) {
+	if _, err := upload.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt})); !errors.Is(err, multipart.ErrPreconditionFailed) {
 		t.Fatalf("Complete overwrite error = %v, want %v", err, multipart.ErrPreconditionFailed)
 	}
 	if got := server.object("segments/existing.seg"); string(got) != "old" {
@@ -118,7 +202,7 @@ func TestStoreRejectsBadAzureInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore error = %v", err)
 	}
-	if _, err := store.BeginMultipart(context.Background(), "", multipart.Options{}); !errors.Is(err, multipart.ErrInvalidStore) {
+	if _, err := store.Begin(context.Background(), "", multipart.Options{}); !errors.Is(err, multipart.ErrInvalidStore) {
 		t.Fatalf("BeginMultipart(empty key) error = %v, want %v", err, multipart.ErrInvalidStore)
 	}
 }
@@ -134,19 +218,25 @@ func newFakeAzureContainerClient(t *testing.T, serverURL, containerName string) 
 
 type fakeAzureBlobServer struct {
 	*httptest.Server
-	mu      sync.Mutex
-	objects map[string][]byte
-	blocks  map[string]map[string][]byte
-	etags   map[string]string
-	seq     int
+	mu                     sync.Mutex
+	objects                map[string][]byte
+	blocks                 map[string]map[string][]byte
+	etags                  map[string]string
+	metadata               map[string]map[string]string
+	seq                    int
+	commitStarted          chan struct{}
+	commitGate             chan struct{}
+	commitStart            sync.Once
+	loseNextCommitResponse bool
 }
 
 func newFakeAzureBlobServer(t *testing.T) *fakeAzureBlobServer {
 	t.Helper()
 	f := &fakeAzureBlobServer{
-		objects: make(map[string][]byte),
-		blocks:  make(map[string]map[string][]byte),
-		etags:   make(map[string]string),
+		objects:  make(map[string][]byte),
+		blocks:   make(map[string]map[string][]byte),
+		etags:    make(map[string]string),
+		metadata: make(map[string]map[string]string),
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
 	t.Cleanup(f.Close)
@@ -195,6 +285,16 @@ func (f *fakeAzureBlobServer) stageBlock(w http.ResponseWriter, r *http.Request,
 }
 
 func (f *fakeAzureBlobServer) commitBlockList(w http.ResponseWriter, r *http.Request, key string) {
+	f.mu.Lock()
+	started := f.commitStarted
+	gate := f.commitGate
+	f.mu.Unlock()
+	if started != nil {
+		f.commitStart.Do(func() { close(started) })
+	}
+	if gate != nil {
+		<-gate
+	}
 	if r.Header.Get("If-None-Match") == "*" && f.object(key) != nil {
 		writeAzureError(w, http.StatusPreconditionFailed, "ConditionNotMet")
 		return
@@ -225,7 +325,13 @@ func (f *fakeAzureBlobServer) commitBlockList(w http.ResponseWriter, r *http.Req
 	etag := fmt.Sprintf("\"etag-%d\"", f.seq)
 	f.objects[key] = body
 	f.etags[key] = etag
+	f.metadata[key] = azureRequestMetadata(r.Header)
 	delete(f.blocks, key)
+	if f.loseNextCommitResponse {
+		f.loseNextCommitResponse = false
+		writeAzureError(w, http.StatusInternalServerError, "InternalError")
+		return
+	}
 	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusCreated)
 }
@@ -234,6 +340,7 @@ func (f *fakeAzureBlobServer) getProperties(w http.ResponseWriter, key string) {
 	f.mu.Lock()
 	body, ok := f.objects[key]
 	etag := f.etags[key]
+	metadata := f.metadata[key]
 	f.mu.Unlock()
 	if !ok {
 		writeAzureError(w, http.StatusNotFound, "BlobNotFound")
@@ -242,6 +349,9 @@ func (f *fakeAzureBlobServer) getProperties(w http.ResponseWriter, key string) {
 	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("x-ms-blob-type", "BlockBlob")
+	for name, value := range metadata {
+		w.Header().Set("x-ms-meta-"+name, value)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -296,15 +406,28 @@ func writeAzureError(w http.ResponseWriter, status int, code string) {
 }
 
 func TestBlockIDIsBase64AndStableLength(t *testing.T) {
-	first, err := base64.StdEncoding.DecodeString(blockID(1))
+	const sessionID = "00000000-0000-4000-8000-000000000001"
+	first, err := base64.StdEncoding.DecodeString(blockID(sessionID, 1))
 	if err != nil {
 		t.Fatalf("blockID(1) is not base64: %v", err)
 	}
-	last, err := base64.StdEncoding.DecodeString(blockID(maxBlockNumber))
+	last, err := base64.StdEncoding.DecodeString(blockID(sessionID, limits.MaxPartCount))
 	if err != nil {
 		t.Fatalf("blockID(maxBlockNumber) is not base64: %v", err)
 	}
 	if len(first) != len(last) {
 		t.Fatalf("block id raw lengths differ: %d vs %d", len(first), len(last))
 	}
+}
+
+func azureRequestMetadata(header http.Header) map[string]string {
+	metadata := make(map[string]string)
+	for name, values := range header {
+		name = strings.ToLower(name)
+		if !strings.HasPrefix(name, "x-ms-meta-") || len(values) == 0 {
+			continue
+		}
+		metadata[strings.TrimPrefix(name, "x-ms-meta-")] = values[0]
+	}
+	return metadata
 }

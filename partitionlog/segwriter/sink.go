@@ -13,20 +13,16 @@ type Sink interface {
 }
 
 type Txn interface {
-	// UploadPart must be safe for concurrent calls. Implementations must fully
-	// consume or copy part.Bytes before returning. It must return promptly when
-	// ctx is canceled or Abort interrupts the transaction. A successful receipt
-	// must carry the same part number as part.
-	UploadPart(ctx context.Context, part Part) (PartReceipt, error)
+	// Write appends one ordered byte slice. Calls are serialized by segwriter.
+	// Implementations must consume or copy all bytes before returning and return
+	// promptly when ctx is canceled or Abort interrupts the transaction.
+	Write(ctx context.Context, bytes []byte) error
 
-	// Complete receives exactly one receipt per uploaded part, sorted by part
-	// number with a contiguous range starting at 1. A successful result must have
-	// a non-empty URI and report the exact committed byte size. It must return
-	// promptly when ctx is canceled.
-	Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
+	// Commit publishes the complete byte stream. A successful result must have a
+	// non-empty URI and report the exact committed byte size.
+	Commit(ctx context.Context) (CommittedObject, error)
 
-	// Abort discards staged parts. It must be idempotent, safe to call while
-	// UploadPart is running, and must cause in-flight uploads to return.
+	// Abort stops the transaction and cleans staging work. It must be idempotent.
 	Abort(ctx context.Context) error
 }
 
@@ -34,17 +30,14 @@ type Plan struct {
 	Partition uint32
 	Codec     segformat.Codec
 	HashAlgo  segformat.HashAlgo
-	PartSize  int
-}
 
-type Part struct {
-	Number int
-	Bytes  []byte
-}
+	// Multipart transport hints. Ordered byte sinks that do not use multipart
+	// may ignore them.
+	PartSize int
 
-type PartReceipt struct {
-	Number int
-	Token  string
+	UploadParallelism int
+	UploadQueueSize   int
+	UploadLimiter     UploadLimiter
 }
 
 type CommittedObject struct {

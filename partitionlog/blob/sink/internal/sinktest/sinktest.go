@@ -3,6 +3,7 @@ package sinktest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -31,28 +32,37 @@ type ReadObject func(ctx context.Context, key string) (Object, error)
 func RunMultipartStore(t testing.TB, store multipart.Store, prefix string, read ReadObject) {
 	t.Helper()
 	ctx := context.Background()
+	if err := store.Limits().Validate(); err != nil {
+		t.Fatalf("store limits are invalid: %v", err)
+	}
 
 	key := prefix + "/multipart/final.bin"
 	part1 := bytes.Repeat([]byte("a"), 5<<20)
 	part2 := []byte("tail")
 	want := append(append([]byte(nil), part1...), part2...)
 
-	upload, err := store.BeginMultipart(ctx, key, multipart.Options{
+	upload, err := store.Begin(ctx, key, multipart.Options{
 		ContentType:   SegmentContentType,
 		StagingPrefix: prefix + "/multipart/staging/final",
 	})
 	if err != nil {
 		t.Fatalf("BeginMultipart() error = %v", err)
 	}
-	r2, err := upload.UploadPart(ctx, multipart.Part{Number: 2, Bytes: part2})
+	r2, err := upload.PutPart(ctx, multipart.NewPart(2, part2))
 	if err != nil {
 		t.Fatalf("UploadPart(2) error = %v", err)
 	}
-	r1, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: part1})
+	r1, err := upload.PutPart(ctx, multipart.NewPart(1, part1))
 	if err != nil {
 		t.Fatalf("UploadPart(1) error = %v", err)
 	}
-	attrs, err := upload.Complete(ctx, []multipart.Receipt{r1, r2})
+	// PutPart must consume or copy its input before returning because the
+	// streaming layer immediately recycles that buffer.
+	clear(part1)
+	clear(part2)
+	request := multipart.NewCommitRequest([]multipart.Receipt{r1, r2})
+	request.ObjectSHA256 = sha256.Sum256(want)
+	attrs, err := upload.Commit(ctx, request)
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -64,6 +74,12 @@ func RunMultipartStore(t testing.TB, store multipart.Store, prefix string, read 
 	}
 	if attrs.Token == "" {
 		t.Fatal("attrs.Token is empty")
+	}
+	if attrs.SessionID == "" || attrs.ObjectSHA256 != request.ObjectSHA256 {
+		t.Fatalf("attrs identity = %+v", attrs)
+	}
+	if retried, err := upload.Commit(ctx, request); err != nil || retried != attrs {
+		t.Fatalf("idempotent Commit() = (%+v, %v), want (%+v, nil)", retried, err, attrs)
 	}
 	got, err := read(ctx, key)
 	if err != nil {
@@ -80,8 +96,42 @@ func RunMultipartStore(t testing.TB, store multipart.Store, prefix string, read 
 	}
 
 	assertPreconditionFailure(t, store, prefix+"/multipart/existing.bin")
-	assertAbort(t, store, prefix+"/multipart/abort.bin")
+	RunSessionRetryContract(t, store, prefix+"/multipart/part-retry.bin")
+	assertCleanup(t, store, prefix+"/multipart/cleanup.bin")
 	assertConcurrentUploadParts(t, store, prefix+"/multipart/concurrent.bin", read)
+}
+
+func RunSessionRetryContract(t testing.TB, store multipart.Store, key string) {
+	t.Helper()
+	if err := store.Limits().Validate(); err != nil {
+		t.Fatalf("Limits() error = %v", err)
+	}
+	ctx := context.Background()
+	session, err := store.Begin(ctx, key, multipart.Options{ContentType: SegmentContentType})
+	if err != nil {
+		t.Fatalf("Begin(part retry) error = %v", err)
+	}
+	if session.Limits() != store.Limits() {
+		t.Fatalf("session Limits() = %+v, want store Limits() %+v", session.Limits(), store.Limits())
+	}
+	part := multipart.NewPart(1, []byte("same-part"))
+	first, err := session.PutPart(ctx, part)
+	if err != nil {
+		t.Fatalf("PutPart(first) error = %v", err)
+	}
+	if first.Number != part.Number || first.SizeBytes != uint64(len(part.Bytes)) || first.ChecksumSHA256 != part.ChecksumSHA256 {
+		t.Fatalf("PutPart(first) receipt = %+v, want matching part identity", first)
+	}
+	retry, err := session.PutPart(ctx, part)
+	if err != nil || retry != first {
+		t.Fatalf("PutPart(retry) = (%+v, %v), want (%+v, nil)", retry, err, first)
+	}
+	if _, err := session.PutPart(ctx, multipart.NewPart(1, []byte("different-part"))); !errors.Is(err, multipart.ErrPartConflict) {
+		t.Fatalf("PutPart(conflict) error = %v, want ErrPartConflict", err)
+	}
+	if err := session.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup(part retry) error = %v", err)
+	}
 }
 
 func RunSegmentWriter(t testing.TB, store multipart.Store, prefix string, read ReadObject) {
@@ -168,22 +218,22 @@ func assertPreconditionFailure(t testing.TB, store multipart.Store, key string) 
 	}
 }
 
-func assertAbort(t testing.TB, store multipart.Store, key string) {
+func assertCleanup(t testing.TB, store multipart.Store, key string) {
 	t.Helper()
 	ctx := context.Background()
-	upload, err := store.BeginMultipart(ctx, key, multipart.Options{ContentType: SegmentContentType})
+	upload, err := store.Begin(ctx, key, multipart.Options{ContentType: SegmentContentType})
 	if err != nil {
-		t.Fatalf("BeginMultipart(abort) error = %v", err)
+		t.Fatalf("Begin(cleanup) error = %v", err)
 	}
-	receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte("abort")})
+	receipt, err := upload.PutPart(ctx, multipart.NewPart(1, []byte("abort")))
 	if err != nil {
-		t.Fatalf("UploadPart(abort) error = %v", err)
+		t.Fatalf("PutPart(cleanup) error = %v", err)
 	}
-	if err := upload.Abort(ctx); err != nil {
-		t.Fatalf("Abort() error = %v", err)
+	if err := upload.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if _, err := upload.Complete(ctx, []multipart.Receipt{receipt}); !errors.Is(err, multipart.ErrAborted) {
-		t.Fatalf("Complete(after abort) error = %v, want %v", err, multipart.ErrAborted)
+	if _, err := upload.Commit(ctx, multipart.NewCommitRequest([]multipart.Receipt{receipt})); !errors.Is(err, multipart.ErrCleaned) {
+		t.Fatalf("Commit(after cleanup) error = %v, want %v", err, multipart.ErrCleaned)
 	}
 }
 
@@ -199,7 +249,7 @@ func assertConcurrentUploadParts(t testing.TB, store multipart.Store, key string
 		bytes.Repeat([]byte("e"), 5<<20),
 		[]byte("tail"),
 	}
-	upload, err := store.BeginMultipart(ctx, key, multipart.Options{
+	upload, err := store.Begin(ctx, key, multipart.Options{
 		ContentType:   SegmentContentType,
 		StagingPrefix: key + ".staging",
 	})
@@ -217,10 +267,7 @@ func assertConcurrentUploadParts(t testing.TB, store multipart.Store, key string
 		go func() {
 			defer wg.Done()
 			<-start
-			receipt, err := upload.UploadPart(ctx, multipart.Part{
-				Number: i + 1,
-				Bytes:  partBytes,
-			})
+			receipt, err := upload.PutPart(ctx, multipart.NewPart(i+1, partBytes))
 			if err != nil {
 				errs <- fmt.Errorf("UploadPart(%d): %w", i+1, err)
 				return
@@ -233,19 +280,21 @@ func assertConcurrentUploadParts(t testing.TB, store multipart.Store, key string
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			_ = upload.Abort(ctx)
+			_ = upload.Cleanup(ctx)
 			t.Fatal(err)
 		}
 	}
 
-	attrs, err := upload.Complete(ctx, receipts)
-	if err != nil {
-		_ = upload.Abort(ctx)
-		t.Fatalf("Complete(concurrent) error = %v", err)
-	}
+	request := multipart.NewCommitRequest(receipts)
 	var want []byte
 	for _, part := range parts {
 		want = append(want, part...)
+	}
+	request.ObjectSHA256 = sha256.Sum256(want)
+	attrs, err := upload.Commit(ctx, request)
+	if err != nil {
+		_ = upload.Cleanup(ctx)
+		t.Fatalf("Complete(concurrent) error = %v", err)
 	}
 	if attrs.SizeBytes != uint64(len(want)) {
 		t.Fatalf("concurrent attrs.SizeBytes = %d, want %d", attrs.SizeBytes, len(want))
@@ -263,17 +312,19 @@ func assertConcurrentUploadParts(t testing.TB, store multipart.Store, key string
 }
 
 func writeSinglePart(ctx context.Context, store multipart.Store, key, body string) error {
-	upload, err := store.BeginMultipart(ctx, key, multipart.Options{ContentType: SegmentContentType})
+	upload, err := store.Begin(ctx, key, multipart.Options{ContentType: SegmentContentType})
 	if err != nil {
 		return err
 	}
-	receipt, err := upload.UploadPart(ctx, multipart.Part{Number: 1, Bytes: []byte(body)})
+	receipt, err := upload.PutPart(ctx, multipart.NewPart(1, []byte(body)))
 	if err != nil {
-		_ = upload.Abort(ctx)
+		_ = upload.Cleanup(ctx)
 		return err
 	}
-	if _, err := upload.Complete(ctx, []multipart.Receipt{receipt}); err != nil {
-		_ = upload.Abort(ctx)
+	request := multipart.NewCommitRequest([]multipart.Receipt{receipt})
+	request.ObjectSHA256 = sha256.Sum256([]byte(body))
+	if _, err := upload.Commit(ctx, request); err != nil {
+		_ = upload.Cleanup(ctx)
 		return err
 	}
 	return nil

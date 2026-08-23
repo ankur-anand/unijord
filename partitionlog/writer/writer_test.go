@@ -1413,14 +1413,14 @@ type cleanupAwareSegmentTxn struct {
 	abortErr     error
 }
 
-func (t *cleanupAwareSegmentTxn) UploadPart(_ context.Context, part segwriter.Part) (segwriter.PartReceipt, error) {
+func (t *cleanupAwareSegmentTxn) Write(_ context.Context, bytes []byte) error {
 	t.mu.Lock()
-	t.size += uint64(len(part.Bytes))
+	t.size += uint64(len(bytes))
 	t.mu.Unlock()
-	return segwriter.PartReceipt{Number: part.Number, Token: fmt.Sprintf("cleanup-%d", part.Number)}, nil
+	return nil
 }
 
-func (t *cleanupAwareSegmentTxn) Complete(context.Context, []segwriter.PartReceipt) (segwriter.CommittedObject, error) {
+func (t *cleanupAwareSegmentTxn) Commit(context.Context) (segwriter.CommittedObject, error) {
 	t.mu.Lock()
 	size := t.size
 	t.mu.Unlock()

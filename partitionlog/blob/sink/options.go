@@ -1,6 +1,10 @@
 package sink
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/ankur-anand/unijord/partitionlog/blob/sink/stream"
+)
 
 const (
 	DefaultPrefix      = "partitionlog"
@@ -17,6 +21,11 @@ type Options struct {
 	// ContentType is attached to committed segment objects when the provider
 	// supports object content types.
 	ContentType string
+
+	// BufferPool optionally applies one multipart payload-memory bound across
+	// all segment uploads created by this factory. Its buffer size must match
+	// the writer's configured PartSize.
+	BufferPool *stream.BufferPool
 }
 
 func normalizeOptions(opts Options) Options {

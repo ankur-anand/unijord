@@ -1,12 +1,12 @@
 # segwriter
 
 `segwriter` writes one immutable partition segment using `segformat` for the
-wire format and `segblock` for block sealing. It streams segment bytes into an
-ordered-part sink and never holds the full segment object in memory.
+wire format and `segblock` for block sealing. It streams ordered segment bytes
+into a sink and never holds the full segment object in memory.
 
-`segwriter` does not own manifests, retention, partition assignment, reader
-visibility, or segment roll policy. The caller decides when a segment is
-closed and publishes the returned metadata to the catalog layer.
+`segwriter` does not own multipart scheduling, manifests, retention, partition
+assignment, reader visibility, or segment roll policy. The caller decides when
+a segment is closed and publishes the returned metadata to the catalog layer.
 
 ## Package Boundary
 
@@ -17,7 +17,7 @@ segwriter -> segblock -> segformat
 - `segformat`: fixed-width segment format, raw block layout, validation, hashes.
 - `segblock`: compression and integrity for one block payload.
 - `segwriter`: record validation, block buffering, ordered segment assembly,
-  ordered-part upload, and commit metadata.
+  and commit metadata.
 
 ## Usage
 
@@ -49,7 +49,8 @@ if err != nil {
 ```
 
 `Writer` is single-owner: call `Append`, `Close`, and `Abort` from one
-goroutine. Internal sealing and uploads are concurrent.
+goroutine. Internal block sealing is concurrent. A sink may concurrently
+upload multipart parts after it receives the ordered byte stream.
 
 For in-memory encoding:
 
@@ -100,11 +101,10 @@ an operator-visible writer identity.
 
 ## Sink Contract
 
-The sink API is an ordered-part transaction. The writer emits bounded byte
-parts; each backend maps those parts to its native commit mechanism. For
-example, an in-memory sink can concatenate parts, a file sink can write parts in
-order to a temp file and rename on commit, and an object-store sink can map
-parts to multipart or resumable upload primitives.
+The sink API is an ordered byte transaction. Segment-format assembly does not
+know where multipart boundaries fall. An in-memory sink can append the writes,
+a file sink can stream them to a temporary file, and an object-store sink can
+split them into provider parts behind this boundary.
 
 ```go
 type Sink interface {
@@ -112,21 +112,21 @@ type Sink interface {
 }
 
 type Txn interface {
-    UploadPart(ctx context.Context, part Part) (PartReceipt, error)
-    Complete(ctx context.Context, receipts []PartReceipt) (CommittedObject, error)
+    Write(ctx context.Context, bytes []byte) error
+    Commit(ctx context.Context) (CommittedObject, error)
     Abort(ctx context.Context) error
 }
 ```
 
-`Txn.UploadPart` must be safe for concurrent calls, must fully consume or copy
-`part.Bytes` before returning, and must return the input part number in its
-receipt. `Txn.Complete` receives receipts sorted by part number with a
-contiguous range starting at `1`; its result must contain a non-empty URI and
-the exact committed object size. `Txn.Abort` must be idempotent and safe to call
-while uploads are running. All blocking sink calls must return when their
-context is canceled. `Abort` must interrupt in-flight uploads so the writer can
-join its upload workers without a liveness cycle. Contract violations make the
+`Txn.Write` calls are serialized and must consume or copy the complete slice
+before returning. `Txn.Commit` must return a non-empty URI and the exact
+committed object size. `Txn.Abort` must be idempotent. All blocking sink calls
+must return when their context is canceled. Contract violations make the
 writer terminal and are reported through `ErrSinkContract`.
+
+`PartSize`, upload parallelism, queue size, and the shared upload limiter are
+transport hints carried in `Plan`. Object sinks use them to construct their
+multipart stream; `segwriter` itself does not allocate part buffers.
 
 `New` does not call `sink.Begin`. The sink transaction is opened lazily when the
 first sealed block is emitted, which keeps segment rotation off the sink setup
