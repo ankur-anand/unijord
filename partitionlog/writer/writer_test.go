@@ -610,6 +610,32 @@ func TestWriterAsyncPublishFailureSurfacesOnce(t *testing.T) {
 	}
 }
 
+func TestWriterAutomaticCutDoesNotConsumeAsyncFailure(t *testing.T) {
+	t.Parallel()
+
+	cause := fmt.Errorf("%w: boom", ErrPublishFailed)
+	w := &Writer{
+		aborted:  true,
+		firstErr: cause,
+	}
+
+	w.mu.Lock()
+	w.tryCutAfterAppendLocked(context.Background())
+	if w.firstErrSurface {
+		w.mu.Unlock()
+		t.Fatal("automatic cut consumed the asynchronous terminal cause")
+	}
+	if err := w.foregroundErrLocked(); !errors.Is(err, ErrPublishFailed) {
+		w.mu.Unlock()
+		t.Fatalf("first foreground error = %v, want %v", err, ErrPublishFailed)
+	}
+	if err := w.foregroundErrLocked(); !errors.Is(err, ErrAborted) {
+		w.mu.Unlock()
+		t.Fatalf("second foreground error = %v, want %v", err, ErrAborted)
+	}
+	w.mu.Unlock()
+}
+
 func TestWriterCutFailureBeforeSwapKeepsWriterUsable(t *testing.T) {
 	t.Parallel()
 

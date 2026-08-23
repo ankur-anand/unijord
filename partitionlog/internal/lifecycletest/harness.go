@@ -67,7 +67,7 @@ func Run(t testing.TB, ctx context.Context, store Store, cfg Config) {
 			Value:       []byte(fmt.Sprintf("record-%d", i)),
 		})
 		if err != nil {
-			t.Fatalf("Append(%d) error = %v", i, err)
+			t.Fatalf("Append(%d) error = %v (terminal cause: %v)", i, err, writer.Err())
 		}
 		if result.LSN != uint64(i) {
 			t.Fatalf("Append(%d) LSN = %d, want %d", i, result.LSN, i)

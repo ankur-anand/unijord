@@ -299,6 +299,13 @@ func (f *fakeAzureBlobServer) commitBlockList(w http.ResponseWriter, r *http.Req
 		writeAzureError(w, http.StatusPreconditionFailed, "ConditionNotMet")
 		return
 	}
+	metadata := azureRequestMetadata(r.Header)
+	for name := range metadata {
+		if !validAzureMetadataName(name) {
+			writeAzureError(w, http.StatusBadRequest, "InvalidMetadata")
+			return
+		}
+	}
 	var list blockListXML
 	if err := xml.NewDecoder(r.Body).Decode(&list); err != nil {
 		writeAzureError(w, http.StatusBadRequest, "InvalidBlockList")
@@ -325,7 +332,7 @@ func (f *fakeAzureBlobServer) commitBlockList(w http.ResponseWriter, r *http.Req
 	etag := fmt.Sprintf("\"etag-%d\"", f.seq)
 	f.objects[key] = body
 	f.etags[key] = etag
-	f.metadata[key] = azureRequestMetadata(r.Header)
+	f.metadata[key] = metadata
 	delete(f.blocks, key)
 	if f.loseNextCommitResponse {
 		f.loseNextCommitResponse = false
@@ -430,4 +437,15 @@ func azureRequestMetadata(header http.Header) map[string]string {
 		metadata[strings.TrimPrefix(name, "x-ms-meta-")] = values[0]
 	}
 	return metadata
+}
+
+func validAzureMetadataName(name string) bool {
+	for i := range len(name) {
+		char := name[i]
+		if char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || i > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return false
+	}
+	return name != ""
 }

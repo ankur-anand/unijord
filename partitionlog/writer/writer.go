@@ -146,6 +146,7 @@ func New(opts Options) (*Writer, error) {
 func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error) {
 	w.mu.Lock()
 	if err := w.waitActiveTransitionLocked(ctx); err != nil {
+		err = w.surfaceReturnedErrLocked(err)
 		w.mu.Unlock()
 		return AppendResult{}, err
 	}
@@ -174,6 +175,7 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 	recordSize := uint64(recordSizeInt)
 	if w.shouldCutBeforeLocked(recordSize) {
 		if err := w.cutLocked(ctx); err != nil {
+			err = w.surfaceReturnedErrLocked(err)
 			w.mu.Unlock()
 			return AppendResult{}, err
 		}
@@ -225,6 +227,7 @@ func (w *Writer) Cut(ctx context.Context) error {
 		return err
 	}
 	err := w.cutLocked(ctx)
+	err = w.surfaceReturnedErrLocked(err)
 	w.mu.Unlock()
 	return err
 }
@@ -239,6 +242,7 @@ func (w *Writer) Flush(ctx context.Context) (Snapshot, error) {
 	}
 	if w.active != nil && w.active.records > 0 {
 		if err := w.detachActiveLocked(ctx); err != nil {
+			err = w.surfaceReturnedErrLocked(err)
 			w.mu.Unlock()
 			return Snapshot{}, err
 		}
@@ -255,6 +259,7 @@ func (w *Writer) Flush(ctx context.Context) (Snapshot, error) {
 
 	w.mu.Lock()
 	if err := w.waitDrainedLocked(ctx); err != nil {
+		err = w.surfaceReturnedErrLocked(err)
 		w.mu.Unlock()
 		return Snapshot{}, err
 	}
@@ -273,6 +278,7 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 	}
 	if w.active != nil && w.active.records > 0 {
 		if err := w.detachActiveLocked(ctx); err != nil {
+			err = w.surfaceReturnedErrLocked(err)
 			w.mu.Unlock()
 			return Snapshot{}, err
 		}
@@ -289,6 +295,7 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 
 	w.mu.Lock()
 	if err := w.waitDrainedLocked(ctx); err != nil {
+		err = w.surfaceReturnedErrLocked(err)
 		w.mu.Unlock()
 		return Snapshot{}, err
 	}
@@ -819,7 +826,10 @@ func (w *Writer) waitActiveTransitionLocked(ctx context.Context) error {
 		}
 		w.mu.Lock()
 	}
-	return w.foregroundErrLocked()
+	if w.closed {
+		return ErrClosed
+	}
+	return w.abortedErrLocked()
 }
 
 func (w *Writer) beginActiveTransitionLocked(ctx context.Context) error {
@@ -886,10 +896,20 @@ func (w *Writer) foregroundErrLocked() error {
 	if w.closed {
 		return ErrClosed
 	}
-	return w.abortedErrLocked()
+	return w.surfaceAbortedErrLocked()
 }
 
 func (w *Writer) abortedErrLocked() error {
+	if !w.aborted {
+		return nil
+	}
+	if w.firstErr != nil && !w.firstErrSurface {
+		return w.firstErr
+	}
+	return ErrAborted
+}
+
+func (w *Writer) surfaceAbortedErrLocked() error {
 	if !w.aborted {
 		return nil
 	}
@@ -898,6 +918,19 @@ func (w *Writer) abortedErrLocked() error {
 		return w.firstErr
 	}
 	return ErrAborted
+}
+
+// surfaceReturnedErrLocked records that a public operation returned the
+// asynchronous terminal cause. Internal/background transitions may observe
+// the same cause, but must not consume the caller's one useful diagnostic.
+func (w *Writer) surfaceReturnedErrLocked(err error) error {
+	if err == nil || !w.aborted || w.firstErr == nil || w.firstErrSurface {
+		return err
+	}
+	if errors.Is(err, w.firstErr) {
+		w.firstErrSurface = true
+	}
+	return err
 }
 
 func (w *Writer) failLocked(err error) (*activeSegment, []detachedSegment) {
