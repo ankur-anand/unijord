@@ -284,8 +284,12 @@ func TestBlobCatalogRetentionReconcilesHistoricalCommitAfterFenceMoves(t *testin
 	if loaded.WriterEpoch <= first.Epoch() || loaded.AppliedRetentionVersion != 1 || loaded.AppliedRetentionLSN != 5 {
 		t.Fatalf("authoritative head = %+v", loaded)
 	}
+	getsBefore := backend.getCount()
 	if _, err := first.(pcatalog.RetentionWriterSession).ApplyPendingRetention(ctx); !errors.Is(err, pcatalog.ErrStaleWriter) {
 		t.Fatalf("ApplyPendingRetention(stale retry) error = %v, want %v", err, pcatalog.ErrStaleWriter)
+	}
+	if getsAfter := backend.getCount(); getsAfter != getsBefore {
+		t.Fatalf("ApplyPendingRetention(stale retry) head reads = %d, want unchanged %d", getsAfter, getsBefore)
 	}
 }
 

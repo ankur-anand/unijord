@@ -204,6 +204,14 @@ func (s *writerSession) AppendSegment(ctx context.Context, segment pmeta.Segment
 
 func (s *writerSession) appendSegmentLocked(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error) {
 	head := s.head
+	if s.stale {
+		// An exact retry only asks for the receipt of a commit this session has
+		// already acknowledged; it is not a new mutation.
+		if retry, ok := idempotentHeadRetry(head, segment); ok {
+			return retry, nil
+		}
+		return pmeta.PartitionHead{}, fmt.Errorf("%w: writer session is fenced partition=%d", csession.ErrStaleWriter, head.Partition)
+	}
 	if segment.WriterTag != s.writerID {
 		return pmeta.PartitionHead{}, fmt.Errorf("%w: segment writer_tag does not match writer_id", csession.ErrInvalidRequest)
 	}
@@ -365,7 +373,14 @@ func (s *writerSession) acceptObservedCommit(expected, observed headFile, token 
 	if sameHeadState(observed, expected) {
 		s.token = token
 	}
+	s.markStaleIfFenceMoved(observed)
 	return stateFromHead(expected)
+}
+
+func (s *writerSession) markStaleIfFenceMoved(observed headFile) {
+	if observed.WriterEpoch != s.writerEpoch || observed.WriterID != s.writerID {
+		s.stale = true
+	}
 }
 
 func sameHeadState(a, b headFile) bool {

@@ -31,6 +31,7 @@ type casFaultBackend struct {
 	counting    bool
 	casCalls    int
 	getCalls    int
+	putCalls    int
 	failGets    bool
 	afterCommit func() error
 	callbackErr error
@@ -42,10 +43,20 @@ func (b *casFaultBackend) arm(mode casFaultMode, failGets bool, afterCommit func
 	b.counting = true
 	b.casCalls = 0
 	b.getCalls = 0
+	b.putCalls = 0
 	b.failGets = failGets
 	b.afterCommit = afterCommit
 	b.callbackErr = nil
 	b.mu.Unlock()
+}
+
+func (b *casFaultBackend) Put(ctx context.Context, key string, body []byte) (Object, error) {
+	b.mu.Lock()
+	if b.counting {
+		b.putCalls++
+	}
+	b.mu.Unlock()
+	return b.Backend.Put(ctx, key, body)
 }
 
 func (b *casFaultBackend) Get(ctx context.Context, key string) (Object, error) {
@@ -104,6 +115,12 @@ func (b *casFaultBackend) getCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.getCalls
+}
+
+func (b *casFaultBackend) putCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.putCalls
 }
 
 func (b *casFaultBackend) stats() (casCalls int, callbackErr error) {
@@ -217,8 +234,28 @@ func TestAppendSegmentReconcilesHistoricalCommitAfterHeadAdvances(t *testing.T) 
 	if loaded.SegmentCount != 2 || loaded.NextLSN != 20 {
 		t.Fatalf("loaded state = %+v", loaded)
 	}
+	getsBefore := backend.getCount()
+	retry, err := first.AppendSegment(context.Background(), firstSegment)
+	if err != nil {
+		t.Fatalf("AppendSegment(stale exact retry) error = %v", err)
+	}
+	if retry != state {
+		t.Fatalf("AppendSegment(stale exact retry) state = %+v, want commit receipt %+v", retry, state)
+	}
+	if getsAfter := backend.getCount(); getsAfter != getsBefore {
+		t.Fatalf("AppendSegment(stale exact retry) head reads = %d, want unchanged %d", getsAfter, getsBefore)
+	}
+	casCallsBefore, _ := backend.stats()
+	putCallsBefore := backend.putCount()
 	if _, err := first.AppendSegment(context.Background(), testSegmentRef(1, 10, 19, first.Epoch())); !errors.Is(err, pcatalog.ErrStaleWriter) {
 		t.Fatalf("AppendSegment(stale session) error = %v, want %v", err, pcatalog.ErrStaleWriter)
+	}
+	casCallsAfter, _ := backend.stats()
+	if casCallsAfter != casCallsBefore {
+		t.Fatalf("AppendSegment(stale session) head CAS calls = %d, want unchanged %d", casCallsAfter, casCallsBefore)
+	}
+	if putCallsAfter := backend.putCount(); putCallsAfter != putCallsBefore {
+		t.Fatalf("AppendSegment(stale session) page writes = %d, want unchanged %d", putCallsAfter, putCallsBefore)
 	}
 }
 

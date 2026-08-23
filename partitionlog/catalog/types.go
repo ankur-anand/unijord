@@ -56,9 +56,16 @@ type WriterManager interface {
 // A WriterSession is not safe for concurrent use. Higher layers should publish
 // segments through one ordered commit loop.
 type WriterSession interface {
+	// Head returns the session's cached catalog snapshot. It is not a
+	// linearizable read of the current partition head; use Reader.LoadPartition
+	// when the latest authoritative state is required.
 	Head() pmeta.PartitionHead
 	Epoch() uint64
 	WriterID() [16]byte
+
+	// AppendSegment returns the catalog state produced by the acknowledged
+	// commit. When an ambiguous commit is reconciled from later history, the
+	// returned state can precede the partition's current authoritative head.
 	AppendSegment(ctx context.Context, segment pmeta.SegmentRef) (pmeta.PartitionHead, error)
 }
 

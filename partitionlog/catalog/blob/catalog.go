@@ -39,6 +39,7 @@ type writerSession struct {
 	mu    sync.Mutex
 	head  headFile
 	token string
+	stale bool
 }
 
 type headFile struct {

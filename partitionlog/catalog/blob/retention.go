@@ -171,6 +171,9 @@ func (s *writerSession) ApplyPendingRetention(ctx context.Context) (csession.Ret
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stale {
+		return csession.RetentionApplyResult{}, fmt.Errorf("%w: writer session is fenced partition=%d", csession.ErrStaleWriter, s.head.Partition)
+	}
 
 	current, token, err := s.cat.loadHead(ctx, s.head.Partition)
 	if err != nil {
@@ -292,6 +295,7 @@ func (s *writerSession) acceptObservedRetention(expected, observed headFile, tok
 	if sameHeadState(observed, expected) {
 		s.token = token
 	}
+	s.markStaleIfFenceMoved(observed)
 	return stateFromHead(expected)
 }
 
