@@ -58,8 +58,13 @@ type Writer struct {
 	ageWake          chan struct{}
 
 	workerCtx    context.Context
-	workerCancel context.CancelFunc
+	workerCancel context.CancelCauseFunc
 	workersWG    sync.WaitGroup
+
+	drainStarted    bool
+	drainDone       chan struct{}
+	drainCleanupErr error
+	drainWorkerErr  error
 }
 
 type activeSegment struct {
@@ -98,6 +103,10 @@ func DefaultOptions(factory SinkFactory) Options {
 			MaxInflightSegments: DefaultMaxInflightSegments,
 			MaxInflightBytes:    DefaultMaxInflightBytes,
 		},
+		Timeouts: OperationTimeouts{
+			SegmentFinalize: DefaultSegmentFinalizeTimeout,
+			CatalogPublish:  DefaultCatalogPublishTimeout,
+		},
 		Clock:   SystemClock{},
 		UUIDGen: randomUUID,
 	}
@@ -113,7 +122,7 @@ func New(opts Options) (*Writer, error) {
 		return nil, err
 	}
 
-	workerCtx, workerCancel := context.WithCancel(context.Background())
+	workerCtx, workerCancel := context.WithCancelCause(context.Background())
 	w := &Writer{
 		opts:              normalized,
 		streamID:          snapshot.Head.StreamID,
@@ -128,6 +137,7 @@ func New(opts Options) (*Writer, error) {
 		ageWake:           make(chan struct{}, 1),
 		workerCtx:         workerCtx,
 		workerCancel:      workerCancel,
+		drainDone:         make(chan struct{}),
 	}
 	if last, ok := snapshot.Head.Last(); ok {
 		w.hasTimestamp = true
@@ -152,24 +162,21 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 	}
 	if w.optimisticNextLSN == math.MaxUint64 {
 		err := fmt.Errorf("%w: next_lsn=%d", ErrLSNExhausted, w.optimisticNextLSN)
-		active, detached := w.failLocked(err)
+		w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 	if w.hasTimestamp && record.TimestampMS < w.lastTimestamp {
 		err := fmt.Errorf("%w: got=%d previous=%d", ErrTimestampOrder, record.TimestampMS, w.lastTimestamp)
-		active, detached := w.failLocked(err)
+		w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 
 	recordSizeInt, err := segformat.RecordSize(record.Headers, record.Value)
 	if err != nil {
-		active, detached := w.failLocked(err)
+		w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 	recordSize := uint64(recordSizeInt)
@@ -195,9 +202,8 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		Value:       record.Value,
 	}); err != nil {
 		err = wrapSegmentWrite(err)
-		active, detached := w.failLocked(err)
+		w.failLocked(err)
 		w.mu.Unlock()
-		w.abortSegmentsBestEffort(active, detached)
 		return AppendResult{}, err
 	}
 
@@ -254,7 +260,11 @@ func (w *Writer) Flush(ctx context.Context) (Snapshot, error) {
 	w.mu.Unlock()
 
 	if emptyActive != nil {
-		abortWriterBestEffort(emptyActive.writer)
+		if err := abortWriterBestEffort(emptyActive.writer); err != nil {
+			err = wrapSegmentWrite(err)
+			w.noteForegroundErr(err)
+			return Snapshot{}, err
+		}
 	}
 
 	w.mu.Lock()
@@ -272,14 +282,29 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 	var emptyActive *activeSegment
 
 	w.mu.Lock()
-	if err := w.foregroundErrLocked(); err != nil {
+	if w.closed {
+		snapshot := w.committed
+		w.startDrainLocked(ErrClosed, nil, nil)
 		w.mu.Unlock()
-		return Snapshot{}, err
+		if err := w.waitDrain(ctx); err != nil {
+			return Snapshot{}, err
+		}
+		return snapshot, nil
+	}
+	if w.aborted {
+		err := w.surfaceAbortedErrLocked()
+		w.startDrainLocked(w.firstErr, nil, nil)
+		w.mu.Unlock()
+		return Snapshot{}, errors.Join(err, w.waitDrain(ctx))
 	}
 	if w.active != nil && w.active.records > 0 {
 		if err := w.detachActiveLocked(ctx); err != nil {
 			err = w.surfaceReturnedErrLocked(err)
+			terminal := w.aborted
 			w.mu.Unlock()
+			if terminal {
+				return Snapshot{}, errors.Join(err, w.waitDrain(ctx))
+			}
 			return Snapshot{}, err
 		}
 	}
@@ -290,22 +315,29 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 	w.mu.Unlock()
 
 	if emptyActive != nil {
-		abortWriterBestEffort(emptyActive.writer)
+		if err := abortWriterBestEffort(emptyActive.writer); err != nil {
+			err = wrapSegmentWrite(err)
+			w.noteForegroundErr(err)
+			return Snapshot{}, errors.Join(err, w.waitDrain(ctx))
+		}
 	}
 
 	w.mu.Lock()
 	if err := w.waitDrainedLocked(ctx); err != nil {
 		err = w.surfaceReturnedErrLocked(err)
+		terminal := w.aborted
 		w.mu.Unlock()
+		if terminal {
+			return Snapshot{}, errors.Join(err, w.waitDrain(ctx))
+		}
 		return Snapshot{}, err
 	}
 	w.closed = true
 	snapshot := w.committed
-	w.workerCancel()
-	w.signalAllLocked()
+	w.startDrainLocked(ErrClosed, nil, nil)
 	w.mu.Unlock()
 
-	if err := waitGroupContext(ctx, &w.workersWG); err != nil {
+	if err := w.waitDrain(ctx); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
@@ -313,28 +345,32 @@ func (w *Writer) Close(ctx context.Context) (Snapshot, error) {
 
 func (w *Writer) Abort(ctx context.Context) error {
 	w.mu.Lock()
-	if w.closed || w.aborted {
+	if w.closed {
+		w.startDrainLocked(ErrClosed, nil, nil)
 		w.mu.Unlock()
-		return nil
+		return w.waitDrain(ctx)
+	}
+	var terminalErr error
+	if w.aborted {
+		if w.firstErr != nil && !w.firstErrSurface {
+			terminalErr = w.firstErr
+			w.firstErrSurface = true
+		}
+		w.startDrainLocked(w.firstErr, nil, nil)
+		w.mu.Unlock()
+		return errors.Join(terminalErr, w.waitDrain(ctx))
 	}
 	w.aborted = true
-	if w.firstErr == nil {
-		w.firstErr = ErrAborted
-	}
+	w.firstErr = ErrAborted
 	w.firstErrSurface = true
 	active := w.active
 	detached := append([]detachedSegment(nil), w.detached...)
 	w.active = nil
 	w.detached = nil
-	w.workerCancel()
-	w.signalAllLocked()
+	w.ready = nil
+	w.startDrainLocked(ErrAborted, active, detached)
 	w.mu.Unlock()
-
-	w.abortSegments(ctx, active, detached)
-	if err := waitGroupContext(ctx, &w.workersWG); err != nil {
-		return err
-	}
-	return nil
+	return w.waitDrain(ctx)
 }
 
 func (w *Writer) State() State {
@@ -391,13 +427,13 @@ func (w *Writer) ApplyPendingRetention(ctx context.Context) (RetentionResult, er
 		w.sessionMu.Unlock()
 		err = normalizeRetentionErr(err)
 		if errors.Is(err, ErrStaleWriter) {
-			w.noteAsyncErr(err)
+			w.noteForegroundErr(err)
 		}
 		return RetentionResult{}, err
 	}
 	if err := validateRetentionSnapshot(current, result); err != nil {
 		w.sessionMu.Unlock()
-		w.noteAsyncErr(err)
+		w.noteForegroundErr(err)
 		return RetentionResult{}, err
 	}
 
@@ -439,9 +475,12 @@ func (w *Writer) finalizeLoop() {
 		w.mu.Unlock()
 
 		start := time.Now()
-		result, err := item.writer.Close(w.workerCtx)
+		operationCtx, cancel := context.WithTimeout(w.workerCtx, w.opts.Timeouts.SegmentFinalize)
+		result, err := item.writer.Close(operationCtx)
+		cancel()
 		if err != nil {
 			if w.workerCtx.Err() != nil {
+				w.noteDrainWorkerErr(err, item)
 				return
 			}
 			w.observe(MetricEvent{
@@ -536,10 +575,12 @@ func (w *Writer) publishLoop() {
 		current := w.committed
 		w.mu.Unlock()
 		start := time.Now()
-		next, err := w.opts.Session.PublishSegment(w.workerCtx, PublishRequest{
+		operationCtx, cancel := context.WithTimeout(w.workerCtx, w.opts.Timeouts.CatalogPublish)
+		next, err := w.opts.Session.PublishSegment(operationCtx, PublishRequest{
 			ExpectedNextLSN: item.expectedNextLSN,
 			Segment:         item.segment,
 		})
+		cancel()
 		if err != nil {
 			w.sessionMu.Unlock()
 			w.observe(MetricEvent{
@@ -933,9 +974,9 @@ func (w *Writer) surfaceReturnedErrLocked(err error) error {
 	return err
 }
 
-func (w *Writer) failLocked(err error) (*activeSegment, []detachedSegment) {
+func (w *Writer) failLocked(err error) {
 	if err == nil {
-		return nil, nil
+		return
 	}
 	if w.firstErr == nil {
 		w.firstErr = err
@@ -946,12 +987,19 @@ func (w *Writer) failLocked(err error) (*activeSegment, []detachedSegment) {
 	detached := append([]detachedSegment(nil), w.detached...)
 	w.active = nil
 	w.detached = nil
-	w.workerCancel()
-	w.signalAllLocked()
-	return active, detached
+	w.ready = nil
+	w.startDrainLocked(w.firstErr, active, detached)
 }
 
 func (w *Writer) noteAsyncErr(err error) {
+	w.noteTerminalErr(err, false)
+}
+
+func (w *Writer) noteForegroundErr(err error) {
+	w.noteTerminalErr(err, true)
+}
+
+func (w *Writer) noteTerminalErr(err error, surfaced bool) {
 	if err == nil {
 		return
 	}
@@ -959,16 +1007,70 @@ func (w *Writer) noteAsyncErr(err error) {
 	if w.firstErr == nil {
 		w.firstErr = err
 	}
+	if surfaced && errors.Is(err, w.firstErr) {
+		w.firstErrSurface = true
+	}
 	w.aborted = true
 	active := w.active
 	detached := append([]detachedSegment(nil), w.detached...)
 	w.active = nil
 	w.detached = nil
-	w.workerCancel()
-	w.signalAllLocked()
+	w.ready = nil
+	w.startDrainLocked(w.firstErr, active, detached)
 	w.mu.Unlock()
+}
 
-	w.abortSegmentsBestEffort(active, detached)
+// startDrainLocked transfers shutdown ownership to one persistent coordinator.
+// Public Close and Abort calls may stop waiting, but this drain continues and
+// later calls join the same completion rather than starting competing cleanup.
+func (w *Writer) startDrainLocked(cause error, active *activeSegment, detached []detachedSegment) {
+	if w.drainStarted {
+		return
+	}
+	w.drainStarted = true
+	w.workerCancel(cause)
+	w.signalAllLocked()
+	go w.runDrain(active, detached)
+}
+
+func (w *Writer) runDrain(active *activeSegment, detached []detachedSegment) {
+	cleanupErr := w.abortSegmentsBestEffort(active, detached)
+	w.workersWG.Wait()
+
+	w.mu.Lock()
+	w.drainCleanupErr = errors.Join(cleanupErr, w.drainWorkerErr)
+	close(w.drainDone)
+	w.mu.Unlock()
+}
+
+func (w *Writer) noteDrainWorkerErr(err error, item detachedSegment) {
+	err = withoutContextCancellation(err)
+	if err == nil {
+		return
+	}
+	w.mu.Lock()
+	w.drainWorkerErr = errors.Join(w.drainWorkerErr, err)
+	w.mu.Unlock()
+	w.observe(MetricEvent{
+		Name:      MetricSegmentCleanup,
+		Partition: w.partition,
+		StartLSN:  item.baseLSN,
+		Records:   int(item.records),
+		Bytes:     item.rawBytes,
+		Err:       err,
+	})
+}
+
+func (w *Writer) waitDrain(ctx context.Context) error {
+	select {
+	case <-w.drainDone:
+		w.mu.Lock()
+		err := w.drainCleanupErr
+		w.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (w *Writer) observe(event MetricEvent) {
@@ -1258,6 +1360,18 @@ func normalizeOptions(opts Options, snapshot Snapshot) (Options, error) {
 	if opts.Queue.MaxInflightSegments < 0 {
 		return Options{}, fmt.Errorf("%w: negative max inflight segments %d", ErrInvalidOptions, opts.Queue.MaxInflightSegments)
 	}
+	if opts.Timeouts.SegmentFinalize == 0 {
+		opts.Timeouts.SegmentFinalize = DefaultSegmentFinalizeTimeout
+	}
+	if opts.Timeouts.CatalogPublish == 0 {
+		opts.Timeouts.CatalogPublish = DefaultCatalogPublishTimeout
+	}
+	if opts.Timeouts.SegmentFinalize < 0 {
+		return Options{}, fmt.Errorf("%w: negative segment finalize timeout %s", ErrInvalidOptions, opts.Timeouts.SegmentFinalize)
+	}
+	if opts.Timeouts.CatalogPublish < 0 {
+		return Options{}, fmt.Errorf("%w: negative catalog publish timeout %s", ErrInvalidOptions, opts.Timeouts.CatalogPublish)
+	}
 	if opts.Clock == nil {
 		opts.Clock = SystemClock{}
 	}
@@ -1330,26 +1444,72 @@ func waitGroupContext(ctx context.Context, wg *sync.WaitGroup) error {
 	}
 }
 
-func (w *Writer) abortSegments(ctx context.Context, active *activeSegment, detached []detachedSegment) {
+// withoutContextCancellation removes shutdown's expected cancellation leaves
+// while retaining sibling provider/cleanup failures from errors.Join trees.
+func withoutContextCancellation(err error) error {
+	if err == nil || err == context.Canceled || err == context.DeadlineExceeded {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		parts := joined.Unwrap()
+		kept := make([]error, 0, len(parts))
+		for _, part := range parts {
+			if residual := withoutContextCancellation(part); residual != nil {
+				kept = append(kept, residual)
+			}
+		}
+		return errors.Join(kept...)
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if withoutContextCancellation(wrapped.Unwrap()) == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func (w *Writer) abortSegments(ctx context.Context, active *activeSegment, detached []detachedSegment) error {
+	var cleanupErr error
 	if active != nil {
-		_ = active.writer.Abort(ctx)
+		if err := active.writer.Abort(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			w.observe(MetricEvent{
+				Name:      MetricSegmentCleanup,
+				Partition: w.partition,
+				StartLSN:  active.baseLSN,
+				Records:   int(active.records),
+				Bytes:     active.rawBytes,
+				Err:       err,
+			})
+		}
 	}
 	for _, item := range detached {
-		_ = item.writer.Abort(ctx)
+		if err := item.writer.Abort(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			w.observe(MetricEvent{
+				Name:      MetricSegmentCleanup,
+				Partition: w.partition,
+				StartLSN:  item.baseLSN,
+				Records:   int(item.records),
+				Bytes:     item.rawBytes,
+				Err:       err,
+			})
+		}
 	}
+	return cleanupErr
 }
 
-func (w *Writer) abortSegmentsBestEffort(active *activeSegment, detached []detachedSegment) {
+func (w *Writer) abortSegmentsBestEffort(active *activeSegment, detached []detachedSegment) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	w.abortSegments(ctx, active, detached)
+	return w.abortSegments(ctx, active, detached)
 }
 
-func abortWriterBestEffort(sw *segwriter.Writer) {
+func abortWriterBestEffort(sw *segwriter.Writer) error {
 	if sw == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = sw.Abort(ctx)
+	return sw.Abort(ctx)
 }

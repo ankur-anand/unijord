@@ -3,6 +3,7 @@ package segwriter
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -80,7 +81,7 @@ type Writer struct {
 	sink Sink
 
 	ctx    context.Context
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 
 	freeBuffers chan *blockBuffer
 	sealJobs    chan *blockBuffer
@@ -161,7 +162,7 @@ func New(opts Options, sink Sink) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	w := &Writer{
 		opts:        normalized,
 		sink:        sink,
@@ -176,7 +177,7 @@ func New(opts Options, sink Sink) (*Writer, error) {
 		w.freeBuffers <- &blockBuffer{}
 	}
 	if err := w.takeFreeBuffer(ctx); err != nil {
-		cancel()
+		cancel(err)
 		return nil, err
 	}
 	for i := 0; i < normalized.SealParallelism; i++ {
@@ -295,7 +296,7 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 	}
 
 	w.closed = true
-	w.cancel()
+	w.cancel(ErrWriterClosed)
 	return Result{
 		Metadata: metadataFromTrailer(trailer),
 		Object:   object,
@@ -304,7 +305,13 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 }
 
 func (w *Writer) Abort(ctx context.Context) error {
-	if w.closed || w.aborted {
+	if w.closed {
+		return nil
+	}
+	if w.aborted {
+		if p := w.getPacker(); p != nil {
+			return p.Abort(ctx)
+		}
 		return nil
 	}
 	w.aborted = true
@@ -501,8 +508,7 @@ func (w *Writer) ensurePacker(ctx context.Context) (*packer, error) {
 	}
 	p, err := newPacker(txn, w.opts.HashAlgo)
 	if err != nil {
-		abortTxnBestEffort(txn)
-		return nil, err
+		return nil, errors.Join(err, abortTxnBestEffort(txn))
 	}
 	preamble, err := (segformat.FilePreamble{
 		Partition:    w.opts.Partition,
@@ -514,12 +520,10 @@ func (w *Writer) ensurePacker(ctx context.Context) (*packer, error) {
 		WriterTag:    w.opts.WriterTag,
 	}).MarshalBinary()
 	if err != nil {
-		abortPackerBestEffort(p)
-		return nil, err
+		return nil, errors.Join(err, abortPackerBestEffort(p))
 	}
 	if err := p.WriteBody(ctx, preamble); err != nil {
-		abortPackerBestEffort(p)
-		return nil, err
+		return nil, errors.Join(err, abortPackerBestEffort(p))
 	}
 	w.packer = p
 	return p, nil
@@ -571,7 +575,7 @@ func (w *Writer) abortWith(ctx context.Context, err error, drainPipeline bool) e
 		_ = w.finishPipeline()
 	}
 	if p := w.getPacker(); p != nil {
-		abortPackerBestEffort(p)
+		return errors.Join(err, abortPackerBestEffort(p))
 	}
 	return err
 }
@@ -583,9 +587,15 @@ func (w *Writer) setFirstErr(err error) {
 	w.errMu.Lock()
 	if w.firstErr == nil {
 		w.firstErr = err
+	} else if isDirectContextCancellation(w.firstErr) && !isDirectContextCancellation(err) {
+		w.firstErr = errors.Join(err, w.firstErr)
 	}
 	w.errMu.Unlock()
-	w.cancel()
+	w.cancel(err)
+}
+
+func isDirectContextCancellation(err error) bool {
+	return err == context.Canceled || err == context.DeadlineExceeded
 }
 
 func (w *Writer) getFirstErr() error {
@@ -739,22 +749,22 @@ func metadataFromTrailer(t segformat.Trailer) Metadata {
 	}
 }
 
-func abortTxnBestEffort(txn Txn) {
+func abortTxnBestEffort(txn Txn) error {
 	if txn == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = txn.Abort(ctx)
+	return txn.Abort(ctx)
 }
 
-func abortPackerBestEffort(p *packer) {
+func abortPackerBestEffort(p *packer) error {
 	if p == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = p.Abort(ctx)
+	return p.Abort(ctx)
 }
 
 func (b *blockBuffer) Reset() {

@@ -78,6 +78,10 @@ writer, err := log.OpenWriter(ctx, partitionlog.WriterOptions{
         MaxBytes:   64 << 20,
         MaxRecords: 16_384,
     },
+    Timeouts: partitionlog.WriterOperationTimeouts{
+        SegmentFinalize: 5 * time.Minute,
+        CatalogPublish:  30 * time.Second,
+    },
 })
 if err != nil {
     return err
@@ -130,6 +134,12 @@ Use `Close` during graceful shutdown:
 ```go
 snapshot, err := writer.Close(ctx)
 ```
+
+The context passed to `Flush`, `Close`, or `Abort` bounds that caller's wait;
+it does not abandon records already accepted by the writer. Background segment
+finalization and catalog publication use the writer operation timeouts. If a
+shutdown call times out, call `Close` or `Abort` again with a fresh context to
+join the same component-owned drain.
 
 ## Retention
 
@@ -233,6 +243,12 @@ partitionlog.FreshnessCached // use cached head if available
 partitionlog.FreshnessOnTail // refresh only when StartLSN reaches cached tail
 partitionlog.FreshnessLatest // refresh before reading
 ```
+
+Concurrent refreshes for the same partition share one catalog load. Each
+caller can cancel its own wait independently; the shared load is canceled when
+its final waiter leaves. `Reader.Close` rejects new refreshes, cancels active
+loads with `reader.ErrClosed`, and waits for their workers before clearing
+reader-owned caches.
 
 ## Replay With A Cursor
 

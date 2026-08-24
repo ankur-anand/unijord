@@ -139,19 +139,18 @@ func BeginMultipartUpload(ctx context.Context, store multipart.Store, key string
 	if session == nil {
 		return nil, fmt.Errorf("%w: store returned a nil session", ErrBackendContract)
 	}
-	cleanup := func() {
+	cleanup := func() error {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
-		_ = session.Cleanup(cleanupCtx)
+		return session.Cleanup(cleanupCtx)
 	}
 	if session.Limits() != limits {
-		cleanup()
-		return nil, fmt.Errorf("%w: store limits=%+v session limits=%+v", ErrBackendContract, limits, session.Limits())
+		contractErr := fmt.Errorf("%w: store limits=%+v session limits=%+v", ErrBackendContract, limits, session.Limits())
+		return nil, errors.Join(contractErr, cleanup())
 	}
 	upload, err := NewMultipartUpload(ctx, session, streamOpts)
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, cleanup())
 	}
 	return upload, nil
 }
@@ -311,7 +310,10 @@ func (u *MultipartUpload) Commit(ctx context.Context) (multipart.ObjectAttrs, er
 	select {
 	case <-u.done:
 	case <-ctx.Done():
-		return multipart.ObjectAttrs{}, ctx.Err()
+		u.mu.Lock()
+		partErr := u.firstErr
+		u.mu.Unlock()
+		return multipart.ObjectAttrs{}, errors.Join(partErr, ctx.Err())
 	}
 
 	u.mu.Lock()

@@ -2,6 +2,7 @@ package segwriter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash"
 
@@ -19,6 +20,7 @@ type packer struct {
 	bodySealed bool
 	completed  bool
 	aborted    bool
+	abortErr   error
 
 	hasher digest64
 }
@@ -107,25 +109,27 @@ func (p *packer) Complete(ctx context.Context) (CommittedObject, error) {
 	if obj.URI == "" {
 		err := fmt.Errorf("%w: commit returned an empty object URI", ErrSinkContract)
 		p.setFirstErr(err)
-		p.abortAfterFailure()
-		return CommittedObject{}, err
+		return CommittedObject{}, errors.Join(err, p.abortAfterFailure())
 	}
 	if obj.SizeBytes != p.offset {
 		err := fmt.Errorf("%w: commit size=%d accepted_bytes=%d", ErrSinkContract, obj.SizeBytes, p.offset)
 		p.setFirstErr(err)
-		p.abortAfterFailure()
-		return CommittedObject{}, err
+		return CommittedObject{}, errors.Join(err, p.abortAfterFailure())
 	}
 	p.completed = true
 	return obj, nil
 }
 
 func (p *packer) Abort(ctx context.Context) error {
-	if p.completed || p.aborted {
+	if p.completed {
+		return nil
+	}
+	if p.aborted && p.abortErr == nil {
 		return nil
 	}
 	p.aborted = true
-	return p.txn.Abort(ctx)
+	p.abortErr = p.txn.Abort(ctx)
+	return p.abortErr
 }
 
 func (p *packer) write(ctx context.Context, bytes []byte) error {
@@ -158,11 +162,10 @@ func (p *packer) setFirstErr(err error) {
 	}
 }
 
-func (p *packer) abortAfterFailure() {
-	p.aborted = true
+func (p *packer) abortAfterFailure() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = p.txn.Abort(ctx)
+	return p.Abort(ctx)
 }
 
 func newDigest(algo segformat.HashAlgo) (digest64, error) {

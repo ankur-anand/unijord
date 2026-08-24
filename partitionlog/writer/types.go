@@ -10,10 +10,12 @@ import (
 )
 
 const (
-	DefaultMaxSegmentRecords   uint32 = 16_384
-	DefaultMaxSegmentRawBytes  uint64 = 64 << 20
-	DefaultMaxInflightSegments int    = 4
-	DefaultMaxInflightBytes    uint64 = 256 << 20
+	DefaultMaxSegmentRecords      uint32 = 16_384
+	DefaultMaxSegmentRawBytes     uint64 = 64 << 20
+	DefaultMaxInflightSegments    int    = 4
+	DefaultMaxInflightBytes       uint64 = 256 << 20
+	DefaultSegmentFinalizeTimeout        = 5 * time.Minute
+	DefaultCatalogPublishTimeout         = 30 * time.Second
 )
 
 type UUIDGen func() ([16]byte, error)
@@ -115,6 +117,14 @@ type QueuePolicy struct {
 	MaxInflightBytes    uint64
 }
 
+// OperationTimeouts bound component-owned background work. Caller contexts
+// only bound how long public methods wait; they do not own already accepted
+// segment finalization or catalog publication.
+type OperationTimeouts struct {
+	SegmentFinalize time.Duration
+	CatalogPublish  time.Duration
+}
+
 type Options struct {
 	Session     Session
 	SinkFactory SinkFactory
@@ -122,6 +132,7 @@ type Options struct {
 	SegmentOptions segwriter.Options
 	Roll           RollPolicy
 	Queue          QueuePolicy
+	Timeouts       OperationTimeouts
 	Observer       Observer
 
 	Clock   Clock
@@ -143,6 +154,7 @@ type MetricName string
 const (
 	MetricSegmentFinalize MetricName = "writer.segment_finalize"
 	MetricSegmentPublish  MetricName = "writer.segment_publish"
+	MetricSegmentCleanup  MetricName = "writer.segment_cleanup"
 )
 
 type MetricEvent struct {

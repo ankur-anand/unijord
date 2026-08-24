@@ -181,6 +181,31 @@ func TestWriterRetentionIsOptional(t *testing.T) {
 	}
 }
 
+func TestWriterForegroundRetentionFailureIsNotSurfacedTwice(t *testing.T) {
+	t.Parallel()
+
+	staleErr := fmt.Errorf("%w: successor claimed fence", ErrStaleWriter)
+	session := &sessionStub{
+		snapshot: terminalCleanupSnapshot(),
+		retention: func(context.Context, Snapshot) (RetentionResult, error) {
+			return RetentionResult{}, staleErr
+		},
+	}
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.ApplyPendingRetention(context.Background()); !errors.Is(err, staleErr) {
+		t.Fatalf("ApplyPendingRetention() error = %v, want stale error", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("x")}); !errors.Is(err, ErrAborted) {
+		t.Fatalf("Append() error = %v, want ErrAborted after surfaced terminal cause", err)
+	}
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+}
+
 func TestWriterSerializesRetentionWithSegmentPublication(t *testing.T) {
 	t.Parallel()
 
@@ -547,6 +572,40 @@ func TestWriterFlushWaitsForInflight(t *testing.T) {
 	session.ReleaseOne()
 	if err := <-done; err != nil {
 		t.Fatalf("Flush() error = %v", err)
+	}
+}
+
+func TestWriterCanceledFlushDoesNotAbandonAcceptedWork(t *testing.T) {
+	t.Parallel()
+
+	session := newBlockingSession(1)
+	w, err := New(testSessionOptions(session, newMemorySegmentFactory()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("accepted")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := w.Flush(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Flush() error = %v, want context deadline", err)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Writer.Err() = %v, caller cancellation must not be terminal", err)
+	}
+
+	session.ReleaseOne()
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("retried Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 1 {
+		t.Fatalf("retried Flush() next_lsn = %d, want 1", snapshot.Head.NextLSN)
+	}
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 
@@ -959,6 +1018,9 @@ func TestWriterCloseHonorsContextWhileWaitingForWorkers(t *testing.T) {
 		t.Fatalf("Close() error = %v, want %v", err, context.DeadlineExceeded)
 	}
 	w.workersWG.Done()
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatalf("retried Close() error = %v", err)
+	}
 }
 
 func TestWriterRejectsStaleEpochOnOpen(t *testing.T) {

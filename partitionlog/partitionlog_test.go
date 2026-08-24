@@ -455,6 +455,24 @@ func TestLogOpenWriterRejectsInvalidPublicWriterOptions(t *testing.T) {
 	}); err == nil {
 		t.Fatal("OpenWriter(negative upload parallelism) error = nil, want error")
 	}
+	if _, err := log.OpenWriter(context.Background(), WriterOptions{
+		Partition: 1,
+		WriterID:  [16]byte{1},
+		Timeouts: WriterOperationTimeouts{
+			SegmentFinalize: -time.Second,
+		},
+	}); err == nil {
+		t.Fatal("OpenWriter(negative segment finalize timeout) error = nil, want error")
+	}
+	if _, err := log.OpenWriter(context.Background(), WriterOptions{
+		Partition: 1,
+		WriterID:  [16]byte{1},
+		Timeouts: WriterOperationTimeouts{
+			CatalogPublish: -time.Second,
+		},
+	}); err == nil {
+		t.Fatal("OpenWriter(negative catalog publish timeout) error = nil, want error")
+	}
 }
 
 func TestLogWriterPipelineOptionsAreAccepted(t *testing.T) {
@@ -466,6 +484,10 @@ func TestLogWriterPipelineOptionsAreAccepted(t *testing.T) {
 	w, err := log.OpenWriter(context.Background(), WriterOptions{
 		Partition: 1,
 		WriterID:  [16]byte{1},
+		Timeouts: WriterOperationTimeouts{
+			SegmentFinalize: time.Minute,
+			CatalogPublish:  time.Second,
+		},
 		Pipeline: WriterPipelineOptions{
 			BlockBytes:        128,
 			PartBytes:         128,

@@ -112,6 +112,125 @@ func TestWriterPreservesIndeterminateSegmentCommit(t *testing.T) {
 	assertAbortCalls(t, factory.sink(t, 0), 1)
 }
 
+func TestWriterAbortTimeoutCanRejoinTerminalDrain(t *testing.T) {
+	publishErr := fmt.Errorf("%w: injected", ErrPublishFailed)
+	publishStarted := make(chan struct{})
+	releasePublish := make(chan struct{})
+	var publishOnce sync.Once
+	session := &sessionStub{
+		snapshot: terminalCleanupSnapshot(),
+		publish: func(ctx context.Context, _ PublishRequest, _ Snapshot) (Snapshot, error) {
+			publishOnce.Do(func() { close(publishStarted) })
+			select {
+			case <-releasePublish:
+				return Snapshot{}, publishErr
+			case <-ctx.Done():
+				return Snapshot{}, ctx.Err()
+			}
+		},
+	}
+	factory := newTerminalCleanupFactory()
+	w := newTerminalCleanupWriter(t, session, factory)
+
+	appendOpenTransaction(t, w, factory, 0, 1)
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut(segment 0) error = %v", err)
+	}
+	waitClosed(t, publishStarted, "first segment publication")
+
+	appendOpenTransaction(t, w, factory, 1, 3)
+	abortGate := factory.sink(t, 1).gateAbort()
+	close(releasePublish)
+	waitForWriterError(t, w, ErrPublishFailed)
+	factory.sink(t, 1).waitAbortStarted(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := w.Abort(ctx)
+	if !errors.Is(err, publishErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Abort() error = %v, want publish error and deadline", err)
+	}
+
+	close(abortGate)
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("retried Abort() error = %v", err)
+	}
+	assertAbortCalls(t, factory.sink(t, 1), 1)
+}
+
+func TestWriterSegmentFinalizeTimeoutIsTerminal(t *testing.T) {
+	session := &sessionStub{snapshot: terminalCleanupSnapshot()}
+	factory := newTerminalCleanupFactory(0)
+	w := newTerminalCleanupWriter(t, session, factory)
+	w.mu.Lock()
+	w.opts.Timeouts.SegmentFinalize = 10 * time.Millisecond
+	w.mu.Unlock()
+
+	appendOpenTransaction(t, w, factory, 0, 1)
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut() error = %v", err)
+	}
+	factory.sink(t, 0).waitCompleteStarted(t)
+
+	waitForWriterError(t, w, context.DeadlineExceeded)
+	if _, err := w.Flush(context.Background()); !errors.Is(err, ErrSegmentWriteFailed) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush() error = %v, want segment failure and deadline", err)
+	}
+}
+
+func TestWriterCatalogPublishTimeoutIsTerminal(t *testing.T) {
+	publishStarted := make(chan struct{})
+	var once sync.Once
+	session := &sessionStub{
+		snapshot: terminalCleanupSnapshot(),
+		publish: func(ctx context.Context, _ PublishRequest, _ Snapshot) (Snapshot, error) {
+			once.Do(func() { close(publishStarted) })
+			<-ctx.Done()
+			return Snapshot{}, ctx.Err()
+		},
+	}
+	w := newTerminalCleanupWriter(t, session, newTerminalCleanupFactory())
+	w.mu.Lock()
+	w.opts.Timeouts.CatalogPublish = 10 * time.Millisecond
+	w.mu.Unlock()
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("value")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut() error = %v", err)
+	}
+	waitClosed(t, publishStarted, "catalog publish")
+
+	waitForWriterError(t, w, context.DeadlineExceeded)
+	if _, err := w.Flush(context.Background()); !errors.Is(err, ErrPublishFailed) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush() error = %v, want publish failure and deadline", err)
+	}
+}
+
+func TestWriterAbortPreservesInflightFinalizeCleanupFailure(t *testing.T) {
+	cleanupErr := errors.New("provider cleanup failed")
+	session := &sessionStub{snapshot: terminalCleanupSnapshot()}
+	factory := newTerminalCleanupFactory(0)
+	w := newTerminalCleanupWriter(t, session, factory)
+
+	appendOpenTransaction(t, w, factory, 0, 1)
+	if err := w.Cut(context.Background()); err != nil {
+		t.Fatalf("Cut() error = %v", err)
+	}
+	sink := factory.sink(t, 0)
+	sink.waitCompleteStarted(t)
+	sink.setAbortErr(cleanupErr)
+
+	err := w.Abort(context.Background())
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("Abort() error = %v, want cleanup error", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("Abort() error = %v, shutdown cancellation should be filtered", err)
+	}
+}
+
 func terminalCleanupSnapshot() Snapshot {
 	return Snapshot{
 		Head: pmeta.PartitionHead{
@@ -291,6 +410,10 @@ type terminalCleanupTxn struct {
 	beginOnce       sync.Once
 	completeOnce    sync.Once
 	abortCalls      atomic.Int32
+	abortStarted    chan struct{}
+	abortStartOnce  sync.Once
+	abortGate       chan struct{}
+	abortErr        error
 }
 
 func (t *terminalCleanupTxn) Write(ctx context.Context, bytes []byte) error {
@@ -323,7 +446,39 @@ func (t *terminalCleanupTxn) Commit(ctx context.Context) (segwriter.CommittedObj
 	}, nil
 }
 
-func (t *terminalCleanupTxn) Abort(context.Context) error {
+func (t *terminalCleanupTxn) Abort(ctx context.Context) error {
 	t.abortCalls.Add(1)
-	return nil
+	t.abortStartOnce.Do(func() {
+		if t.abortStarted != nil {
+			close(t.abortStarted)
+		}
+	})
+	if t.abortGate != nil {
+		select {
+		case <-t.abortGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.mu.Lock()
+	err := t.abortErr
+	t.mu.Unlock()
+	return err
+}
+
+func (s *terminalCleanupSink) gateAbort() chan struct{} {
+	s.txn.abortStarted = make(chan struct{})
+	s.txn.abortGate = make(chan struct{})
+	return s.txn.abortGate
+}
+
+func (s *terminalCleanupSink) waitAbortStarted(t *testing.T) {
+	t.Helper()
+	waitClosed(t, s.txn.abortStarted, fmt.Sprintf("sink %d abort", s.index))
+}
+
+func (s *terminalCleanupSink) setAbortErr(err error) {
+	s.txn.mu.Lock()
+	s.txn.abortErr = err
+	s.txn.mu.Unlock()
 }

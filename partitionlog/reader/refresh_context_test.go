@@ -49,9 +49,7 @@ func TestRefreshCallerCancellationDoesNotPoisonJoinedCaller(t *testing.T) {
 	}()
 	<-joinedStarted
 
-	// Give the second call time to join the already-blocked singleflight. The
-	// catalog call-count assertion below also rejects a missed join.
-	time.Sleep(25 * time.Millisecond)
+	waitForLoadWaiters(t, &coordinator.group, "7", 2)
 	cancelWinner()
 
 	select {
@@ -113,7 +111,7 @@ func TestRefreshJoinedCallerCanCancelWithoutStoppingSharedWork(t *testing.T) {
 		joinedDone <- refreshCallResult{head: head, err: err}
 	}()
 	<-joinedStarted
-	time.Sleep(25 * time.Millisecond)
+	waitForLoadWaiters(t, &coordinator.group, "7", 2)
 	cancelJoined()
 
 	select {
@@ -163,6 +161,29 @@ func TestRefreshSharedWorkHonorsRefreshTimeout(t *testing.T) {
 	}
 	if calls := cat.calls.Load(); calls != 1 {
 		t.Fatalf("LoadPartition() calls = %d, want 1", calls)
+	}
+}
+
+func TestRefreshReturnsCallerOwnedHeadValue(t *testing.T) {
+	const partition = 7
+	cat := catalog.NewMemoryCatalog()
+	_, err := cat.OpenWriter(context.Background(), partition, [16]byte{1})
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	coordinator := newRefreshCoordinator(cat, RefreshPolicy{}, DefaultMaxCachedPartitionHeads, nil)
+
+	first, err := coordinator.refresh(context.Background(), partition)
+	if err != nil {
+		t.Fatalf("first refresh() error = %v", err)
+	}
+	first.NextLSN = 999
+	second, _, ok := coordinator.snapshot(partition)
+	if !ok {
+		t.Fatal("refreshed head was not cached")
+	}
+	if second.NextLSN == first.NextLSN {
+		t.Fatalf("mutating returned head changed cached state: %+v", second)
 	}
 }
 

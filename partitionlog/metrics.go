@@ -19,6 +19,7 @@ const (
 	MetricWriterRetention       MetricName = "writer.retention"
 	MetricWriterSegmentFinalize MetricName = "writer.segment_finalize"
 	MetricWriterSegmentPublish  MetricName = "writer.segment_publish"
+	MetricWriterSegmentCleanup  MetricName = "writer.segment_cleanup"
 
 	MetricReaderHead           MetricName = "reader.head"
 	MetricReaderRead           MetricName = "reader.read"

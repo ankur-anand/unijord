@@ -10,7 +10,6 @@ import (
 
 	"github.com/ankur-anand/unijord/partitionlog/catalog"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -493,7 +492,7 @@ type refreshCoordinator struct {
 	catalog  catalog.Reader
 	policy   RefreshPolicy
 	observer Observer
-	group    singleflight.Group
+	group    loadGroup
 
 	mu                      sync.Mutex
 	cachedHeads             map[uint32]*cachedPartitionHead
@@ -599,7 +598,7 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 	if err := ctx.Err(); err != nil {
 		return pmeta.PartitionHead{}, err
 	}
-	resultCh := c.group.DoChan(fmt.Sprintf("%d", partition), func() (any, error) {
+	result, err := c.group.Do(ctx, fmt.Sprintf("%d", partition), func(loadCtx context.Context) (any, error) {
 		start := time.Now()
 		var head pmeta.PartitionHead
 		var refreshErr error
@@ -612,7 +611,7 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 				Err:       refreshErr,
 			})
 		}()
-		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.policy.RefreshTimeout)
+		workCtx, cancel := context.WithTimeout(loadCtx, c.policy.RefreshTimeout)
 		defer cancel()
 		head, err := c.catalog.LoadPartition(workCtx, partition)
 		if err != nil {
@@ -622,16 +621,11 @@ func (c *refreshCoordinator) refresh(ctx context.Context, partition uint32) (pme
 		generation := c.updateHead(partition, head)
 		return headSnapshot{head: head, generation: generation}, nil
 	})
-	select {
-	case <-ctx.Done():
-		return pmeta.PartitionHead{}, ctx.Err()
-	case result := <-resultCh:
-		if result.Err != nil {
-			return pmeta.PartitionHead{}, result.Err
-		}
-		snapshot := result.Val.(headSnapshot)
-		return snapshot.head, nil
+	if err != nil {
+		return pmeta.PartitionHead{}, err
 	}
+	snapshot := result.(headSnapshot)
+	return snapshot.head, nil
 }
 
 func (c *refreshCoordinator) observe(event MetricEvent) {
@@ -871,6 +865,9 @@ func (c *refreshCoordinator) close() {
 	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	c.group.Close(ErrClosed)
+	if done != nil {
 		<-done
 	}
 }

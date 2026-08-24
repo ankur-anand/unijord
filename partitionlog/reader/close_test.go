@@ -3,9 +3,13 @@ package reader
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	blobcache "github.com/ankur-anand/unijord/partitionlog/blob/cache"
+	"github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	"github.com/ankur-anand/unijord/partitionlog/segreader"
 )
 
@@ -55,4 +59,71 @@ func TestReaderCloseReleasesOwnedRuntime(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
+}
+
+func TestReaderCloseCancelsAndDrainsActiveRefresh(t *testing.T) {
+	cat := &readerCloseCatalog{
+		entered:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	headDone := make(chan error, 1)
+	go func() {
+		_, err := r.Head(context.Background(), 7)
+		headDone <- err
+	}()
+	waitForLoadSignal(t, cat.entered, "catalog refresh")
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- r.Close() }()
+	waitForLoadSignal(t, cat.canceled, "refresh cancellation")
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Reader.Close returned before refresh drained: %v", err)
+	default:
+	}
+	close(cat.release)
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Reader.Close() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reader.Close did not return after refresh drained")
+	}
+	if err := receiveLoadError(t, headDone); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Head() error = %v, want ErrClosed", err)
+	}
+}
+
+type readerCloseCatalog struct {
+	entered  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (c *readerCloseCatalog) LoadPartition(ctx context.Context, partition uint32) (pmeta.PartitionHead, error) {
+	c.once.Do(func() { close(c.entered) })
+	<-ctx.Done()
+	close(c.canceled)
+	<-c.release
+	return pmeta.PartitionHead{Partition: partition}, ctx.Err()
+}
+
+func (*readerCloseCatalog) FindSegment(context.Context, uint32, uint64) (pmeta.SegmentRef, bool, error) {
+	return pmeta.SegmentRef{}, false, nil
+}
+
+func (c *readerCloseCatalog) LookupTimestamp(ctx context.Context, req catalog.TimestampLookupRequest) (catalog.TimestampLookupResult, error) {
+	head, err := c.LoadPartition(ctx, req.Partition)
+	return catalog.TimestampLookupResult{Head: head}, err
+}
+
+func (*readerCloseCatalog) ListSegments(context.Context, catalog.ListSegmentsRequest) (pmeta.SegmentPage, error) {
+	return pmeta.SegmentPage{}, nil
 }

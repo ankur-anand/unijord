@@ -70,12 +70,18 @@ type QueuePolicy struct {
     MaxInflightBytes    uint64
 }
 
+type OperationTimeouts struct {
+    SegmentFinalize time.Duration
+    CatalogPublish  time.Duration
+}
+
 type Options struct {
     Session        Session
     SinkFactory    SinkFactory
     SegmentOptions segwriter.Options
     Roll           RollPolicy
     Queue          QueuePolicy
+    Timeouts       OperationTimeouts
     Clock          Clock
     UUIDGen        UUIDGen
 }
@@ -201,10 +207,28 @@ Rules:
 - successful `Close` moves the writer to `closed`.
 - any hard failure moves the writer to `aborted`.
 
-After `closed`, foreground methods return `ErrClosed`.
+After `closed`, `Append`, `Cut`, and `Flush` return `ErrClosed`. `Close` and
+`Abort` remain idempotent drain operations.
 
 After `aborted`, foreground methods return the terminal cause once if it was
 recorded asynchronously, then return `ErrAborted`.
+
+## Context Ownership
+
+Public call contexts own only that call's local work and wait. They do not own
+records already accepted by the writer. In particular, canceling a `Flush` or
+`Close` wait does not cancel segment finalization or catalog publication.
+
+Accepted work is owned by the writer's component context. Background work ends
+when it succeeds, reaches its configured operation timeout, or the writer
+enters terminal shutdown. The defaults are five minutes for segment finalize
+and 30 seconds for catalog publish.
+
+Terminal shutdown uses one persistent drain coordinator. It cancels the writer
+context with the terminal cause, aborts queued segment transactions, waits for
+all background workers, records cleanup failures, and then closes a shared
+drain-completion channel. A caller may stop waiting on that channel when its own
+context ends; a later `Close` or `Abort` joins the same drain.
 
 ## Append
 
@@ -356,7 +380,10 @@ requires committed visibility before returning.
 - returns the final committed snapshot.
 
 The final worker shutdown wait honors `ctx`. If shutdown work does not finish
-before the context is canceled, `Close` returns the context error.
+before the context is canceled, `Close` returns the context error while the
+writer-owned drain continues. A later `Close` joins that drain and returns the
+final snapshot after it completes. Repeated successful `Close` calls are
+idempotent.
 
 ## Abort
 
@@ -367,7 +394,12 @@ It:
 - marks the writer aborted;
 - aborts the active segment if one exists;
 - stops finalize and publish work;
+- waits for the shared terminal drain, subject to the caller's context;
+- returns provider cleanup failures instead of discarding them;
 - leaves already-written but unpublished segment objects as orphan candidates.
+
+If the caller context ends first, the drain continues. A later `Abort` waits on
+the same drain; it does not start a second cleanup race.
 
 ## Publish Result Validation
 

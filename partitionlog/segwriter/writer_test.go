@@ -476,6 +476,33 @@ func TestWriterAbortsTxnOnUploadFailure(t *testing.T) {
 	}
 }
 
+func TestWriterPreservesUploadAndCleanupFailures(t *testing.T) {
+	t.Parallel()
+
+	uploadErr := errors.New("upload failed")
+	cleanupErr := errors.New("cleanup failed")
+	sink := &failingSink{failErr: uploadErr, abortErr: cleanupErr}
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 32
+	opts.PartSize = 16
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, record := range makeWriterRecords(2, 1, 1, 24) {
+		if err := w.Append(context.Background(), record); err != nil {
+			if !errors.Is(err, uploadErr) || !errors.Is(err, cleanupErr) {
+				t.Fatalf("Append() error = %v, want upload and cleanup errors", err)
+			}
+			return
+		}
+	}
+	_, err = w.Close(context.Background())
+	if !errors.Is(err, uploadErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("Close() error = %v, want upload and cleanup errors", err)
+	}
+}
+
 func TestWriterCloseAfterAsyncUploadErrorDrainsAndAborts(t *testing.T) {
 	t.Parallel()
 
@@ -771,9 +798,10 @@ func testWriterOptions(codec segformat.Codec) Options {
 }
 
 type failingSink struct {
-	mu      sync.Mutex
-	failErr error
-	aborts  int
+	mu       sync.Mutex
+	failErr  error
+	abortErr error
+	aborts   int
 }
 
 type blockingSink struct {
@@ -904,8 +932,9 @@ func (t *failingTxn) Commit(context.Context) (CommittedObject, error) {
 func (t *failingTxn) Abort(context.Context) error {
 	t.sink.mu.Lock()
 	t.sink.aborts++
+	err := t.sink.abortErr
 	t.sink.mu.Unlock()
-	return nil
+	return err
 }
 
 type cleanupAwareSink struct {

@@ -1,6 +1,9 @@
 package segwriter
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 func Encode(ctx context.Context, records []Record, opts Options) ([]byte, Metadata, error) {
 	sink := NewMemorySink("memory://encode")
@@ -10,8 +13,7 @@ func Encode(ctx context.Context, records []Record, opts Options) ([]byte, Metada
 	}
 	for _, record := range records {
 		if err := w.Append(ctx, record); err != nil {
-			_ = w.Abort(ctx)
-			return nil, Metadata{}, err
+			return nil, Metadata{}, errors.Join(err, w.Abort(context.WithoutCancel(ctx)))
 		}
 	}
 	result, err := w.Close(ctx)

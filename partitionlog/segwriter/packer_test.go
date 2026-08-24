@@ -177,6 +177,30 @@ func TestPackerRejectsInvalidCommittedObject(t *testing.T) {
 	}
 }
 
+func TestPackerPreservesContractAndCleanupFailures(t *testing.T) {
+	t.Parallel()
+
+	cleanupErr := errors.New("cleanup failed")
+	txn := newRecordingTxn()
+	txn.abortErr = cleanupErr
+	txn.commitMutate = func(obj CommittedObject) CommittedObject {
+		obj.URI = ""
+		return obj
+	}
+	p := newTestPacker(t, txn, segformat.HashXXH64)
+	if err := p.WriteBody(context.Background(), []byte("body")); err != nil {
+		t.Fatalf("WriteBody() error = %v", err)
+	}
+	_ = p.BodyHash()
+	_, err := p.Complete(context.Background())
+	if !errors.Is(err, ErrSinkContract) {
+		t.Fatalf("Complete() error = %v, want ErrSinkContract", err)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("Complete() error = %v, want cleanup error", err)
+	}
+}
+
 func TestPackerCommitAndAbortLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -222,6 +246,24 @@ func TestPackerAbortIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPackerRetriesFailedAbort(t *testing.T) {
+	t.Parallel()
+
+	cleanupErr := errors.New("cleanup timed out")
+	txn := newRecordingTxn()
+	txn.abortErrOnce = cleanupErr
+	p := newTestPacker(t, txn, segformat.HashXXH64)
+	if err := p.Abort(context.Background()); !errors.Is(err, cleanupErr) {
+		t.Fatalf("Abort(first) error = %v, want cleanup error", err)
+	}
+	if err := p.Abort(context.Background()); err != nil {
+		t.Fatalf("Abort(retry) error = %v", err)
+	}
+	if got := txn.abortCount(); got != 2 {
+		t.Fatalf("Abort calls = %d, want 2", got)
+	}
+}
+
 func TestNewPackerValidatesInputs(t *testing.T) {
 	t.Parallel()
 
@@ -251,6 +293,8 @@ type recordingTxn struct {
 	aborts       int
 	writeErr     error
 	commitErr    error
+	abortErr     error
+	abortErrOnce error
 	writeGate    chan struct{}
 	commitMutate func(CommittedObject) CommittedObject
 }
@@ -297,8 +341,13 @@ func (t *recordingTxn) Commit(ctx context.Context) (CommittedObject, error) {
 func (t *recordingTxn) Abort(context.Context) error {
 	t.mu.Lock()
 	t.aborts++
+	err := t.abortErr
+	if t.abortErrOnce != nil {
+		err = t.abortErrOnce
+		t.abortErrOnce = nil
+	}
 	t.mu.Unlock()
-	return nil
+	return err
 }
 
 func (t *recordingTxn) objectBytes() []byte {

@@ -272,6 +272,54 @@ func TestMultipartUploadCommitWaitUsesCallerContext(t *testing.T) {
 	}
 }
 
+func TestMultipartUploadCommitPreservesRecordedPartFailureWhenCallerCancels(t *testing.T) {
+	t.Parallel()
+
+	providerErr := errors.New("provider rejected part")
+	backend := newFakeUpload()
+	backend.uploadGate = make(chan struct{})
+	backend.putPartErr = providerErr
+	u := newTestUpload(t, backend, MultipartOptions{
+		PartSize:          4,
+		UploadParallelism: 1,
+		UploadQueueSize:   1,
+	})
+	if err := u.Write(context.Background(), []byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan commitResult, 1)
+	go func() {
+		attrs, err := u.Commit(ctx)
+		result <- commitResult{attrs: attrs, err: err}
+	}()
+	waitForPart(t, backend.partStarted, 1)
+
+	// Keep the failed worker from finishing after recordFailure. That leaves
+	// Commit deterministically waiting on u.done when its caller cancels.
+	u.writeMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			u.writeMu.Unlock()
+		}
+	}()
+	close(backend.uploadGate)
+	waitForSignal(t, u.runCtx.Done(), "part failure to be recorded")
+	cancel()
+
+	got := receiveCommit(t, result)
+	if !errors.Is(got.err, providerErr) {
+		t.Fatalf("Commit() error = %v, want provider error", got.err)
+	}
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("Commit() error = %v, want context.Canceled", got.err)
+	}
+	u.writeMu.Unlock()
+	locked = false
+}
+
 func TestMultipartUploadAbortRefusesDuringBackendCommit(t *testing.T) {
 	t.Parallel()
 
@@ -476,6 +524,8 @@ func TestBeginMultipartUploadCleansMismatchedProviderSession(t *testing.T) {
 	t.Parallel()
 
 	backend := newFakeUpload()
+	cleanupErr := errors.New("cleanup failed")
+	backend.cleanupErrOnce = cleanupErr
 	storeLimits := backend.limits
 	storeLimits.MaxObjectSize++
 	store := &fakeStore{limits: storeLimits, session: backend}
@@ -485,6 +535,9 @@ func TestBeginMultipartUploadCleansMismatchedProviderSession(t *testing.T) {
 	})
 	if !errors.Is(err, ErrBackendContract) {
 		t.Fatalf("BeginMultipartUpload() error = %v, want ErrBackendContract", err)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("BeginMultipartUpload() error = %v, want cleanup error", err)
 	}
 	if store.beginCount != 1 || backend.abortCount() != 1 {
 		t.Fatalf("provider calls = (begin:%d cleanup:%d), want (1, 1)", store.beginCount, backend.abortCount())
@@ -579,6 +632,7 @@ type fakeUpload struct {
 	completedReceipts   []int
 	object              []byte
 	receiptNumberOffset int
+	putPartErr          error
 	limits              multipart.Limits
 
 	completeStarted chan struct{}
@@ -648,8 +702,12 @@ func (u *fakeUpload) PutPart(ctx context.Context, part multipart.Part) (multipar
 	u.parts[part.Number] = copyOfPart
 	u.completionOrder = append(u.completionOrder, part.Number)
 	offset := u.receiptNumberOffset
+	err := u.putPartErr
 	u.mu.Unlock()
 	u.partDone <- part.Number
+	if err != nil {
+		return multipart.Receipt{}, err
+	}
 	return multipart.Receipt{
 		Number:         part.Number + offset,
 		Token:          fmt.Sprintf("part-%d", part.Number),

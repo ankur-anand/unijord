@@ -61,6 +61,16 @@ type WriterOptions struct {
 	Batch        BatchPolicy
 	Backpressure BackpressurePolicy
 	Pipeline     WriterPipelineOptions
+	Timeouts     WriterOperationTimeouts
+}
+
+// WriterOperationTimeouts bound background work owned by the writer after a
+// record is accepted. A public method's context only bounds that caller's
+// wait; canceling it does not abandon accepted segment finalization or catalog
+// publication. Zero values keep the defaults.
+type WriterOperationTimeouts struct {
+	SegmentFinalize time.Duration
+	CatalogPublish  time.Duration
 }
 
 // Log is one partitionlog client over one configured store.
@@ -228,6 +238,12 @@ func (l *Log) OpenWriter(ctx context.Context, opts WriterOptions) (*Writer, erro
 	if opts.Backpressure.MaxPendingBytes > 0 {
 		wopts.Queue.MaxInflightBytes = opts.Backpressure.MaxPendingBytes
 	}
+	if opts.Timeouts.SegmentFinalize != 0 {
+		wopts.Timeouts.SegmentFinalize = opts.Timeouts.SegmentFinalize
+	}
+	if opts.Timeouts.CatalogPublish != 0 {
+		wopts.Timeouts.CatalogPublish = opts.Timeouts.CatalogPublish
+	}
 	if err := applyWriterPipelineOptions(&wopts, opts.Partition, opts.Pipeline); err != nil {
 		return nil, err
 	}
@@ -313,7 +329,8 @@ func (w *Writer) Flush(ctx context.Context) (result Snapshot, err error) {
 	return snapshotFromWriter(snapshot), nil
 }
 
-// Close flushes and closes the writer.
+// Close flushes and closes the writer. If ctx ends during final shutdown, the
+// writer-owned drain continues and a later Close call may join it.
 func (w *Writer) Close(ctx context.Context) (result Snapshot, err error) {
 	start := time.Now()
 	defer func() {
@@ -326,6 +343,8 @@ func (w *Writer) Close(ctx context.Context) (result Snapshot, err error) {
 	return snapshotFromWriter(snapshot), nil
 }
 
+// Abort makes the writer terminal and waits for its shared cleanup drain. If
+// ctx ends first, a later Abort call joins the same drain.
 func (w *Writer) Abort(ctx context.Context) (err error) {
 	start := time.Now()
 	defer func() {
@@ -438,6 +457,10 @@ func validateWriterOptions(opts WriterOptions) error {
 		return fmt.Errorf("partitionlog: negative batch max delay %s", opts.Batch.MaxDelay)
 	case opts.Backpressure.MaxPendingBatches < 0:
 		return fmt.Errorf("partitionlog: negative max pending batches %d", opts.Backpressure.MaxPendingBatches)
+	case opts.Timeouts.SegmentFinalize < 0:
+		return fmt.Errorf("partitionlog: negative segment finalize timeout %s", opts.Timeouts.SegmentFinalize)
+	case opts.Timeouts.CatalogPublish < 0:
+		return fmt.Errorf("partitionlog: negative catalog publish timeout %s", opts.Timeouts.CatalogPublish)
 	default:
 		return validateWriterPipelineOptions(opts.Pipeline)
 	}
