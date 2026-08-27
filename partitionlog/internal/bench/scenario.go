@@ -94,6 +94,9 @@ func NewRun(scenario Scenario, profile string, p Provider, params Params, prefix
 	if prefix == "" {
 		prefix = fmt.Sprintf("plbench/%s/%s/%d", scenario.Name(), profile, time.Now().UnixNano())
 	}
+	if err := ValidatePrefix(prefix); err != nil {
+		return nil, err
+	}
 	if log == nil {
 		log = os.Stdout
 	}
@@ -118,9 +121,15 @@ func (r *Run) Execute(ctx context.Context, s Scenario) (err error) {
 			r.Logf("objects kept under %s", r.Prefix)
 			return
 		}
+		// Cleanup runs even if the run context was canceled, but never for
+		// longer than CleanupTimeout, and a cleanup failure fails the run:
+		// a baseline must not be promoted from a run that leaked objects.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CleanupTimeout)
+		defer cancel()
 		t0 := time.Now()
-		n, cerr := r.Provider.Cleanup(ctx, r.Prefix)
+		n, cerr := r.Provider.Cleanup(cctx, r.Prefix)
 		if cerr != nil {
+			err = fmt.Errorf("bench: cleanup of %s failed after deleting %d objects: %w", r.Prefix, n, cerr)
 			r.Logf("cleanup error: %v", cerr)
 			return
 		}
@@ -180,4 +189,22 @@ func (r *Run) Measure(name string, n int, fn func() error, note string) error {
 
 func (r *Run) Note(format string, args ...any) {
 	r.Result.Notes = append(r.Result.Notes, fmt.Sprintf(format, args...))
+}
+
+// PrefixRoot is the only object-key root the suite will ever write to or
+// delete under. Runs, resumes, and cleanup all refuse anything outside it, so
+// a mistyped -prefix cannot delete unrelated data.
+const PrefixRoot = "plbench/"
+
+// CleanupTimeout bounds end-of-run object deletion.
+const CleanupTimeout = 10 * time.Minute
+
+// ValidatePrefix rejects prefixes outside PrefixRoot or containing path
+// tricks.
+func ValidatePrefix(prefix string) error {
+	p := strings.Trim(prefix, "/")
+	if !strings.HasPrefix(p+"/", PrefixRoot) || strings.Contains(p, "..") || strings.Contains(p, "//") {
+		return fmt.Errorf("bench: prefix %q must be under %q", prefix, PrefixRoot)
+	}
+	return nil
 }

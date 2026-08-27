@@ -21,8 +21,13 @@ func init() { bench.Register(catalogHistory{}) }
 // catalogHistory drives the real writer, reader, catalog, and lifecycle
 // through one partition with a deep history: write N small segments, measure
 // every catalog and reader path at that depth, fail over the writer, then
-// apply retention, reclaim, and scrub. Resumable: rerun with the same prefix
-// to continue toward the segment target and re-measure.
+// apply retention, reclaim, and scrub.
+//
+// Resumable only during the append phase: rerunning with the same prefix
+// continues toward the segment target as long as the partition has never had
+// retention applied. Once retention has run, the tree holds trimmed pages and
+// the sealed-page arithmetic no longer describes it, so a rerun is refused
+// and a fresh prefix is required.
 type catalogHistory struct{}
 
 const (
@@ -520,6 +525,10 @@ func (catalogHistory) write(ctx context.Context, run *bench.Run, log *partitionl
 	}
 	defer w.Abort(context.Background())
 	start := w.State().Snapshot.Head
+	if start.AppliedRetentionVersion != 0 || start.ReachableSegmentCount != start.SegmentCount {
+		_ = w.Abort(context.Background())
+		return fmt.Errorf("catalog_history: prefix %s has post-append state (retention applied, %d of %d segments reachable); resumption is append-phase only, use a fresh prefix", run.Prefix, start.ReachableSegmentCount, start.SegmentCount)
+	}
 	have := int(start.SegmentCount)
 	if have >= p.Segments {
 		run.Section("write: history already has %d segments (target %d), skipping", have, p.Segments)

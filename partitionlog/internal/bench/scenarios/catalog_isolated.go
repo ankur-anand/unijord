@@ -115,8 +115,10 @@ func (catalogIsolated) Run(ctx context.Context, run *bench.Run) error {
 	run.Section("lookups (fresh head load each; GETs and bytes counted)")
 	rng := mrand.New(mrand.NewPCG(7, 11))
 	randLSN := func() uint64 { return head.OldestLSN + rng.Uint64N(head.NextLSN-head.OldestLSN) }
-	maxGETs := 1 + levels // head + one page per level down to the leaf
-	maxBytes := inv["head"].Bytes + levels*indexBytes + leafBytes
+	// A lookup reads the head, then one index page per sealed index level,
+	// then one leaf: levels counts the leaf level, so levels-1 index pages.
+	maxGETs := 1 + levels
+	maxBytes := inv["head"].Bytes + (levels-1)*indexBytes + leafBytes
 	wrong := 0
 	measure := func(name string, fn func() error, note string) error {
 		store.Reset()

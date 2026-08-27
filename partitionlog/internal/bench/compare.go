@@ -41,7 +41,10 @@ func DefaultThreshold(profile string, m Metric) Threshold {
 		return Threshold{ValueRatio: 0.10}
 	}
 	if profile == "smoke" {
-		return Threshold{P50Ratio: 2.0, P99Ratio: 3.0, RateRatio: 0.66}
+		// Smoke samples are small (tens of calls) so p99 and rate are a single
+		// stall away from a false alarm; gate p50 only and keep the rest
+		// informational. The structural checks carry the smoke tier.
+		return Threshold{P50Ratio: 2.0}
 	}
 	return Threshold{P50Ratio: 0.25, P99Ratio: 0.50, RateRatio: 0.15}
 }
@@ -126,7 +129,9 @@ func Compare(r *Result, base *Baseline) Report {
 			return rep
 		}
 	}
+	seenChecks := map[string]int{}
 	for _, c := range r.Checks {
+		seenChecks[c.Name]++
 		row := Row{Metric: c.Name, Field: "check", Current: boolMark(c.OK), Failed: !c.OK, Changed: !c.OK}
 		if c.Detail != "" {
 			row.Current += " " + c.Detail
@@ -135,6 +140,43 @@ func Compare(r *Result, base *Baseline) Report {
 			rep.Failed = true
 		}
 		rep.Rows = append(rep.Rows, row)
+	}
+	for name, n := range seenChecks {
+		if n > 1 {
+			rep.Failed = true
+			rep.Rows = append(rep.Rows, Row{Metric: name, Field: "check", Current: fmt.Sprintf("❌ recorded %d times", n), Failed: true, Changed: true})
+		}
+	}
+	if base != nil {
+		// A check or metric that the baseline has and the result lacks is a
+		// silent loss of coverage — the invariant meant to catch a regression
+		// may be the thing that was deleted. Fail loudly.
+		for _, bc := range base.Checks {
+			if seenChecks[bc.Name] == 0 {
+				rep.Failed = true
+				rep.Rows = append(rep.Rows, Row{Metric: bc.Name, Field: "check", Baseline: "present", Current: "❌ missing", Failed: true, Changed: true})
+			}
+		}
+		seenMetrics := map[string]int{}
+		for _, m := range r.Metrics {
+			seenMetrics[m.Name]++
+		}
+		for _, bm := range base.Metrics {
+			switch {
+			case seenMetrics[bm.Name] == 0:
+				rep.Failed = true
+				rep.Rows = append(rep.Rows, Row{Metric: bm.Name, Field: "metric", Baseline: "present", Current: "❌ missing", Failed: true, Changed: true})
+			case seenMetrics[bm.Name] > 1:
+				rep.Failed = true
+				rep.Rows = append(rep.Rows, Row{Metric: bm.Name, Field: "metric", Current: fmt.Sprintf("❌ recorded %d times", seenMetrics[bm.Name]), Failed: true, Changed: true})
+			default:
+				cm, _ := r.Metric(bm.Name)
+				if cm.Kind != bm.Kind || cm.Unit != bm.Unit {
+					rep.Failed = true
+					rep.Rows = append(rep.Rows, Row{Metric: bm.Name, Field: "metric", Baseline: string(bm.Kind) + " " + bm.Unit, Current: "❌ " + string(cm.Kind) + " " + cm.Unit, Failed: true, Changed: true})
+				}
+			}
+		}
 	}
 	if base == nil {
 		for _, m := range r.Metrics {

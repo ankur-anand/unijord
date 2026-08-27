@@ -305,8 +305,8 @@ func cleanup(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if !strings.HasPrefix(*prefix, "plbench/") {
-		return fmt.Errorf("refusing to delete outside plbench/: %q", *prefix)
+	if err := bench.ValidatePrefix(*prefix); err != nil {
+		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

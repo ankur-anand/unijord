@@ -129,3 +129,55 @@ func TestCompareRateScalarsGateOnDecrease(t *testing.T) {
 		t.Fatalf("a rate drop beyond threshold must fail")
 	}
 }
+
+func TestCompareFailsWhenBaselineCoverageIsLost(t *testing.T) {
+	base := &Baseline{
+		Result: Result{Scenario: "s", Profile: "ci", Env: Env{Provider: "minio"},
+			Metrics: []Metric{{Name: "lat", Kind: KindLatency, P50: 10, P99: 20}, {Name: "n.objects", Kind: KindScalar, Value: 1}},
+			Checks:  []Check{{Name: "invariant", OK: true}}},
+		Thresholds: map[string]Threshold{"lat": {P50Ratio: 1, P99Ratio: 1}, "n.objects": {Exact: true}},
+	}
+	full := &Result{Scenario: "s", Profile: "ci", Env: Env{Provider: "minio"},
+		Metrics: []Metric{{Name: "lat", Kind: KindLatency, P50: 10, P99: 20}, {Name: "n.objects", Kind: KindScalar, Value: 1}, {Name: "extra", Kind: KindScalar, Value: 3}},
+		Checks:  []Check{{Name: "invariant", OK: true}, {Name: "new_check", OK: true}}}
+	if rep := Compare(full, base); rep.Failed {
+		t.Fatalf("new metrics and checks are informational: %+v", rep.Rows)
+	}
+
+	noCheck := *full
+	noCheck.Checks = []Check{{Name: "new_check", OK: true}}
+	if rep := Compare(&noCheck, base); !rep.Failed {
+		t.Fatalf("a baseline check missing from the result must fail")
+	}
+
+	noMetric := *full
+	noMetric.Metrics = []Metric{{Name: "n.objects", Kind: KindScalar, Value: 1}}
+	if rep := Compare(&noMetric, base); !rep.Failed {
+		t.Fatalf("a baseline metric missing from the result must fail")
+	}
+
+	wrongKind := *full
+	wrongKind.Metrics = []Metric{{Name: "lat", Kind: KindScalar, Value: 10}, {Name: "n.objects", Kind: KindScalar, Value: 1}}
+	if rep := Compare(&wrongKind, base); !rep.Failed {
+		t.Fatalf("a metric whose kind changed must fail")
+	}
+
+	dup := *full
+	dup.Checks = append(dup.Checks, Check{Name: "invariant", OK: true})
+	if rep := Compare(&dup, base); !rep.Failed {
+		t.Fatalf("a duplicated check must fail")
+	}
+}
+
+func TestValidatePrefix(t *testing.T) {
+	for _, ok := range []string{"plbench/x", "plbench/catalog_history/smoke/1", "plbench"} {
+		if err := ValidatePrefix(ok); err != nil {
+			t.Fatalf("%q should be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "production", "plbench-old/x", "plbench/../prod", "x/plbench/y", "plbench//x"} {
+		if err := ValidatePrefix(bad); err == nil {
+			t.Fatalf("%q should be rejected", bad)
+		}
+	}
+}
