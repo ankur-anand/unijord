@@ -204,6 +204,7 @@ func (c *MemoryCatalog) applyPendingRetention(ctx context.Context, partition uin
 	}
 	state.AppliedRetentionLSN = target
 	state.AppliedRetentionVersion = request.PolicyVersion
+	state.ReachableSegmentCount = uint64(len(data.segments))
 	data.state = state
 	data.headVersion++
 	return RetentionApplyResult{Head: state, Request: request, Applied: true}, data.headVersion, nil
@@ -268,6 +269,7 @@ func (c *MemoryCatalog) appendSegment(ctx context.Context, partition uint32, wri
 	state.LastSegment = segment
 	state.HasLastSegment = true
 	state.SegmentCount++
+	state.ReachableSegmentCount++
 
 	data.state = state
 	data.headVersion++

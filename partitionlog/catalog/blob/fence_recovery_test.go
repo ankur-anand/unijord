@@ -3,7 +3,6 @@ package blob
 import (
 	"context"
 	"errors"
-	"math"
 	"testing"
 	"time"
 
@@ -175,42 +174,6 @@ func TestOpenWriterReusesCASConflictHeadWithoutAnotherGet(t *testing.T) {
 	}
 	if gets := backend.getCount(); gets != 1 {
 		t.Fatalf("catalog Get calls = %d, want one initial head read", gets)
-	}
-}
-
-func TestNextWriterHeadRejectsExhaustedCounters(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		head headFile
-		err  error
-	}{
-		{head: headFile{WriterEpoch: math.MaxUint64}, err: pcatalog.ErrFenceExhausted},
-		{head: headFile{Generation: math.MaxUint64}, err: pcatalog.ErrGenerationExhausted},
-	} {
-		if _, err := nextWriterHead(tc.head, "", 1, [16]byte{1}); !errors.Is(err, tc.err) {
-			t.Fatalf("nextWriterHead(%+v) error = %v, want %v", tc.head, err, tc.err)
-		}
-	}
-}
-
-func TestAppendSegmentRejectsExhaustedGeneration(t *testing.T) {
-	t.Parallel()
-
-	cat, err := NewMemory(Options{})
-	if err != nil {
-		t.Fatalf("NewMemory() error = %v", err)
-	}
-	ws := cat.newWriterSession(headFile{
-		Version:     pageVersion,
-		Partition:   1,
-		WriterEpoch: 1,
-		WriterID:    [16]byte{1},
-		Generation:  math.MaxUint64,
-	}, "token")
-	_, err = ws.AppendSegment(context.Background(), testSegmentRef(1, 0, 9, 1))
-	if !errors.Is(err, pcatalog.ErrGenerationExhausted) {
-		t.Fatalf("AppendSegment() error = %v, want %v", err, pcatalog.ErrGenerationExhausted)
 	}
 }
 

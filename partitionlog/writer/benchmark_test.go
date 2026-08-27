@@ -144,6 +144,7 @@ func (s *benchSession) PublishSegment(_ context.Context, req PublishRequest) (Sn
 	s.snapshot.Head.NextLSN = req.Segment.NextLSN()
 	s.snapshot.Head.WriterEpoch = s.snapshot.Identity.Epoch
 	s.snapshot.Head.SegmentCount++
+	s.snapshot.Head.ReachableSegmentCount++
 	s.snapshot.Head.LastSegment = req.Segment
 	s.snapshot.Head.HasLastSegment = true
 	if s.snapshot.Head.OldestLSN == 0 && s.snapshot.Head.SegmentCount == 1 {

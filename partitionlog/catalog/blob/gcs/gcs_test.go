@@ -34,7 +34,7 @@ func TestBackendContentTypeWithFakeGCS(t *testing.T) {
 
 	ctx := context.Background()
 	backend, client := newFakeBackend(t, "catalog")
-	obj, err := backend.Put(ctx, "catalog/p00000001/pages/l00/leaf.json", []byte(`{"one":1}`))
+	obj, err := backend.Put(ctx, "catalog/p00000001/pages/l00/leaf.plc", []byte("binary"))
 	if err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}

@@ -29,15 +29,15 @@ func TestBlobCatalogWriterBuffersSegmentsInHeadBeforeLeafSeal(t *testing.T) {
 		t.Fatalf("state = %+v", state)
 	}
 
-	head, _, err := cat.loadHead(context.Background(), 1)
+	head, _, err := cat.engine.Load(context.Background(), 1)
 	if err != nil {
-		t.Fatalf("loadHead() error = %v", err)
+		t.Fatalf("load head error = %v", err)
 	}
-	if len(head.ActiveSegments) != 1 || head.ActiveSegments[0] != segment {
-		t.Fatalf("active_segments = %+v, want segment", head.ActiveSegments)
+	if len(head.Active) != 1 || head.Active[0].BaseLSN != segment.BaseLSN || head.Active[0].LastLSN != segment.LastLSN {
+		t.Fatalf("active entries = %+v, want segment range", head.Active)
 	}
-	if head.LeafFrontier != nil || len(head.IndexFrontier) != 0 {
-		t.Fatalf("leaf_frontier=%+v index_frontier=%+v, want no sealed pages", head.LeafFrontier, head.IndexFrontier)
+	if len(head.Sections) != 0 {
+		t.Fatalf("open index sections=%+v, want no sealed pages", head.Sections)
 	}
 	objects, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix(cat.opts.Prefix, cat.opts.StreamID, 1)})
 	if err != nil {
@@ -115,25 +115,30 @@ func TestBlobCatalogWriterSealsLeafAndCarriesOldLeafIntoIndex(t *testing.T) {
 		}
 	}
 
-	head, _, err := cat.loadHead(context.Background(), 1)
+	head, _, err := cat.engine.Load(context.Background(), 1)
 	if err != nil {
-		t.Fatalf("loadHead() error = %v", err)
+		t.Fatalf("load head error = %v", err)
 	}
-	if len(head.ActiveSegments) != 0 {
-		t.Fatalf("active_segments = %+v, want empty after exact leaf seal", head.ActiveSegments)
+	if len(head.Active) != 0 {
+		t.Fatalf("active entries = %+v, want empty after exact leaf seal", head.Active)
 	}
-	if head.LeafFrontier == nil || head.LeafFrontier.SeqLo != 20 || head.LeafFrontier.SeqHi != 39 {
-		t.Fatalf("leaf_frontier = %+v, want 20-39", head.LeafFrontier)
+	if len(head.Sections) != 2 || len(head.Sections[0].Entries) != 0 || len(head.Sections[1].Entries) != 1 {
+		t.Fatalf("open index sections = %+v, want one l01 page carried into section l02", head.Sections)
 	}
-	if len(head.IndexFrontier) != 1 || head.IndexFrontier[0].Level != 1 || head.IndexFrontier[0].SeqLo != 0 || head.IndexFrontier[0].SeqHi != 19 {
-		t.Fatalf("index_frontier = %+v, want l01 0-19", head.IndexFrontier)
+	root := head.Sections[1].Entries[0]
+	if root.Level != 1 || root.SeqLo != 0 || root.SeqHi != 39 {
+		t.Fatalf("l02 open-section root = %+v, want l01 page 0-39", root)
 	}
-	index, err := cat.loadIndex(context.Background(), head.IndexFrontier[0], cat.opts.StreamID, 1)
+	_, leaves, err := cat.ListMaintenancePages(context.Background(), MaintenancePageRequest{Partition: 1, Level: 0, Limit: 10})
 	if err != nil {
-		t.Fatalf("loadIndex(index_frontier[0]) error = %v", err)
+		t.Fatalf("ListMaintenancePages(l00) error = %v", err)
 	}
-	if len(index.Refs) != 1 || index.Refs[0].SeqLo != 0 || index.Refs[0].SeqHi != 19 {
-		t.Fatalf("index refs = %+v, want leaf 0-19", index.Refs)
+	_, indexes, err := cat.ListMaintenancePages(context.Background(), MaintenancePageRequest{Partition: 1, Level: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMaintenancePages(l01) error = %v", err)
+	}
+	if len(leaves.Paths) != 2 || len(indexes.Paths) != 1 {
+		t.Fatalf("reachable pages leaves=%+v indexes=%+v, want 2/1", leaves.Paths, indexes.Paths)
 	}
 }
 

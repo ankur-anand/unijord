@@ -53,7 +53,7 @@ func TestLiveMinIOBackendAndCatalog(t *testing.T) {
 func runLiveBackendCAS(t *testing.T, ctx context.Context, backend *Backend, prefix string) {
 	t.Helper()
 
-	immutableKey := prefix + "/pages/l00/leaf.json"
+	immutableKey := prefix + "/pages/l00/leaf.plc"
 	first, err := backend.Put(ctx, immutableKey, []byte(`{"leaf":1}`))
 	if err != nil {
 		t.Fatalf("Put(immutable first) error = %v", err)
@@ -72,7 +72,7 @@ func runLiveBackendCAS(t *testing.T, ctx context.Context, backend *Backend, pref
 		t.Fatalf("Put(immutable conflict) error = %v, want %v", err, blob.ErrImmutableConflict)
 	}
 
-	headKey := prefix + "/head.json"
+	headKey := prefix + "/head.plc"
 	created, swapped, err := backend.CompareAndSwap(ctx, headKey, "", []byte(`{"generation":1}`))
 	if err != nil {
 		t.Fatalf("CompareAndSwap(create) error = %v", err)

@@ -24,16 +24,16 @@ func TestMemoryBackendPutGetAndDefensiveCopy(t *testing.T) {
 
 	backend := blob.NewMemoryBackend()
 	body := []byte("one")
-	created, err := backend.Put(context.Background(), "pages/a.json", body)
+	created, err := backend.Put(context.Background(), "pages/a.plc", body)
 	if err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
-	if created.Key != "pages/a.json" || string(created.Body) != "one" || created.Token == "" {
+	if created.Key != "pages/a.plc" || string(created.Body) != "one" || created.Token == "" {
 		t.Fatalf("Put() object = %+v", created)
 	}
 
 	body[0] = 'x'
-	got, err := backend.Get(context.Background(), "pages/a.json")
+	got, err := backend.Get(context.Background(), "pages/a.plc")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -42,7 +42,7 @@ func TestMemoryBackendPutGetAndDefensiveCopy(t *testing.T) {
 	}
 
 	got.Body[0] = 'y'
-	again, err := backend.Get(context.Background(), "pages/a.json")
+	again, err := backend.Get(context.Background(), "pages/a.plc")
 	if err != nil {
 		t.Fatalf("Get(again) error = %v", err)
 	}

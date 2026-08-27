@@ -26,12 +26,12 @@ func TestBlobCatalogRetentionTrimsMultiLevelHistory(t *testing.T) {
 			t.Fatalf("AppendSegment(%d) error = %v", base, err)
 		}
 	}
-	before, _, err := cat.loadHead(ctx, 1)
+	before, err := cat.LoadMaintenanceSnapshot(ctx, 1)
 	if err != nil {
-		t.Fatalf("loadHead(before) error = %v", err)
+		t.Fatalf("LoadMaintenanceSnapshot(before) error = %v", err)
 	}
-	if len(before.IndexFrontier) < 2 {
-		t.Fatalf("index frontier levels = %d, want multi-level tree", len(before.IndexFrontier))
+	if before.MaxIndexLevel < 2 {
+		t.Fatalf("max index level = %d, want multi-level tree", before.MaxIndexLevel)
 	}
 
 	request := pcatalog.RetentionRequest{Version: pcatalog.RetentionRequestVersion, PolicyVersion: 1, BeforeLSN: 75, CreatedUnixMS: 10}
@@ -45,7 +45,7 @@ func TestBlobCatalogRetentionTrimsMultiLevelHistory(t *testing.T) {
 	if !result.Applied || result.Head.OldestLSN != 70 || result.Head.AppliedRetentionLSN != 75 || result.Head.AppliedRetentionVersion != 1 {
 		t.Fatalf("retention result = %+v", result)
 	}
-	if result.Head.NextLSN != 160 || result.Head.SegmentCount != 16 || result.Head.LastSegment.BaseLSN != 150 {
+	if result.Head.NextLSN != 160 || result.Head.SegmentCount != 16 || result.Head.ReachableSegmentCount != 9 || result.Head.LastSegment.BaseLSN != 150 {
 		t.Fatalf("retention changed append history = %+v", result.Head)
 	}
 	if _, ok, err := cat.FindSegment(ctx, 1, 69); err != nil || ok {
@@ -63,12 +63,73 @@ func TestBlobCatalogRetentionTrimsMultiLevelHistory(t *testing.T) {
 		t.Fatalf("retained segments = %+v", page.Segments)
 	}
 
-	after, _, err := cat.loadHead(ctx, 1)
+	after, err := cat.LoadMaintenanceSnapshot(ctx, 1)
 	if err != nil {
-		t.Fatalf("loadHead(after) error = %v", err)
+		t.Fatalf("LoadMaintenanceSnapshot(after) error = %v", err)
 	}
-	if err := validateHeadFile(after, cat.opts.StreamID, 1); err != nil {
-		t.Fatalf("validateHeadFile(after) error = %v", err)
+	if after.Head != result.Head || after.Generation <= before.Generation {
+		t.Fatalf("maintenance snapshot after retention = %+v, before=%+v", after, before)
+	}
+}
+
+func TestBlobCatalogApplyPendingRetentionLoadsHeadOnceAfterMailbox(t *testing.T) {
+	ctx := context.Background()
+	backend := &countingGetBackend{Backend: NewMemoryBackend()}
+	cat, err := New(backend, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := cat.OpenWriter(ctx, 1, [16]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendSegment(ctx, testSegmentRef(1, 0, 9, writer.Epoch())); err != nil {
+		t.Fatal(err)
+	}
+	request := pcatalog.RetentionRequest{Version: pcatalog.RetentionRequestVersion, PolicyVersion: 1, BeforeLSN: 5}
+	if _, err := cat.RequestRetention(ctx, 1, request); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.gets.Store(0)
+	result, err := writer.(pcatalog.RetentionWriterSession).ApplyPendingRetention(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Applied {
+		t.Fatal("ApplyPendingRetention() applied = false, want true")
+	}
+	if got := backend.gets.Load(); got != 2 {
+		t.Fatalf("ApplyPendingRetention() GET count = %d, want mailbox + one head refresh", got)
+	}
+}
+
+func TestBlobCatalogRetentionRefreshAfterMailboxObservesTakeover(t *testing.T) {
+	ctx := context.Background()
+	backend := &afterGetBackend{Backend: NewMemoryBackend()}
+	cat, err := New(backend, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := cat.OpenWriter(ctx, 1, [16]byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := pcatalog.RetentionRequest{Version: pcatalog.RetentionRequestVersion, PolicyVersion: 1, BeforeLSN: 1}
+	if _, err := cat.RequestRetention(ctx, 1, request); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.key = RetentionRequestPath(cat.opts.Prefix, cat.opts.StreamID, 1)
+	backend.after = func() error {
+		_, err := cat.OpenWriter(ctx, 1, [16]byte{2})
+		return err
+	}
+	if _, err := first.(pcatalog.RetentionWriterSession).ApplyPendingRetention(ctx); !errors.Is(err, pcatalog.ErrStaleWriter) {
+		t.Fatalf("ApplyPendingRetention() error = %v, want ErrStaleWriter", err)
+	}
+	if backend.afterErr != nil {
+		t.Fatalf("takeover after mailbox read: %v", backend.afterErr)
 	}
 }
 
@@ -97,15 +158,15 @@ func TestBlobCatalogRetentionCanTrimEverythingAndContinueAppending(t *testing.T)
 	if err != nil {
 		t.Fatalf("ApplyPendingRetention() error = %v", err)
 	}
-	if result.Head.OldestLSN != 40 || result.Head.AppliedRetentionLSN != 40 || !result.Head.HasLastSegment || result.Head.SegmentCount != 4 {
+	if result.Head.OldestLSN != 40 || result.Head.AppliedRetentionLSN != 40 || !result.Head.HasLastSegment || result.Head.SegmentCount != 4 || result.Head.ReachableSegmentCount != 0 {
 		t.Fatalf("fully trimmed head = %+v", result.Head)
 	}
-	head, _, err := cat.loadHead(ctx, 1)
+	snapshot, pages, err := cat.ListMaintenancePages(ctx, MaintenancePageRequest{Partition: 1, Level: 0, Limit: 10})
 	if err != nil {
-		t.Fatalf("loadHead() error = %v", err)
+		t.Fatalf("ListMaintenancePages() error = %v", err)
 	}
-	if len(head.IndexFrontier) != 0 || head.LeafFrontier != nil || len(head.ActiveSegments) != 0 {
-		t.Fatalf("fully trimmed topology = %+v", head)
+	if snapshot.Head != result.Head || len(pages.Paths) != 0 {
+		t.Fatalf("fully trimmed topology snapshot=%+v pages=%+v", snapshot, pages)
 	}
 	lookup, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{Partition: 1, TimestampMS: 0})
 	if err != nil {
@@ -119,7 +180,7 @@ func TestBlobCatalogRetentionCanTrimEverythingAndContinueAppending(t *testing.T)
 	if err != nil {
 		t.Fatalf("AppendSegment(after trim) error = %v", err)
 	}
-	if state.OldestLSN != 40 || state.NextLSN != 50 || state.SegmentCount != 5 {
+	if state.OldestLSN != 40 || state.NextLSN != 50 || state.SegmentCount != 5 || state.ReachableSegmentCount != 1 {
 		t.Fatalf("state after append = %+v", state)
 	}
 }
@@ -327,4 +388,22 @@ func TestBlobCatalogHeadRejectsRegressedRestoredRetentionRequest(t *testing.T) {
 	if _, err := retention.ApplyPendingRetention(ctx); !errors.Is(err, pcatalog.ErrRetentionRegression) {
 		t.Fatalf("ApplyPendingRetention(regressed) error = %v, want %v", err, pcatalog.ErrRetentionRegression)
 	}
+}
+
+type afterGetBackend struct {
+	Backend
+	key      string
+	after    func() error
+	afterErr error
+}
+
+func (b *afterGetBackend) Get(ctx context.Context, key string) (Object, error) {
+	object, err := b.Backend.Get(ctx, key)
+	if err != nil || key != b.key || b.after == nil {
+		return object, err
+	}
+	after := b.after
+	b.after = nil
+	b.afterErr = after()
+	return object, nil
 }

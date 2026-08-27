@@ -721,6 +721,7 @@ func TestWriterCutFailureBeforeSwapKeepsWriterUsable(t *testing.T) {
 			next.Head.NextLSN = req.Segment.NextLSN()
 			next.Head.WriterEpoch = current.Identity.Epoch
 			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
 			next.Head.LastSegment = req.Segment
 			next.Head.HasLastSegment = true
 			return next, nil
@@ -777,6 +778,7 @@ func TestWriterRollAfterStartFailureRetriesBeforeNextAppend(t *testing.T) {
 			next.Head.NextLSN = req.Segment.NextLSN()
 			next.Head.WriterEpoch = current.Identity.Epoch
 			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
 			next.Head.LastSegment = req.Segment
 			next.Head.HasLastSegment = true
 			return next, nil
@@ -845,6 +847,7 @@ func TestWriterAppendStartFailureIsRetryable(t *testing.T) {
 			next.Head.NextLSN = req.Segment.NextLSN()
 			next.Head.WriterEpoch = current.Identity.Epoch
 			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
 			next.Head.LastSegment = req.Segment
 			next.Head.HasLastSegment = true
 			return next, nil
@@ -891,6 +894,7 @@ func TestWriterForegroundFailureCleanupUsesBestEffortAbortContext(t *testing.T) 
 			next.Head.NextLSN = req.Segment.NextLSN()
 			next.Head.WriterEpoch = current.Identity.Epoch
 			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
 			next.Head.LastSegment = req.Segment
 			next.Head.HasLastSegment = true
 			return next, nil
@@ -946,6 +950,7 @@ func TestWriterCutBackpressureUsesEstimatedSegmentBytes(t *testing.T) {
 			next.Head.NextLSN = req.Segment.NextLSN()
 			next.Head.WriterEpoch = current.Identity.Epoch
 			next.Head.SegmentCount++
+			next.Head.ReachableSegmentCount++
 			next.Head.LastSegment = req.Segment
 			next.Head.HasLastSegment = true
 			return next, nil
@@ -1281,6 +1286,7 @@ func (s *serializedRetentionSession) PublishSegment(ctx context.Context, req Pub
 	next.Head.LastSegment = req.Segment
 	next.Head.HasLastSegment = true
 	next.Head.SegmentCount++
+	next.Head.ReachableSegmentCount++
 	s.snapshot = next
 	return next, nil
 }
@@ -1335,13 +1341,14 @@ func (s *blockingSession) PublishSegment(ctx context.Context, req PublishRequest
 	current := s.snapshot
 	next := Snapshot{
 		Head: pmeta.PartitionHead{
-			Partition:      current.Head.Partition,
-			NextLSN:        req.Segment.NextLSN(),
-			OldestLSN:      current.Head.OldestLSN,
-			WriterEpoch:    current.Identity.Epoch,
-			SegmentCount:   current.Head.SegmentCount + 1,
-			LastSegment:    req.Segment,
-			HasLastSegment: true,
+			Partition:             current.Head.Partition,
+			NextLSN:               req.Segment.NextLSN(),
+			OldestLSN:             current.Head.OldestLSN,
+			WriterEpoch:           current.Identity.Epoch,
+			SegmentCount:          current.Head.SegmentCount + 1,
+			ReachableSegmentCount: current.Head.ReachableSegmentCount + 1,
+			LastSegment:           req.Segment,
+			HasLastSegment:        true,
 		},
 		Identity: current.Identity,
 	}

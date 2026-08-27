@@ -1181,9 +1181,15 @@ func validateHead(head pmeta.PartitionHead) error {
 	if head.NextLSN < head.OldestLSN {
 		return fmt.Errorf("%w: next_lsn=%d oldest_lsn=%d", ErrInvalidSession, head.NextLSN, head.OldestLSN)
 	}
+	if head.ReachableSegmentCount > head.SegmentCount {
+		return fmt.Errorf("%w: reachable_segment_count=%d exceeds segment_count=%d", ErrInvalidSession, head.ReachableSegmentCount, head.SegmentCount)
+	}
 	if !head.HasLastSegment {
 		if head.SegmentCount != 0 {
 			return fmt.Errorf("%w: segment_count=%d without last segment", ErrInvalidSession, head.SegmentCount)
+		}
+		if head.ReachableSegmentCount != 0 {
+			return fmt.Errorf("%w: reachable_segment_count=%d without last segment", ErrInvalidSession, head.ReachableSegmentCount)
 		}
 		return nil
 	}
@@ -1224,6 +1230,8 @@ func validatePublishedSnapshot(current Snapshot, next Snapshot, segment pmeta.Se
 		return fmt.Errorf("%w: head writer_epoch=%d identity epoch=%d", ErrInvalidPublishResult, next.Head.WriterEpoch, current.Identity.Epoch)
 	case next.Head.SegmentCount != current.Head.SegmentCount+1:
 		return fmt.Errorf("%w: segment_count=%d want=%d", ErrInvalidPublishResult, next.Head.SegmentCount, current.Head.SegmentCount+1)
+	case next.Head.ReachableSegmentCount != current.Head.ReachableSegmentCount+1:
+		return fmt.Errorf("%w: reachable_segment_count=%d want=%d", ErrInvalidPublishResult, next.Head.ReachableSegmentCount, current.Head.ReachableSegmentCount+1)
 	case next.Head.OldestLSN != current.Head.OldestLSN:
 		return fmt.Errorf("%w: publish changed oldest_lsn from %d to %d", ErrInvalidPublishResult, current.Head.OldestLSN, next.Head.OldestLSN)
 	case next.Head.AppliedRetentionLSN != current.Head.AppliedRetentionLSN:
@@ -1256,6 +1264,8 @@ func validateRetentionSnapshot(current Snapshot, result RetentionResult) error {
 		return fmt.Errorf("%w: retention changed next_lsn from %d to %d", ErrInvalidPublishResult, current.Head.NextLSN, next.Head.NextLSN)
 	case next.Head.SegmentCount != current.Head.SegmentCount:
 		return fmt.Errorf("%w: retention changed segment_count", ErrInvalidPublishResult)
+	case next.Head.ReachableSegmentCount > current.Head.ReachableSegmentCount:
+		return fmt.Errorf("%w: retention increased reachable_segment_count from %d to %d", ErrInvalidPublishResult, current.Head.ReachableSegmentCount, next.Head.ReachableSegmentCount)
 	case next.Head.HasLastSegment != current.Head.HasLastSegment || next.Head.LastSegment != current.Head.LastSegment:
 		return fmt.Errorf("%w: retention changed last segment", ErrInvalidPublishResult)
 	case next.Head.OldestLSN < current.Head.OldestLSN:

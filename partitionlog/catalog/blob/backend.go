@@ -16,7 +16,7 @@ var (
 const (
 	DefaultObjectListLimit = blobstore.DefaultListLimit
 	MaxObjectListLimit     = blobstore.MaxListLimit
-	ObjectContentType      = blobstore.JSONContentType
+	ObjectContentType      = blobstore.BinaryContentType
 )
 
 // Backend is the minimal blob/object-store protocol required by the catalog.

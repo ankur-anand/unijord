@@ -410,6 +410,7 @@ The snapshot returned by `Session.PublishSegment(...)` must satisfy:
 - same writer identity as before publish;
 - `Head.WriterEpoch == Identity.Epoch`;
 - `Head.SegmentCount` advances by exactly one;
+- `Head.ReachableSegmentCount` advances by exactly one;
 - retention and `OldestLSN` fields do not change;
 - `Head.HasLastSegment == true`;
 - `Head.LastSegment == published segment`;

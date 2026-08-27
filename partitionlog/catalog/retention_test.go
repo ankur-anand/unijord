@@ -30,7 +30,7 @@ func TestMemoryCatalogRetentionIsMonotonicAndSegmentGranular(t *testing.T) {
 	if !result.Applied || result.Head.OldestLSN != 10 || result.Head.AppliedRetentionLSN != 15 || result.Head.AppliedRetentionVersion != 1 {
 		t.Fatalf("retention result = %+v", result)
 	}
-	if result.Head.SegmentCount != 3 || result.Head.LastSegment.BaseLSN != 20 {
+	if result.Head.SegmentCount != 3 || result.Head.ReachableSegmentCount != 2 || result.Head.LastSegment.BaseLSN != 20 {
 		t.Fatalf("retention changed append history = %+v", result.Head)
 	}
 	if _, ok, err := cat.FindSegment(ctx, 1, 5); err != nil || ok {
@@ -54,7 +54,7 @@ func TestMemoryCatalogRetentionIsMonotonicAndSegmentGranular(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyPendingRetention(full) error = %v", err)
 	}
-	if result.Head.OldestLSN != 30 || result.Head.AppliedRetentionLSN != 30 || !result.Head.HasLastSegment || result.Head.SegmentCount != 3 {
+	if result.Head.OldestLSN != 30 || result.Head.AppliedRetentionLSN != 30 || !result.Head.HasLastSegment || result.Head.SegmentCount != 3 || result.Head.ReachableSegmentCount != 0 {
 		t.Fatalf("fully trimmed head = %+v", result.Head)
 	}
 	page, err := cat.ListSegments(ctx, ListSegmentsRequest{Partition: 1})
@@ -66,7 +66,7 @@ func TestMemoryCatalogRetentionIsMonotonicAndSegmentGranular(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendSegment(after trim) error = %v", err)
 	}
-	if state.OldestLSN != 30 || state.NextLSN != 40 || state.SegmentCount != 4 {
+	if state.OldestLSN != 30 || state.NextLSN != 40 || state.SegmentCount != 4 || state.ReachableSegmentCount != 1 {
 		t.Fatalf("state after append = %+v", state)
 	}
 }

@@ -3,14 +3,15 @@ package blob
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"slices"
 	"sync/atomic"
 	"testing"
 
+	segmentsink "github.com/ankur-anand/unijord/partitionlog/blob/sink"
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 	"github.com/ankur-anand/unijord/partitionlog/segformat"
+	plwriter "github.com/ankur-anand/unijord/partitionlog/writer"
 )
 
 type catalogModel interface {
@@ -217,13 +218,12 @@ func TestBlobCatalogLookupTimestampReadsOneTreePath(t *testing.T) {
 		}
 	}
 
-	head, _, err := cat.loadHead(ctx, 3)
+	head, err := cat.LoadMaintenanceSnapshot(ctx, 3)
 	if err != nil {
-		t.Fatalf("loadHead() error = %v", err)
+		t.Fatalf("LoadMaintenanceSnapshot() error = %v", err)
 	}
-	roots := reachableRoots(head)
-	if len(roots) == 0 || roots[0].Level < 2 {
-		t.Fatalf("catalog did not build a multi-level tree: roots=%+v", roots)
+	if head.MaxIndexLevel < 2 {
+		t.Fatalf("catalog did not build a multi-level tree: snapshot=%+v", head)
 	}
 	backend.gets.Store(0)
 	got, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{Partition: 3, TimestampMS: first.MinTimestampMS})
@@ -233,7 +233,7 @@ func TestBlobCatalogLookupTimestampReadsOneTreePath(t *testing.T) {
 	if !got.Found || got.Segment != first {
 		t.Fatalf("LookupTimestamp() = %+v, want first segment %+v", got, first)
 	}
-	wantGets := int64(roots[0].Level) + 2 // head + one page at each tree level
+	wantGets := int64(head.MaxIndexLevel) + 2 // head + one page at each tree level
 	if gotGets := backend.gets.Load(); gotGets != wantGets {
 		t.Fatalf("backend Get calls = %d, want one tree path (%d)", gotGets, wantGets)
 	}
@@ -241,7 +241,7 @@ func TestBlobCatalogLookupTimestampReadsOneTreePath(t *testing.T) {
 	backend.gets.Store(0)
 	missing, err := cat.LookupTimestamp(ctx, pcatalog.TimestampLookupRequest{
 		Partition:   3,
-		TimestampMS: head.LastSegment.MaxTimestampMS + 1,
+		TimestampMS: head.Head.LastSegment.MaxTimestampMS + 1,
 	})
 	if err != nil {
 		t.Fatalf("LookupTimestamp(newer than head) error = %v", err)
@@ -327,8 +327,7 @@ func modelSegment(partition uint32, base, last, epoch uint64, writerID [16]byte)
 	var uuid [16]byte
 	binary.BigEndian.PutUint64(uuid[:8], base+1)
 	binary.BigEndian.PutUint64(uuid[8:], last+1)
-	return pmeta.SegmentRef{
-		URI:              fmt.Sprintf("model://p%08d/%020d-%020d-e%d", partition, base, last, epoch),
+	segment := pmeta.SegmentRef{
 		Partition:        partition,
 		WriterEpoch:      epoch,
 		SegmentUUID:      uuid,
@@ -347,4 +346,9 @@ func modelSegment(partition uint32, base, last, epoch uint64, writerID [16]byte)
 		SegmentHash:      base + 101,
 		TrailerHash:      last + 101,
 	}
+	segment.URI = segmentsink.NewLayout("").SegmentKey(plwriter.SegmentInfo{
+		Partition: segment.Partition, BaseLSN: segment.BaseLSN, WriterEpoch: segment.WriterEpoch,
+		SegmentUUID: segment.SegmentUUID, WriterTag: segment.WriterTag,
+	})
+	return segment
 }

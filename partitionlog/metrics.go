@@ -44,8 +44,9 @@ type Metric struct {
 	Records int
 	Bytes   uint64
 
-	SegmentURI   string
-	SegmentCount uint64
+	SegmentURI            string
+	SegmentCount          uint64
+	ReachableSegmentCount uint64
 
 	InflightSegments int
 	InflightBytes    uint64

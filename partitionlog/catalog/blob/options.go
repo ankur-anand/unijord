@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	DefaultIndexRefLimit = 1024
+	DefaultIndexRefLimit = 128
 	// MaxIndexLevel bounds catalog-tree depth and prevents uint8 level wrap.
 	// With the minimum fanout of two it represents more history than the
 	// uint64 LSN space can address at normal leaf sizes.
@@ -24,6 +24,11 @@ const (
 
 type Options struct {
 	Prefix string
+	// SegmentRootPrefix is the root used to derive SegmentRef URIs from
+	// catformat leaf entries. It must equal the Prefix configured on the
+	// segment sink that produced those objects. Empty uses the sink default
+	// "partitionlog".
+	SegmentRootPrefix string
 	// StreamID scopes this catalog instance to one stream. Non-empty values are
 	// included in object keys and in committed metadata.
 	StreamID string

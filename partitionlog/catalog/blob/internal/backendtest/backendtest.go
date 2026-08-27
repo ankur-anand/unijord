@@ -52,7 +52,7 @@ func (c Config) wrongToken(valid string) string {
 func runPutGetImmutableReplay(t *testing.T, backend blob.Backend) {
 	t.Helper()
 	ctx := context.Background()
-	const key = "catalog/p00000001/pages/l00/leaf.json"
+	const key = "catalog/p00000001/pages/l00/leaf.plc"
 
 	first, err := backend.Put(ctx, key, []byte(`{"one":1}`))
 	if err != nil {
@@ -95,7 +95,7 @@ func runPutGetImmutableReplay(t *testing.T, backend blob.Backend) {
 func runCompareAndSwap(t *testing.T, backend blob.Backend, wrongToken func(string) string) {
 	t.Helper()
 	ctx := context.Background()
-	const key = "catalog/p00000001/head.json"
+	const key = "catalog/p00000001/head.plc"
 
 	missing, swapped, err := backend.CompareAndSwap(ctx, key, wrongToken("1"), []byte(`{"generation":1}`))
 	if err != nil {
@@ -153,10 +153,10 @@ func runListAndDelete(t *testing.T, backend blob.Backend) {
 	t.Helper()
 	ctx := context.Background()
 	keys := []string{
-		"catalog/p00000001/pages/l00/a.json",
-		"catalog/p00000001/pages/l00/b.json",
-		"catalog/p00000001/pages/l00/c.json",
-		"catalog/p00000002/pages/l00/d.json",
+		"catalog/p00000001/pages/l00/a.plc",
+		"catalog/p00000001/pages/l00/b.plc",
+		"catalog/p00000001/pages/l00/c.plc",
+		"catalog/p00000002/pages/l00/d.plc",
 	}
 	for _, key := range keys {
 		if _, err := backend.Put(ctx, key, []byte(key)); err != nil {

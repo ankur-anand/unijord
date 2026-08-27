@@ -47,7 +47,7 @@ func (l Layout) Prefix() string {
 }
 
 func (l Layout) SegmentKey(info plwriter.SegmentInfo) string {
-	return l.SegmentPrefix(info.StreamID, info.Partition) + segmentName(info.BaseLSN, info.WriterEpoch, info.SegmentUUID, segmentFileSuffix)
+	return keylayout.SegmentObjectKey(l.root(), info.StreamID, info.Partition, info.BaseLSN, info.WriterEpoch, info.SegmentUUID)
 }
 
 // SegmentPrefix returns the final-segment prefix for one stream partition.

@@ -566,6 +566,13 @@ func TestLogMetricsObserverReceivesPublicAndBackgroundEvents(t *testing.T) {
 	if appendMetric.Partition != 1 || appendMetric.LSN != 0 || appendMetric.Records != 1 || appendMetric.Bytes == 0 || appendMetric.Err != nil {
 		t.Fatalf("append metric = %+v, want partition=1 lsn=0 records=1 bytes>0 err=nil", appendMetric)
 	}
+	flushMetric, ok := findMetric(events, MetricWriterFlush)
+	if !ok {
+		t.Fatal("missing flush metric")
+	}
+	if flushMetric.SegmentCount != 1 || flushMetric.ReachableSegmentCount != 1 {
+		t.Fatalf("flush metric counts = lifetime %d reachable %d, want 1/1", flushMetric.SegmentCount, flushMetric.ReachableSegmentCount)
+	}
 	readMetric, ok := findMetric(events, MetricReaderRead)
 	if !ok {
 		t.Fatal("missing read metric")

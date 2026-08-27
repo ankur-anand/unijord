@@ -5,6 +5,7 @@ package blobstore
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -18,10 +19,20 @@ const (
 	// Object-store list APIs do not share one maximum page size. The common
 	// contract uses S3's 1,000-key ceiling so callers observe the same bounded
 	// behavior on every backend.
-	DefaultListLimit = 1000
-	MaxListLimit     = 1000
-	JSONContentType  = "application/json"
+	DefaultListLimit  = 1000
+	MaxListLimit      = 1000
+	JSONContentType   = "application/json"
+	BinaryContentType = "application/octet-stream"
 )
+
+// ContentTypeForKey preserves JSON for mutable maintenance/control objects
+// while identifying binary catalog-format objects by their reserved suffix.
+func ContentTypeForKey(key string) string {
+	if strings.HasSuffix(key, ".plc") {
+		return BinaryContentType
+	}
+	return JSONContentType
+}
 
 // Store is the conditional object protocol used by metadata layers.
 //

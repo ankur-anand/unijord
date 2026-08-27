@@ -126,10 +126,15 @@ type PartitionHead struct {
     AppliedRetentionVersion uint64
     WriterEpoch             uint64
     SegmentCount            uint64
+    ReachableSegmentCount   uint64
     LastSegment             SegmentRef
     HasLastSegment          bool
 }
 ```
+
+`SegmentCount` is the lifetime publication count and never decreases.
+`ReachableSegmentCount` is the number of segments still referenced by the
+current head and decreases when retention removes history.
 
 This stays bounded regardless of retained history.
 
@@ -347,6 +352,7 @@ The common append case updates only the bounded segment buffer in the head:
    - `next_lsn = segment.LastLSN + 1`
    - `last_segment = segment`
    - `segment_count = old + 1`
+   - `reachable_segment_count = old + 1`
    - `active_segments = old active_segments + segment`
    - `generation = old + 1`
 4. on CAS success, the segment is visible.
@@ -497,10 +503,10 @@ Use:
 Example layout:
 
 ```text
-catalog/<bucket>/streams/<sha256-stream-key>/p00000003/head.json
-catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l00/<page-id>
-catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l01/<page-id>
-catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l02/<page-id>
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/head.plc
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l00/leaf-<seq-hi>-<seq-lo>-<generation>-<page-id>.plc
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l01/index-l01-<seq-hi>-<seq-lo>-<generation>-<page-id>.plc
+catalog/<bucket>/streams/<sha256-stream-key>/p00000003/pages/l02/index-l02-<seq-hi>-<seq-lo>-<generation>-<page-id>.plc
 ```
 
 The naming contract is defined in `partitionlog/OBJECT_LAYOUT.md`. Page refs

@@ -12,22 +12,22 @@ import (
 func TestPathsAreSelfDescribing(t *testing.T) {
 	t.Parallel()
 
-	if got := HeadPath("", "", 7); got != "catalog/661/p00000007/head.json" {
+	if got := HeadPath("", "", 7); got != "catalog/661/p00000007/head.plc" {
 		t.Fatalf("HeadPath() = %q", got)
 	}
-	if got := HeadPath("/prod/catalog/", "", 7); got != "prod/catalog/661/p00000007/head.json" {
+	if got := HeadPath("/prod/catalog/", "", 7); got != "prod/catalog/661/p00000007/head.plc" {
 		t.Fatalf("HeadPath(custom) = %q", got)
 	}
-	if got := HeadPath("/prod/catalog/", "hosts/host-a/events", 7); got != "prod/catalog/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/head.json" {
+	if got := HeadPath("/prod/catalog/", "hosts/host-a/events", 7); got != "prod/catalog/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/head.plc" {
 		t.Fatalf("HeadPath(stream) = %q", got)
 	}
 	if got := PagePrefix("", "", 7); got != "catalog/661/p00000007/pages/" {
 		t.Fatalf("PagePrefix() = %q", got)
 	}
-	if got := LeafPagePath("", "", 7, 100, 199, 18, "abc"); got != "catalog/661/p00000007/pages/l00/leaf-00000000000000000199-00000000000000000100-00000000000000000018-abc.json" {
+	if got := LeafPagePath("", "", 7, 100, 199, 18, "abc"); got != "catalog/661/p00000007/pages/l00/leaf-00000000000000000199-00000000000000000100-00000000000000000018-abc.plc" {
 		t.Fatalf("LeafPagePath() = %q", got)
 	}
-	if got := IndexPagePath("", "", 7, 2, 100, 999, 22, "def"); got != "catalog/661/p00000007/pages/l02/index-l02-00000000000000000999-00000000000000000100-00000000000000000022-def.json" {
+	if got := IndexPagePath("", "", 7, 2, 100, 999, 22, "def"); got != "catalog/661/p00000007/pages/l02/index-l02-00000000000000000999-00000000000000000100-00000000000000000022-def.plc" {
 		t.Fatalf("IndexPagePath() = %q", got)
 	}
 }
@@ -96,7 +96,7 @@ func TestParsePagePathRejectsMalformedPath(t *testing.T) {
 	t.Parallel()
 
 	bad := []string{
-		"catalog/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/pages/l00/leaf-1-2-3-id.json",
+		"catalog/b78/streams/645c418edae21662304240f5181b1b63c713bfc0b062a2c3b1b84387aa786c91/p00000007/pages/l00/leaf-1-2-3-id.plc",
 		LeafPagePath("catalog", "hosts/host-a/events", 7, 200, 100, 18, "0123456789abcdef0123456789abcdef"),
 		IndexPagePath("catalog", "hosts/host-a/events", 7, 1, 100, 999, 22, "0123456789abcdef0123456789abcdeG"),
 	}

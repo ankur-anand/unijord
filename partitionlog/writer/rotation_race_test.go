@@ -294,6 +294,7 @@ func (s *rotationRaceSession) PublishSegment(ctx context.Context, req PublishReq
 	next.Head.LastSegment = req.Segment
 	next.Head.HasLastSegment = true
 	next.Head.SegmentCount++
+	next.Head.ReachableSegmentCount++
 	s.snapshot = next
 	s.published = append(s.published, req.Segment)
 	return next, nil

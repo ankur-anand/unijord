@@ -236,7 +236,7 @@ func (b *Backend) putObject(ctx context.Context, key string, body []byte, ifNone
 		Key:           aws.String(key),
 		Body:          bytes.NewReader(body),
 		ContentLength: aws.Int64(int64(len(body))),
-		ContentType:   aws.String(blobstore.JSONContentType),
+		ContentType:   aws.String(blobstore.ContentTypeForKey(key)),
 		IfNoneMatch:   ifNoneMatch,
 		IfMatch:       ifMatch,
 	})

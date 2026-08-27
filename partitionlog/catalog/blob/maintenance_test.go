@@ -5,6 +5,8 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
 )
 
 func TestIsPageReachableDistinguishesSupersededIndexCandidate(t *testing.T) {
@@ -24,6 +26,14 @@ func TestIsPageReachableDistinguishesSupersededIndexCandidate(t *testing.T) {
 			t.Fatalf("AppendSegment(%d) error = %v", i, err)
 		}
 	}
+	if _, err := cat.RequestRetention(context.Background(), 1, pcatalog.RetentionRequest{
+		Version: pcatalog.RetentionRequestVersion, PolicyVersion: 1, BeforeLSN: 20,
+	}); err != nil {
+		t.Fatalf("RequestRetention() error = %v", err)
+	}
+	if _, err := writer.(pcatalog.RetentionWriterSession).ApplyPendingRetention(context.Background()); err != nil {
+		t.Fatalf("ApplyPendingRetention() error = %v", err)
+	}
 
 	page, err := cat.backend.List(context.Background(), ListOptions{Prefix: PagePrefix(cat.opts.Prefix, cat.opts.StreamID, 1)})
 	if err != nil {
@@ -34,7 +44,13 @@ func TestIsPageReachableDistinguishesSupersededIndexCandidate(t *testing.T) {
 	}
 	reachableCount := 0
 	unreachableCount := 0
+	reachableIndexes := 0
+	unreachableIndexes := 0
 	for _, object := range page.Objects {
+		parsed, err := ParsePagePath(cat.opts.Prefix, cat.opts.StreamID, 1, object.Key)
+		if err != nil {
+			t.Fatalf("ParsePagePath(%q) error = %v", object.Key, err)
+		}
 		snapshot, reachable, err := cat.IsPageReachable(context.Background(), 1, object.Key)
 		if err != nil {
 			t.Fatalf("IsPageReachable(%q) error = %v", object.Key, err)
@@ -44,12 +60,18 @@ func TestIsPageReachableDistinguishesSupersededIndexCandidate(t *testing.T) {
 		}
 		if reachable {
 			reachableCount++
+			if parsed.Kind == PageObjectIndex {
+				reachableIndexes++
+			}
 		} else {
 			unreachableCount++
+			if parsed.Kind == PageObjectIndex {
+				unreachableIndexes++
+			}
 		}
 	}
-	if reachableCount != 4 || unreachableCount != 1 {
-		t.Fatalf("reachable=%d unreachable=%d, want 4/1", reachableCount, unreachableCount)
+	if reachableCount != 3 || unreachableCount != 2 || reachableIndexes != 1 || unreachableIndexes != 1 {
+		t.Fatalf("reachable=%d unreachable=%d reachable_indexes=%d unreachable_indexes=%d, want 3/2/1/1", reachableCount, unreachableCount, reachableIndexes, unreachableIndexes)
 	}
 }
 

@@ -20,7 +20,7 @@ func TestMemoryCatalogAppendAndLoadPartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendSegment(first) error = %v", err)
 	}
-	if state.Partition != 3 || state.NextLSN != 10 || state.WriterEpoch != 1 || state.SegmentCount != 1 || !state.HasLastSegment {
+	if state.Partition != 3 || state.NextLSN != 10 || state.WriterEpoch != 1 || state.SegmentCount != 1 || state.ReachableSegmentCount != 1 || !state.HasLastSegment {
 		t.Fatalf("state after first append = %+v", state)
 	}
 	if state.LastSegment != first {
@@ -32,7 +32,7 @@ func TestMemoryCatalogAppendAndLoadPartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendSegment(second) error = %v", err)
 	}
-	if state.NextLSN != 20 || state.SegmentCount != 2 || state.LastSegment != second {
+	if state.NextLSN != 20 || state.SegmentCount != 2 || state.ReachableSegmentCount != 2 || state.LastSegment != second {
 		t.Fatalf("state after second append = %+v", state)
 	}
 
@@ -40,7 +40,7 @@ func TestMemoryCatalogAppendAndLoadPartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPartition() error = %v", err)
 	}
-	if loaded.NextLSN != 20 || loaded.SegmentCount != 2 || loaded.LastSegment != second {
+	if loaded.NextLSN != 20 || loaded.SegmentCount != 2 || loaded.ReachableSegmentCount != 2 || loaded.LastSegment != second {
 		t.Fatalf("loaded state = %+v", loaded)
 	}
 }

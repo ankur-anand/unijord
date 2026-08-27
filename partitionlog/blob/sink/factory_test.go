@@ -22,7 +22,7 @@ func TestBlobWriterEndToEndWithBlobCatalog(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	cat, err := blob.NewMemory(blob.Options{})
+	cat, err := blob.NewMemory(blob.Options{SegmentRootPrefix: "segments"})
 	if err != nil {
 		t.Fatalf("blob.NewMemory() error = %v", err)
 	}

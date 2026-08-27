@@ -191,7 +191,7 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 func (b *Backend) upload(ctx context.Context, key string, body []byte, ifNoneMatch *azcore.ETag, ifMatch *azcore.ETag) (blobstore.Object, error) {
 	out, err := b.container.NewBlockBlobClient(key).Upload(ctx, readSeekCloser{Reader: bytes.NewReader(body)}, &blockblob.UploadOptions{
 		HTTPHeaders: &azblobblob.HTTPHeaders{
-			BlobContentType: stringPtr(blobstore.JSONContentType),
+			BlobContentType: stringPtr(blobstore.ContentTypeForKey(key)),
 		},
 		AccessConditions: &azblobblob.AccessConditions{
 			ModifiedAccessConditions: &azblobblob.ModifiedAccessConditions{

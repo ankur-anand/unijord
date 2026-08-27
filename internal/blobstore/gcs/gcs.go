@@ -178,7 +178,7 @@ func (b *Backend) Delete(ctx context.Context, key string) error {
 
 func (b *Backend) upload(ctx context.Context, key string, body []byte, conds storage.Conditions) (blobstore.Object, error) {
 	w := b.client.Bucket(b.bucket).Object(key).If(conds).NewWriter(ctx)
-	w.ContentType = blobstore.JSONContentType
+	w.ContentType = blobstore.ContentTypeForKey(key)
 	if _, err := bytes.NewReader(body).WriteTo(w); err != nil {
 		_ = w.Close()
 		return blobstore.Object{}, mapError(err)

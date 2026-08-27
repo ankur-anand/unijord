@@ -26,9 +26,14 @@ type PartitionHead struct {
 	// incorporated into catalog visibility.
 	AppliedRetentionVersion uint64
 	WriterEpoch             uint64
-	SegmentCount            uint64
-	LastSegment             SegmentRef
-	HasLastSegment          bool
+	// SegmentCount is the lifetime number of committed segments. It increases
+	// on publication and is not reduced by retention.
+	SegmentCount uint64
+	// ReachableSegmentCount is the number of segments referenced by the current
+	// catalog head and therefore still available to readers.
+	ReachableSegmentCount uint64
+	LastSegment           SegmentRef
+	HasLastSegment        bool
 }
 
 func (h PartitionHead) Last() (SegmentRef, bool) {

@@ -65,9 +65,11 @@ func New(opts Options) (*Store, error) {
 		return nil, err
 	}
 	catPrefix := catalogPrefix(root, opts.CatalogPrefix)
+	segmentPrefix := segmentRootPrefix(root, opts.SegmentRootPrefix)
 	cat, err := catalogblob.New(admin, catalogblob.Options{
-		Prefix:   catPrefix,
-		StreamID: streamID,
+		Prefix:            catPrefix,
+		SegmentRootPrefix: segmentPrefix,
+		StreamID:          streamID,
 	})
 	if err != nil {
 		return nil, err
@@ -78,7 +80,7 @@ func New(opts Options) (*Store, error) {
 		return nil, err
 	}
 	sinkFactory, err := segmentsink.New(multipartStore, segmentsink.Options{
-		Prefix:      segmentRootPrefix(root, opts.SegmentRootPrefix),
+		Prefix:      segmentPrefix,
 		ContentType: opts.SegmentContentType,
 	})
 	if err != nil {

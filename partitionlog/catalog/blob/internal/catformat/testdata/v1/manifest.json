@@ -1,0 +1,48 @@
+{
+  "format": "catformat",
+  "version": 1,
+  "fixtures": [
+    {
+      "name": "empty-head-crc32c",
+      "kind": "head",
+      "file": "empty-head-crc32c.plc",
+      "size": 352,
+      "sha256": "5e036282c426d4b2bcee5a4ba9d0183a1798b537795b06c082137eb1230eb856",
+      "hash_algorithm": "crc32c"
+    },
+    {
+      "name": "populated-head-xxh64",
+      "kind": "head",
+      "file": "populated-head-xxh64.plc",
+      "size": 576,
+      "sha256": "fe916890c589be1c1d6259dfcaee0d21769c9ed54a0b38c18605314f12783e5c",
+      "hash_algorithm": "xxh64"
+    },
+    {
+      "name": "fully-retained-head-xxh64",
+      "kind": "head",
+      "file": "fully-retained-head-xxh64.plc",
+      "size": 352,
+      "sha256": "62092cc2e6276f6b20dbb65726fc1b3a295fe3f656078eb44a3d35e9beedae94",
+      "hash_algorithm": "xxh64"
+    },
+    {
+      "name": "leaf-page-xxh64",
+      "kind": "leaf_page",
+      "file": "leaf-page-xxh64.plc",
+      "size": 416,
+      "sha256": "27c86a1f3a3eeac861e7eaaa8df2f585d1ce652c349a6073b689fa79d8d0d6e6",
+      "page_id": "6381403814e40322975862eeec8c4c66",
+      "hash_algorithm": "xxh64"
+    },
+    {
+      "name": "index-page-crc32c",
+      "kind": "index_page",
+      "file": "index-page-crc32c.plc",
+      "size": 320,
+      "sha256": "d0da35649b8fc87afd38f54549040c995798e5f035d52e25c4ed1e01524ab5f9",
+      "page_id": "a6d2a68cdf7e629fc2382d83c0202b6c",
+      "hash_algorithm": "crc32c"
+    }
+  ]
+}

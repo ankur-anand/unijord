@@ -26,13 +26,14 @@ func TestValidatePublishedSnapshotRejectsNonAppendChanges(t *testing.T) {
 	segment.WriterTag = identity.Tag
 	valid := Snapshot{
 		Head: pmeta.PartitionHead{
-			Partition:      7,
-			NextLSN:        12,
-			OldestLSN:      10,
-			WriterEpoch:    identity.Epoch,
-			SegmentCount:   1,
-			LastSegment:    segment,
-			HasLastSegment: true,
+			Partition:             7,
+			NextLSN:               12,
+			OldestLSN:             10,
+			WriterEpoch:           identity.Epoch,
+			SegmentCount:          1,
+			ReachableSegmentCount: 1,
+			LastSegment:           segment,
+			HasLastSegment:        true,
 		},
 		Identity: identity,
 	}
@@ -59,6 +60,16 @@ func TestValidatePublishedSnapshotRejectsNonAppendChanges(t *testing.T) {
 			next: func() Snapshot {
 				next := valid
 				next.Head.SegmentCount = 2
+				return next
+			}(),
+			segment: segment,
+		},
+		{
+			name:    "reachable segment count does not advance",
+			current: current,
+			next: func() Snapshot {
+				next := valid
+				next.Head.ReachableSegmentCount = 0
 				return next
 			}(),
 			segment: segment,

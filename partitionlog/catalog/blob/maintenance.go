@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	csession "github.com/ankur-anand/unijord/partitionlog/catalog"
+	"github.com/ankur-anand/unijord/partitionlog/catalog/blob/internal/catengine"
 	"github.com/ankur-anand/unijord/partitionlog/pmeta"
 )
 
@@ -39,17 +40,11 @@ func (c *Catalog) ListMaintenanceSegments(ctx context.Context, req csession.List
 	if err := ctx.Err(); err != nil {
 		return MaintenanceSnapshot{}, pmeta.SegmentPage{}, err
 	}
-	head, _, err := c.loadHead(ctx, req.Partition)
+	head, generation, maxLevel, page, err := c.engine.ListSegmentsSnapshot(ctx, req.Partition, req.FromLSN, req.NormalizedLimit())
 	if err != nil {
 		return MaintenanceSnapshot{}, pmeta.SegmentPage{}, err
 	}
-	snapshot := MaintenanceSnapshot{
-		Head: stateFromHead(head), Generation: head.Generation, MaxIndexLevel: head.MaxIndexLevel,
-	}
-	page, err := c.listSegmentsInHead(ctx, head, req.FromLSN, req.NormalizedLimit())
-	if err != nil {
-		return MaintenanceSnapshot{}, pmeta.SegmentPage{}, err
-	}
+	snapshot := MaintenanceSnapshot{Head: head, Generation: generation, MaxIndexLevel: maxLevel}
 	return snapshot, page, nil
 }
 
@@ -67,68 +62,12 @@ func (c *Catalog) ListMaintenancePages(ctx context.Context, req MaintenancePageR
 	} else if limit > csession.MaxSegmentPageLimit {
 		limit = csession.MaxSegmentPageLimit
 	}
-	head, _, err := c.loadHead(ctx, req.Partition)
+	head, generation, maxLevel, page, err := c.engine.ListPagePathsSnapshot(ctx, req.Partition, req.Level, req.FromSeqLo, limit)
 	if err != nil {
 		return MaintenanceSnapshot{}, MaintenancePage{}, err
 	}
-	snapshot := MaintenanceSnapshot{
-		Head: stateFromHead(head), Generation: head.Generation, MaxIndexLevel: head.MaxIndexLevel,
-	}
-	collector := maintenancePageCollector{from: req.FromSeqLo, limit: limit}
-	for _, root := range reachableRoots(head) {
-		if collector.done() {
-			break
-		}
-		if err := c.collectMaintenancePageRefs(ctx, root, req.Level, head.StreamID, head.Partition, &collector); err != nil {
-			return MaintenanceSnapshot{}, MaintenancePage{}, err
-		}
-	}
-	return snapshot, MaintenancePage{Paths: collector.paths, NextSeqLo: collector.nextSeqLo, HasMore: collector.hasMore}, nil
-}
-
-func (c *Catalog) collectMaintenancePageRefs(ctx context.Context, ref pageRef, level uint8, streamID string, partition uint32, collector *maintenancePageCollector) error {
-	if collector.done() || ref.SeqHi < collector.from || ref.Level < level {
-		return nil
-	}
-	if ref.Level == level {
-		collector.add(ref)
-		return nil
-	}
-	page, err := c.loadIndex(ctx, ref, streamID, partition)
-	if err != nil {
-		return err
-	}
-	start := firstPageRefAtOrAfter(page.Refs, collector.from)
-	for i := start; i < len(page.Refs) && !collector.done(); i++ {
-		if err := c.collectMaintenancePageRefs(ctx, page.Refs[i], level, streamID, partition, collector); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type maintenancePageCollector struct {
-	from      uint64
-	limit     int
-	paths     []string
-	nextSeqLo uint64
-	hasMore   bool
-}
-
-func (c *maintenancePageCollector) add(ref pageRef) {
-	if ref.SeqHi < c.from {
-		return
-	}
-	if len(c.paths) < c.limit {
-		c.paths = append(c.paths, ref.Path)
-		return
-	}
-	c.nextSeqLo = ref.SeqLo
-	c.hasMore = true
-}
-
-func (c *maintenancePageCollector) done() bool {
-	return c.hasMore
+	snapshot := MaintenanceSnapshot{Head: head, Generation: generation, MaxIndexLevel: maxLevel}
+	return snapshot, MaintenancePage{Paths: page.Paths, NextSeqLo: page.NextSeqLo, HasMore: page.HasMore}, nil
 }
 
 // IsPageReachable checks whether an immutable catalog page is reachable from
@@ -139,49 +78,14 @@ func (c *Catalog) IsPageReachable(ctx context.Context, partition uint32, path st
 	if err != nil {
 		return MaintenanceSnapshot{}, false, err
 	}
-	head, _, err := c.loadHead(ctx, partition)
+	head, generation, maxLevel, reachable, err := c.engine.IsPageReachableSnapshot(ctx, partition, catengine.PageTarget{
+		Key: parsed.Key, Level: parsed.Level, SeqLo: parsed.SeqLo, SeqHi: parsed.SeqHi,
+	})
 	if err != nil {
 		return MaintenanceSnapshot{}, false, err
 	}
-	snapshot := MaintenanceSnapshot{
-		Head: stateFromHead(head), Generation: head.Generation, MaxIndexLevel: head.MaxIndexLevel,
-	}
-	for _, root := range reachableRoots(head) {
-		reachable, err := c.pagePathReachable(ctx, root, parsed, c.opts.StreamID, partition)
-		if err != nil {
-			return MaintenanceSnapshot{}, false, err
-		}
-		if reachable {
-			return snapshot, true, nil
-		}
-	}
-	return snapshot, false, nil
-}
-
-func (c *Catalog) pagePathReachable(ctx context.Context, ref pageRef, target PageObjectKey, streamID string, partition uint32) (bool, error) {
-	if ref.Path == target.Key {
-		return true, nil
-	}
-	if target.SeqHi < ref.SeqLo || target.SeqLo > ref.SeqHi || target.Level >= ref.Level {
-		return false, nil
-	}
-	if ref.Level == 0 {
-		return false, nil
-	}
-	page, err := c.loadIndex(ctx, ref, streamID, partition)
-	if err != nil {
-		return false, fmt.Errorf("catalog: traverse reachable page %s: %w", ref.Path, err)
-	}
-	for _, child := range page.Refs {
-		if target.SeqHi < child.SeqLo || target.SeqLo > child.SeqHi {
-			continue
-		}
-		reachable, err := c.pagePathReachable(ctx, child, target, streamID, partition)
-		if err != nil || reachable {
-			return reachable, err
-		}
-	}
-	return false, nil
+	snapshot := MaintenanceSnapshot{Head: head, Generation: generation, MaxIndexLevel: maxLevel}
+	return snapshot, reachable, nil
 }
 
 // LoadMaintenanceSnapshot reads and validates the authoritative partition
@@ -190,13 +94,13 @@ func (c *Catalog) LoadMaintenanceSnapshot(ctx context.Context, partition uint32)
 	if err := ctx.Err(); err != nil {
 		return MaintenanceSnapshot{}, err
 	}
-	head, _, err := c.loadHead(ctx, partition)
+	head, generation, maxLevel, err := c.engine.MaintenanceSnapshot(ctx, partition)
 	if err != nil {
 		return MaintenanceSnapshot{}, err
 	}
 	return MaintenanceSnapshot{
-		Head:          stateFromHead(head),
-		Generation:    head.Generation,
-		MaxIndexLevel: head.MaxIndexLevel,
+		Head:          head,
+		Generation:    generation,
+		MaxIndexLevel: maxLevel,
 	}, nil
 }

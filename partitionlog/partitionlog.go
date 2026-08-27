@@ -402,6 +402,7 @@ func (w *Writer) observeWriterSnapshotOperation(name MetricName, snapshot Snapsh
 	if snapshot.Head.Partition != 0 || snapshot.Head.NextLSN != 0 || snapshot.Head.SegmentCount != 0 {
 		metric.NextLSN = snapshot.Head.NextLSN
 		metric.SegmentCount = snapshot.Head.SegmentCount
+		metric.ReachableSegmentCount = snapshot.Head.ReachableSegmentCount
 	}
 	w.observe(metric)
 }

@@ -102,6 +102,12 @@ jobs:
             target: FuzzParseBlockIndex
           - package: ./partitionlog/segreader
             target: FuzzOpenAndScanSegment
+          - package: ./partitionlog/catalog/blob/internal/catformat
+            target: FuzzParseLeafPage
+          - package: ./partitionlog/catalog/blob/internal/catformat
+            target: FuzzParseIndexPage
+          - package: ./partitionlog/catalog/blob/internal/catformat
+            target: FuzzParseHead
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -116,6 +122,7 @@ jobs:
           path: |
             partitionlog/segformat/testdata/fuzz
             partitionlog/segreader/testdata/fuzz
+            partitionlog/catalog/blob/internal/catformat/testdata/fuzz
           if-no-files-found: ignore
 
   providers:
