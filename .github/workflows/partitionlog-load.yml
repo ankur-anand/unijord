@@ -1,0 +1,243 @@
+name: partitionlog-load
+
+on:
+  pull_request:
+    paths:
+      - "partitionlog/**"
+      - "internal/blobstore/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/partitionlog-load.yml"
+  schedule:
+    - cron: "17 3 * * *" # nightly ci profile on main
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: smoke | ci | deep
+        default: ci
+      provider:
+        description: minio | azurite | fake-gcs | s3 | azure | gcs
+        default: minio
+      scenario:
+        description: scenario name, or "all"
+        default: all
+
+concurrency:
+  group: load-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ---- automatic smoke on every PR: structural invariants + coarse thresholds
+  smoke:
+    if: github.event_name == 'pull_request'
+    name: smoke ${{ matrix.provider }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [minio, azurite, fake-gcs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build plbench
+        run: go build -o bin/plbench ./partitionlog/internal/cmd/plbench
+      - name: Start emulator
+        run: .github/scripts/start-emulator.sh ${{ matrix.provider }}
+      - name: Restore rolling baseline (latest green nightly on main)
+        uses: actions/cache/restore@v4
+        with:
+          path: partitionlog/internal/bench/baselines
+          key: plbench-baselines-${{ matrix.provider }}-${{ runner.os }}-never
+          restore-keys: plbench-baselines-${{ matrix.provider }}-${{ runner.os }}-
+      - name: Run smoke
+        id: run
+        run: |
+          set -o pipefail
+          .github/scripts/load-run.sh smoke ${{ matrix.provider }} 2>&1 | tee smoke.log
+      - name: Summarize
+        if: always()
+        run: |
+          for f in results/*.json; do
+            bin/plbench compare "$f" -format github >> "$GITHUB_STEP_SUMMARY" || true
+          done
+      - name: Sticky comment on regression
+        if: failure() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const marker = '<!-- plbench:smoke:${{ matrix.provider }} -->';
+            let body = marker + '\n';
+            for (const f of fs.readdirSync('results').filter(f => f.endsWith('.json'))) {
+              try {
+                body += execSync(`bin/plbench compare results/${f} -format github -only-changed`).toString();
+              } catch (e) {
+                body += (e.stdout || '').toString();
+              }
+              body += '\n';
+            }
+            body += `\n[run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) · head \`${context.payload.pull_request.head.sha.slice(0,7)}\``;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-smoke-${{ matrix.provider }}
+          path: |
+            results/*.json
+            smoke.log
+          retention-days: 30
+
+  # ---- nightly ci profile on main, and manual dispatch
+  scheduled:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: ${{ github.event.inputs.profile || 'ci' }} ${{ matrix.provider }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ${{ github.event_name == 'schedule' && fromJSON('["minio","azurite","fake-gcs"]') || fromJSON(format('["{0}"]', github.event.inputs.provider)) }}
+    env:
+      PLBENCH_S3_BUCKET: ${{ secrets.PLBENCH_S3_BUCKET }}
+      PLBENCH_AZURE_CONNECTION_STRING: ${{ secrets.PLBENCH_AZURE_CONNECTION_STRING }}
+      PLBENCH_GCS_BUCKET: ${{ secrets.PLBENCH_GCS_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build plbench
+        run: go build -o bin/plbench ./partitionlog/internal/cmd/plbench
+      - name: Start emulator
+        run: .github/scripts/start-emulator.sh ${{ matrix.provider }}
+      - name: Restore rolling baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: partitionlog/internal/bench/baselines
+          key: plbench-baselines-${{ matrix.provider }}-${{ runner.os }}-never
+          restore-keys: plbench-baselines-${{ matrix.provider }}-${{ runner.os }}-
+      - name: Run
+        id: run
+        run: |
+          set -o pipefail
+          scenarios="${{ github.event.inputs.scenario || 'all' }}"
+          if [ "$scenarios" = all ]; then scenarios="catalog_isolated catalog_history"; fi
+          if [ "${{ github.event_name }}" = schedule ]; then profiles="smoke ci"; else profiles="${{ github.event.inputs.profile || 'ci' }}"; fi
+          status=0
+          for profile in $profiles; do
+            .github/scripts/load-run.sh "$profile" ${{ matrix.provider }} $scenarios 2>&1 | tee -a run.log || status=$?
+          done
+          exit $status
+      - name: Promote results to the rolling baseline
+        if: success() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+        run: |
+          for f in results/*.json; do
+            bin/plbench baseline "$f"
+          done
+      - name: Save rolling baseline
+        if: success() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: partitionlog/internal/bench/baselines
+          key: plbench-baselines-${{ matrix.provider }}-${{ runner.os }}-${{ github.run_id }}
+      - name: Summarize
+        if: always()
+        run: |
+          for f in results/*.json; do
+            bin/plbench compare "$f" -format github >> "$GITHUB_STEP_SUMMARY" || true
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-${{ github.event.inputs.profile || 'ci' }}-${{ matrix.provider }}-${{ github.run_id }}
+          path: |
+            results/*.json
+            run.log
+          retention-days: 90
+
+  # ---- "/bench <profile> [provider]" on a PR, collaborators only
+  command:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/bench')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Authorize
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ok = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(context.payload.comment.author_association);
+            if (!ok) core.setFailed('only collaborators may run /bench');
+      - name: Parse
+        id: parse
+        run: |
+          set -- ${{ github.event.comment.body }}
+          echo "profile=${2:-ci}" >> "$GITHUB_OUTPUT"
+          echo "provider=${3:-minio}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build plbench
+        run: go build -o bin/plbench ./partitionlog/internal/cmd/plbench
+      - name: Start emulator
+        run: .github/scripts/start-emulator.sh ${{ steps.parse.outputs.provider }}
+      - name: Restore rolling baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: partitionlog/internal/bench/baselines
+          key: plbench-baselines-${{ steps.parse.outputs.provider }}-${{ runner.os }}-never
+          restore-keys: plbench-baselines-${{ steps.parse.outputs.provider }}-${{ runner.os }}-
+      - name: Run
+        run: |
+          set -o pipefail
+          .github/scripts/load-run.sh ${{ steps.parse.outputs.profile }} ${{ steps.parse.outputs.provider }} 2>&1 | tee run.log || true
+      - name: Reply
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const marker = '<!-- plbench:${{ steps.parse.outputs.profile }}:${{ steps.parse.outputs.provider }} -->';
+            let body = marker + '\n';
+            for (const f of fs.readdirSync('results').filter(f => f.endsWith('.json'))) {
+              try {
+                body += execSync(`bin/plbench compare results/${f} -format github`).toString();
+              } catch (e) {
+                body += (e.stdout || '').toString();
+              }
+              body += '\n';
+            }
+            body += `\n[run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-command-${{ github.run_id }}
+          path: |
+            results/*.json
+            run.log
+          retention-days: 30

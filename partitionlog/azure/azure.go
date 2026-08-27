@@ -39,6 +39,12 @@ type Options struct {
 
 	// SegmentContentType is attached to committed segment objects.
 	SegmentContentType string
+
+	// CatalogLeafSegmentLimit and CatalogIndexRefLimit override the catalog
+	// page fan-out. Zero keeps the catalog defaults. They are writer-side
+	// settings; readers follow page references regardless of the values.
+	CatalogLeafSegmentLimit int
+	CatalogIndexRefLimit    int
 }
 
 // Store wires Azure catalog metadata, segment writes, and segment reads.
@@ -69,6 +75,8 @@ func New(opts Options) (*Store, error) {
 		Prefix:            catPrefix,
 		SegmentRootPrefix: segmentPrefix,
 		StreamID:          streamID,
+		LeafSegmentLimit:  opts.CatalogLeafSegmentLimit,
+		IndexRefLimit:     opts.CatalogIndexRefLimit,
 	})
 	if err != nil {
 		return nil, err

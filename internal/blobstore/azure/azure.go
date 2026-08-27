@@ -121,22 +121,28 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 		Prefix:     stringPtr(opts.Prefix),
 		StartFrom:  stringPtr(opts.AfterKey),
 	})
-	if !pager.More() {
-		return blobstore.ObjectPage{}, nil
-	}
-	page, err := pager.NextPage(ctx)
-	if err != nil {
-		return blobstore.ObjectPage{}, mapError(err)
-	}
 
-	items := page.ListBlobsFlatSegmentResponse.Segment
+	// StartFrom is honored only by recent service versions; emulators and
+	// older API versions ignore it and list from the start of the prefix.
+	// Consume service pages until limit+1 keys beyond AfterKey are seen, so
+	// the exclusive-lower-bound contract holds regardless of the server.
 	objects := make([]blobstore.ObjectInfo, 0, limit)
-	if items != nil {
+	hasMore := false
+	for pager.More() && !hasMore {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return blobstore.ObjectPage{}, mapError(err)
+		}
+		items := page.ListBlobsFlatSegmentResponse.Segment
+		if items == nil {
+			continue
+		}
 		for _, item := range items.BlobItems {
 			if item == nil || item.Name == nil || *item.Name == "" || opts.AfterKey != "" && *item.Name <= opts.AfterKey {
 				continue
 			}
 			if len(objects) == limit {
+				hasMore = true
 				break
 			}
 			info := blobstore.ObjectInfo{Key: *item.Name}
@@ -156,25 +162,11 @@ func (b *Backend) List(ctx context.Context, opts blobstore.ListOptions) (blobsto
 		}
 	}
 
-	hasMore := page.NextMarker != nil && *page.NextMarker != "" || countAzureAfter(items, opts.AfterKey) > limit
 	result := blobstore.ObjectPage{Objects: objects, HasMore: hasMore}
 	if result.HasMore && len(result.Objects) > 0 {
 		result.NextAfterKey = result.Objects[len(result.Objects)-1].Key
 	}
 	return result, nil
-}
-
-func countAzureAfter(items *container.BlobFlatListSegment, afterKey string) int {
-	if items == nil {
-		return 0
-	}
-	count := 0
-	for _, item := range items.BlobItems {
-		if item != nil && item.Name != nil && *item.Name != "" && (afterKey == "" || *item.Name > afterKey) {
-			count++
-		}
-	}
-	return count
 }
 
 func (b *Backend) Delete(ctx context.Context, key string) error {
