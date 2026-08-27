@@ -66,34 +66,17 @@ jobs:
       - name: Summarize
         if: always()
         run: |
+          mkdir -p results/report
           for f in results/*.json; do
+            [ -e "$f" ] || continue
             bin/plbench compare "$f" -format github >> "$GITHUB_STEP_SUMMARY" || true
+            name=$(basename "$f" .json)
+            if bin/plbench compare "$f" -format github -only-changed > "results/report/$name.md" 2>/dev/null; then
+              echo pass > "results/report/$name.status"
+            else
+              echo fail > "results/report/$name.status"
+            fi
           done
-      - name: Sticky comment on regression
-        if: failure() && github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const { execSync } = require('child_process');
-            const marker = '<!-- plbench:smoke:${{ matrix.provider }} -->';
-            let body = marker + '\n';
-            for (const f of fs.readdirSync('results').filter(f => f.endsWith('.json'))) {
-              try {
-                body += execSync(`bin/plbench compare results/${f} -format github -only-changed`).toString();
-              } catch (e) {
-                body += (e.stdout || '').toString();
-              }
-              body += '\n';
-            }
-            body += `\n[run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) · head \`${context.payload.pull_request.head.sha.slice(0,7)}\``;
-            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
-            const existing = comments.find(c => c.body && c.body.startsWith(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
-            }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -102,6 +85,66 @@ jobs:
             results/*.json
             smoke.log
           retention-days: 30
+
+  # ---- one sticky PR comment covering every provider, updated on each push
+  report:
+    if: github.event_name == 'pull_request' && always()
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: load-smoke-*
+          path: artifacts
+      - name: Compose comment
+        run: |
+          {
+            echo '<!-- plbench:smoke -->'
+            echo "### plbench smoke · head \`${HEAD_SHA::7}\` · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo
+            echo '| provider | result | checks passed | checks failed | beyond threshold |'
+            echo '|---|---|---:|---:|---:|'
+            for prov in minio azurite fake-gcs; do
+              dir="artifacts/load-smoke-$prov"
+              if ! ls "$dir"/*.json >/dev/null 2>&1; then echo "| $prov | ❌ no results (job failed before writing) | — | — | — |"; continue; fi
+              ok=0; bad=0; over=0
+              for f in "$dir"/*.json; do
+                ok=$((ok + $(jq '[.checks[] | select(.ok)] | length' "$f")))
+                bad=$((bad + $(jq '[.checks[] | select(.ok|not)] | length' "$f")))
+                st="$dir/report/$(basename "$f" .json).status"
+                [ -f "$st" ] && grep -q fail "$st" && over=$((over + 1))
+              done
+              mark="✅"; if [ "$bad" -gt 0 ] || [ "$over" -gt 0 ]; then mark="❌"; fi
+              echo "| $prov | $mark | $ok | $bad | $over |"
+            done
+            echo
+            for prov in minio azurite fake-gcs; do
+              for md in artifacts/load-smoke-$prov/report/*.md; do
+                [ -e "$md" ] || continue
+                if grep -q '❌\|⚠️' "$md"; then cat "$md"; echo; fi
+              done
+            done
+            echo '<sub>Providers with no rows below the table: every structural check passed and no metric left its threshold band (or no baseline exists yet). Full tables are in each job summary; raw results are attached as artifacts.</sub>'
+          } > comment.md
+          cat comment.md
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Post or update sticky comment
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('comment.md', 'utf8');
+            const marker = '<!-- plbench:smoke -->';
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
 
   # ---- nightly ci profile on main, and manual dispatch
   scheduled:
