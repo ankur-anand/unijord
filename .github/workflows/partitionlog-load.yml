@@ -81,8 +81,10 @@ jobs:
         if: always()
         with:
           name: load-smoke-${{ matrix.provider }}
+          # Two paths => the artifact root is the workspace, so files land at
+          # results/<file>.json and results/report/* inside the artifact.
           path: |
-            results/*.json
+            results/**
             smoke.log
           retention-days: 30
 
@@ -106,7 +108,7 @@ jobs:
             echo '| provider | result | checks passed | checks failed | beyond threshold |'
             echo '|---|---|---:|---:|---:|'
             for prov in minio azurite fake-gcs; do
-              dir="artifacts/load-smoke-$prov"
+              dir="artifacts/load-smoke-$prov/results"
               if ! ls "$dir"/*.json >/dev/null 2>&1; then echo "| $prov | ❌ no results (job failed before writing) | — | — | — |"; continue; fi
               ok=0; bad=0; over=0
               for f in "$dir"/*.json; do
@@ -120,9 +122,10 @@ jobs:
             done
             echo
             for prov in minio azurite fake-gcs; do
-              for md in artifacts/load-smoke-$prov/report/*.md; do
+              for md in artifacts/load-smoke-$prov/results/report/*.md; do
                 [ -e "$md" ] || continue
-                if grep -q '❌\|⚠️' "$md"; then cat "$md"; echo; fi
+                # Append a provider's rows only on a real failure; ⚠️ drift rows stay in the job summary.
+                if grep -q '❌' "$md"; then cat "$md"; echo; fi
               done
             done
             echo '<sub>Providers with no rows below the table: every structural check passed and no metric left its threshold band (or no baseline exists yet). Full tables are in each job summary; raw results are attached as artifacts.</sub>'
