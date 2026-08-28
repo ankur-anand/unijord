@@ -36,6 +36,50 @@ func TestMapErrorPreconditionFailure(t *testing.T) {
 	}
 }
 
+func TestCompareAndSwapReturnsTokenFromConditionalWrite(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bucket        = "metadata"
+		writeETag     = `"writer-a"`
+		successorETag = `"writer-b"`
+	)
+	var headCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			w.Header().Set("ETag", writeETag)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodHead:
+			headCalls.Add(1)
+			w.Header().Set("ETag", successorETag)
+			w.Header().Set("Last-Modified", time.Unix(1_776_263_000, 0).UTC().Format(http.TimeFormat))
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	backend, err := New(newClientForEndpoint(t, server.URL, nil), bucket)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	object, swapped, err := backend.CompareAndSwap(context.Background(), "head.plc", `"previous"`, []byte("writer-a"))
+	if err != nil {
+		t.Fatalf("CompareAndSwap() error = %v", err)
+	}
+	if !swapped {
+		t.Fatal("CompareAndSwap() swapped = false, want true")
+	}
+	if object.Token != writeETag {
+		t.Fatalf("CompareAndSwap() token = %q, want write response token %q", object.Token, writeETag)
+	}
+	if got := headCalls.Load(); got != 0 {
+		t.Fatalf("HeadObject calls = %d, want 0 after successful conditional write", got)
+	}
+}
+
 func TestDeleteBatchWithFakeS3(t *testing.T) {
 	t.Parallel()
 

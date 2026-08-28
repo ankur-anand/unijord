@@ -466,6 +466,10 @@ Context-sensitive waits may also return:
 Rules:
 
 - `ErrSegmentStartFailed` is retryable and does not make the writer terminal;
+- when `Append` returns the caller's `context.Canceled` or
+  `context.DeadlineExceeded` directly from a local wait, the record was not
+  accepted, the writer remains usable, and the caller may append the same
+  record again at the unchanged next LSN;
 - `ErrTimestampOrder`, `ErrLSNExhausted`, and `ErrSegmentWriteFailed` are
   terminal;
 - `ErrSegmentCommitIndeterminate` also matches `ErrSegmentWriteFailed`, but

@@ -220,6 +220,11 @@ uploads.
 `Append(ctx)` uses `ctx` while enqueueing work or waiting for a free block
 buffer. Work that has already been handed to seal workers, the emitter, or
 upload workers runs on the writer lifetime context until `Close` or `Abort`.
+If the caller context ends during either wait, the new record has not been
+accepted: `Append` returns an error matching both `ErrAppendNotAccepted` and
+the caller's context error without making the writer terminal. A later append
+may retry that same LSN. If the preceding full block was already enqueued, the
+later append first reacquires a free block buffer.
 
 `Close(ctx)` uses `ctx` for final enqueue, lazy `sink.Begin`, index/trailer
 writes, final flush, and `Txn.Complete`. Already-enqueued upload workers use the
@@ -231,9 +236,9 @@ aborts the sink transaction if one exists.
 
 ## Failure Semantics
 
-Any append, seal, upload, close, or validation error makes the writer terminal.
-On terminal failure the writer drains internal workers and aborts the sink
-transaction if it has been opened.
+Any append error other than `ErrAppendNotAccepted`, or any seal, upload, close,
+or validation error, makes the writer terminal. On terminal failure the writer
+drains internal workers and aborts the sink transaction if it has been opened.
 
 After terminal failure:
 

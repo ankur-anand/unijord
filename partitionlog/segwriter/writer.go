@@ -206,11 +206,25 @@ func (w *Writer) Append(ctx context.Context, r Record) error {
 	if err != nil {
 		return w.abortWith(ctx, err, true)
 	}
+	if w.active == nil {
+		if err := w.takeFreeBuffer(ctx); err != nil {
+			if errors.Is(err, ErrAppendNotAccepted) {
+				return err
+			}
+			return w.abortWith(ctx, err, true)
+		}
+	}
 	if w.active.Len() > 0 && !w.active.CanAppend(recordSize, w.opts.TargetBlockSize) {
 		if err := w.enqueueActive(ctx); err != nil {
+			if errors.Is(err, ErrAppendNotAccepted) {
+				return err
+			}
 			return w.abortWith(ctx, err, true)
 		}
 		if err := w.takeFreeBuffer(ctx); err != nil {
+			if errors.Is(err, ErrAppendNotAccepted) {
+				return err
+			}
 			return w.abortWith(ctx, err, true)
 		}
 	}
@@ -244,18 +258,19 @@ func (w *Writer) Close(ctx context.Context) (Result, error) {
 	if !w.hasRecords {
 		return Result{}, w.abortWith(ctx, ErrEmptySegment, true)
 	}
-	stopCloseCancellation := context.AfterFunc(ctx, func() {
-		w.setFirstErr(ctx.Err())
-	})
-	defer stopCloseCancellation()
 	restoreEmitCtx := w.setEmitContext(ctx)
 	defer restoreEmitCtx()
 	if w.active != nil && w.active.Len() > 0 {
 		if err := w.enqueueActive(ctx); err != nil {
+			err = closeEnqueueError(ctx, err)
 			return Result{}, w.abortWith(ctx, err, true)
 		}
 		w.active = nil
 	}
+	stopCloseCancellation := context.AfterFunc(ctx, func() {
+		w.setFirstErr(ctx.Err())
+	})
+	defer stopCloseCancellation()
 	emitted := w.finishPipeline()
 	if emitted.Err != nil {
 		return Result{}, w.abortWith(ctx, emitted.Err, false)
@@ -355,7 +370,7 @@ func (w *Writer) takeFreeBuffer(ctx context.Context) error {
 		w.active = buf
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return w.appendCancellation(ctx)
 	case <-w.ctx.Done():
 		if err := w.getFirstErr(); err != nil {
 			return err
@@ -376,13 +391,33 @@ func (w *Writer) enqueueActive(ctx context.Context) error {
 		w.active = nil
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return w.appendCancellation(ctx)
 	case <-w.ctx.Done():
 		if err := w.getFirstErr(); err != nil {
 			return err
 		}
 		return ErrWriterAborted
 	}
+}
+
+func (w *Writer) appendCancellation(ctx context.Context) error {
+	if err := w.getFirstErr(); err != nil {
+		return err
+	}
+	if w.aborted {
+		return ErrWriterAborted
+	}
+	return fmt.Errorf("%w: %w", ErrAppendNotAccepted, ctx.Err())
+}
+
+func closeEnqueueError(ctx context.Context, err error) error {
+	if !errors.Is(err, ErrAppendNotAccepted) {
+		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 func (w *Writer) sealWorker() {

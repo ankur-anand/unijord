@@ -213,6 +213,177 @@ func TestWriterRingBackpressureWhenUploadIsBlocked(t *testing.T) {
 	}
 }
 
+func TestWriterAppendCancellationDuringBufferBackpressureIsNonTerminal(t *testing.T) {
+	t.Parallel()
+
+	sink := newBlockingSink()
+	opts := testWriterOptions(segformat.CodecNone)
+	opts.TargetBlockSize = 32
+	opts.PartSize = 16
+	opts.SealParallelism = 1
+	opts.BlockBufferCount = 2
+	opts.UploadParallelism = 1
+	opts.UploadQueueSize = 1
+
+	w, err := New(opts, sink)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			sink.unblock()
+		}
+		_ = w.Abort(context.Background())
+	}()
+
+	records := makeWriterRecords(3, 1, 1, 24)
+	if err := w.Append(context.Background(), records[0]); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+	if err := w.Append(context.Background(), records[1]); err != nil {
+		t.Fatalf("Append(second) error = %v", err)
+	}
+	sink.waitForUpload(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := w.Append(ctx, records[2]); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Append(blocked) error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if err := w.getFirstErr(); err != nil {
+		t.Fatalf("writer terminal error after caller timeout = %v, want nil", err)
+	}
+	if w.aborted {
+		t.Fatal("writer aborted after caller timeout")
+	}
+
+	sink.unblock()
+	released = true
+	if err := w.Append(context.Background(), records[2]); err != nil {
+		t.Fatalf("Append(retry) error = %v", err)
+	}
+	result, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if result.Metadata.RecordCount != uint32(len(records)) {
+		t.Fatalf("record count = %d, want %d", result.Metadata.RecordCount, len(records))
+	}
+}
+
+func TestWriterAppendCancellationBeforeBlockEnqueueIsNonTerminal(t *testing.T) {
+	t.Parallel()
+
+	lifetimeCtx, lifetimeCancel := context.WithCancelCause(context.Background())
+	defer lifetimeCancel(context.Canceled)
+	w := &Writer{
+		opts:        Options{TargetBlockSize: 32},
+		ctx:         lifetimeCtx,
+		active:      &blockBuffer{},
+		freeBuffers: make(chan *blockBuffer, 1),
+		sealJobs:    make(chan *blockBuffer),
+	}
+	w.freeBuffers <- &blockBuffer{}
+	records := makeWriterRecords(2, 1, 1, 24)
+	if err := w.Append(context.Background(), records[0]); err != nil {
+		t.Fatalf("Append(first) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.Append(ctx, records[1]); !errors.Is(err, context.Canceled) || !errors.Is(err, ErrAppendNotAccepted) {
+		t.Fatalf("Append(blocked) error = %v, want %v and %v", err, context.Canceled, ErrAppendNotAccepted)
+	}
+	if err := w.getFirstErr(); err != nil {
+		t.Fatalf("writer terminal error after caller cancellation = %v, want nil", err)
+	}
+	if w.aborted {
+		t.Fatal("writer aborted after caller cancellation")
+	}
+	if w.active == nil || w.active.RecordCount != 1 {
+		t.Fatalf("active block after canceled enqueue = %+v, want first record preserved", w.active)
+	}
+	if w.nextLSN != records[1].LSN {
+		t.Fatalf("next LSN after canceled enqueue = %d, want %d", w.nextLSN, records[1].LSN)
+	}
+
+	accepted := make(chan struct{})
+	go func() {
+		<-w.sealJobs
+		close(accepted)
+	}()
+	if err := w.Append(context.Background(), records[1]); err != nil {
+		t.Fatalf("Append(retry) error = %v", err)
+	}
+	<-accepted
+	if w.recordCount != 2 || w.nextLSN != records[1].LSN+1 {
+		t.Fatalf("writer position after retry = records %d next_lsn %d, want 2 and %d", w.recordCount, w.nextLSN, records[1].LSN+1)
+	}
+}
+
+func TestWriterCloseEnqueueCancellationReportsBareContextError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		context func() (context.Context, context.CancelFunc)
+		want    error
+	}{
+		{
+			name: "canceled",
+			context: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			want: context.Canceled,
+		},
+		{
+			name: "deadline",
+			context: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			},
+			want: context.DeadlineExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.context()
+			defer cancel()
+
+			lifetimeCtx, lifetimeCancel := context.WithCancelCause(context.Background())
+			active := &blockBuffer{}
+			if err := active.Append(Record{LSN: 1, TimestampMS: 1, Value: []byte("a")}, 32); err != nil {
+				t.Fatalf("active.Append() error = %v", err)
+			}
+			emitted := make(chan emitResult, 1)
+			emitted <- emitResult{}
+			w := &Writer{
+				opts:       Options{TargetBlockSize: 32},
+				ctx:        lifetimeCtx,
+				cancel:     lifetimeCancel,
+				sealJobs:   make(chan *blockBuffer),
+				sealedOut:  make(chan sealedBlockResult),
+				emitted:    emitted,
+				active:     active,
+				hasRecords: true,
+			}
+
+			_, got := w.Close(ctx)
+			if got != tt.want {
+				t.Fatalf("Close() error = %v, want bare %v", got, tt.want)
+			}
+			if errors.Is(got, ErrAppendNotAccepted) {
+				t.Fatalf("Close() error = %v, unexpectedly matches %v", got, ErrAppendNotAccepted)
+			}
+			if !w.aborted {
+				t.Fatal("Close() cancellation did not make writer terminal")
+			}
+		})
+	}
+}
+
 func TestWriterEncodeHelper(t *testing.T) {
 	t.Parallel()
 

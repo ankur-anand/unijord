@@ -6,6 +6,7 @@ var (
 	ErrInvalidOptions         = errors.New("segwriter: invalid options")
 	ErrWriterClosed           = errors.New("segwriter: writer closed")
 	ErrWriterAborted          = errors.New("segwriter: writer aborted")
+	ErrAppendNotAccepted      = errors.New("segwriter: append canceled before record acceptance")
 	ErrEmptySegment           = errors.New("segwriter: empty segment")
 	ErrNonContiguousLSN       = errors.New("segwriter: non-contiguous lsn")
 	ErrLSNExhausted           = errors.New("segwriter: lsn range exhausted")

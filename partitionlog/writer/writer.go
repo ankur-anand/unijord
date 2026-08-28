@@ -201,6 +201,14 @@ func (w *Writer) Append(ctx context.Context, record Record) (AppendResult, error
 		Headers:     record.Headers,
 		Value:       record.Value,
 	}); err != nil {
+		if errors.Is(err, segwriter.ErrAppendNotAccepted) {
+			callerErr := ctx.Err()
+			if callerErr == nil {
+				callerErr = err
+			}
+			w.mu.Unlock()
+			return AppendResult{}, callerErr
+		}
 		err = wrapSegmentWrite(err)
 		w.failLocked(err)
 		w.mu.Unlock()

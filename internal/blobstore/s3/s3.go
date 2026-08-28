@@ -248,13 +248,6 @@ func (b *Backend) putObject(ctx context.Context, key string, body []byte, ifNone
 		Body:  bytes.Clone(body),
 		Token: aws.ToString(out.ETag),
 	}
-	if head, err := b.client.HeadObject(ctx, &awss3.HeadObjectInput{
-		Bucket: aws.String(b.bucket),
-		Key:    aws.String(key),
-	}); err == nil {
-		obj.Token = aws.ToString(head.ETag)
-		obj.CreatedAt = aws.ToTime(head.LastModified)
-	}
 	return obj, nil
 }
 

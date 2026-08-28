@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -49,6 +50,78 @@ func TestWriterFlushPublishesSegment(t *testing.T) {
 	}
 	if got := factory.Bytes(last.URI); len(got) == 0 {
 		t.Fatalf("stored bytes for %s are empty", last.URI)
+	}
+}
+
+func TestWriterAppendCallerTimeoutDuringSegmentBackpressureIsNonTerminal(t *testing.T) {
+	t.Parallel()
+
+	cat := catalog.NewMemoryCatalog()
+	factory := newBlockingWriteSegmentFactory()
+	opts := testOptions(t, cat, factory)
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.SegmentOptions.TargetBlockSize = 32
+	opts.SegmentOptions.PartSize = 16
+	opts.SegmentOptions.SealParallelism = 1
+	opts.SegmentOptions.BlockBufferCount = 2
+	opts.SegmentOptions.UploadParallelism = 1
+	opts.SegmentOptions.UploadQueueSize = 1
+
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		factory.unblock()
+		_ = w.Abort(context.Background())
+	}()
+
+	for i := 0; i < 2; i++ {
+		result, err := w.Append(context.Background(), Record{
+			TimestampMS: int64(i + 1),
+			Value:       bytes.Repeat([]byte{byte('a' + i)}, 24),
+		})
+		if err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+		if result.LSN != uint64(i) {
+			t.Fatalf("Append(%d) LSN = %d, want %d", i, result.LSN, i)
+		}
+	}
+	factory.waitForWrite(t)
+
+	third := Record{TimestampMS: 3, Value: bytes.Repeat([]byte("c"), 24)}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := w.Append(ctx, third); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Append(blocked) error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() after caller timeout = %v, want nil", err)
+	}
+	if got := w.State().OptimisticNextLSN; got != 2 {
+		t.Fatalf("OptimisticNextLSN after rejected append = %d, want 2", got)
+	}
+
+	factory.unblock()
+	result, err := w.Append(context.Background(), third)
+	if err != nil {
+		t.Fatalf("Append(retry) error = %v", err)
+	}
+	if result.LSN != 2 {
+		t.Fatalf("Append(retry) LSN = %d, want 2", result.LSN)
+	}
+	snapshot, err := w.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if snapshot.Head.NextLSN != 3 {
+		t.Fatalf("NextLSN = %d, want 3", snapshot.Head.NextLSN)
+	}
+	last, ok := snapshot.Head.Last()
+	if !ok || last.RecordCount != 3 {
+		t.Fatalf("last segment = %+v, present=%v, want three records", last, ok)
 	}
 }
 
@@ -1390,6 +1463,92 @@ func newSequenceUUIDGen() UUIDGen {
 type memorySegmentFactory struct {
 	mu    sync.Mutex
 	sinks map[string]*segwriter.MemorySink
+}
+
+type blockingWriteSegmentFactory struct {
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newBlockingWriteSegmentFactory() *blockingWriteSegmentFactory {
+	return &blockingWriteSegmentFactory{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *blockingWriteSegmentFactory) NewSegmentSink(_ context.Context, info SegmentInfo) (segwriter.Sink, error) {
+	uri := fmt.Sprintf("memory://blocked/p%08d/%020d-%x", info.Partition, info.BaseLSN, info.SegmentUUID)
+	return &blockingWriteSink{
+		inner:       segwriter.NewMemorySink(uri),
+		started:     f.started,
+		release:     f.release,
+		startedOnce: &f.startedOnce,
+	}, nil
+}
+
+func (f *blockingWriteSegmentFactory) waitForWrite(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment write")
+	}
+}
+
+func (f *blockingWriteSegmentFactory) unblock() {
+	f.releaseOnce.Do(func() {
+		close(f.release)
+	})
+}
+
+type blockingWriteSink struct {
+	inner       segwriter.Sink
+	started     chan struct{}
+	release     <-chan struct{}
+	startedOnce *sync.Once
+}
+
+func (s *blockingWriteSink) Begin(ctx context.Context, plan segwriter.Plan) (segwriter.Txn, error) {
+	txn, err := s.inner.Begin(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+	return &blockingWriteTxn{
+		inner:       txn,
+		started:     s.started,
+		release:     s.release,
+		startedOnce: s.startedOnce,
+	}, nil
+}
+
+type blockingWriteTxn struct {
+	inner       segwriter.Txn
+	started     chan struct{}
+	release     <-chan struct{}
+	startedOnce *sync.Once
+}
+
+func (t *blockingWriteTxn) Write(ctx context.Context, body []byte) error {
+	t.startedOnce.Do(func() {
+		close(t.started)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.release:
+		return t.inner.Write(ctx, body)
+	}
+}
+
+func (t *blockingWriteTxn) Commit(ctx context.Context) (segwriter.CommittedObject, error) {
+	return t.inner.Commit(ctx)
+}
+
+func (t *blockingWriteTxn) Abort(ctx context.Context) error {
+	return t.inner.Abort(ctx)
 }
 
 func newMemorySegmentFactory() *memorySegmentFactory {
