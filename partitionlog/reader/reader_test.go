@@ -157,6 +157,34 @@ func TestFetchRejectsExpiredLSN(t *testing.T) {
 	}
 }
 
+func TestTailerRejectsNonEmptyHeadWithoutLastSegment(t *testing.T) {
+	cat := &stubCatalog{head: pmeta.PartitionHead{
+		StreamID:  "test/events",
+		Partition: 3,
+		OldestLSN: 0,
+		NextLSN:   10,
+	}}
+	r, err := New(cat, newTestSegmentStore(nil), Options{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	watch, err := r.Watch(context.Background(), WatchOptions{Partitions: []uint32{3}})
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	tailer, err := watch.Tail(TailOptions{Partition: 3, StartLSN: 0, Limit: 1})
+	if err != nil {
+		t.Fatalf("Tail() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := tailer.Next(ctx); !errors.Is(err, ErrCorruptData) {
+		t.Fatalf("Next() error = %v, want %v", err, ErrCorruptData)
+	}
+}
+
 func TestFetchDetectsCatalogMissInsideHead(t *testing.T) {
 	t.Parallel()
 

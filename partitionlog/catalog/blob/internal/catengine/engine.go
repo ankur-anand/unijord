@@ -573,7 +573,7 @@ func (s *Session) commitLocked(ctx context.Context, previous catformat.Head, mut
 		}
 		if attempt+1 < s.engine.opts.CommitAttempts {
 			if err := waitBackoff(ctx, backoff); err != nil {
-				return pmeta.PartitionHead{}, errors.Join(lastErr, err)
+				return pmeta.PartitionHead{}, fmt.Errorf("%w: partition=%d: %w", csession.ErrCommitIndeterminate, s.config.Partition, errors.Join(lastErr, err))
 			}
 			backoff = growBackoff(backoff, s.engine.opts.CommitMaxBackoff)
 		}

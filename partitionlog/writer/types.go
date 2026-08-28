@@ -114,7 +114,9 @@ type RollPolicy struct {
 
 type QueuePolicy struct {
 	MaxInflightSegments int
-	MaxInflightBytes    uint64
+	// MaxInflightBytes must fit the conservative reservation estimate for one
+	// maximum-sized segment under the configured roll policy and codec.
+	MaxInflightBytes uint64
 }
 
 // OperationTimeouts bound component-owned background work. Caller contexts

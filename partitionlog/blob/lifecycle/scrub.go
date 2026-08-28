@@ -441,7 +441,7 @@ func (r *Reclaimer) scrubPageOrphans(ctx context.Context, snapshot catalogblob.M
 			}
 			budget.recordCandidate()
 			if len(state.PageQuarantine) >= r.opts.MaxQuarantine {
-				return false, r.checkpointOrphanPage(ctx, state, token, level, lastProcessed)
+				return true, r.checkpointOrphanPage(ctx, state, token, level, lastProcessed)
 			}
 			resultSize := objectSize(object)
 			if !r.opts.DryRun {

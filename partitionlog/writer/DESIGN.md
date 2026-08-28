@@ -353,6 +353,8 @@ raw appended payload bytes.
 
 Rules:
 
+- `New` rejects a configuration whose maximum segment estimate cannot fit in
+  `MaxInflightBytes`;
 - capacity must be reserved before `Cut` swaps the active segment;
 - `Append` that requires a cut blocks when in-flight capacity is exhausted;
 - explicit `Cut(ctx)` also blocks when in-flight capacity is exhausted;

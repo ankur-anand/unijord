@@ -53,6 +53,11 @@ reused so the provider can reconcile safely. The caller may instead ask
 object is absent. Publication code must reconcile the final object or catalog
 state before deciding whether the operation committed.
 
+When a provider error contains both an indeterminate-outcome marker and an
+otherwise definite retry error (for example, a cleaned staging session), the
+indeterminate outcome takes precedence. The retry error describes the latest
+attempt; it does not prove whether an earlier final-object commit landed.
+
 If provider cleanup fails, `Abort` may be called again with a fresh context.
 The byte stream remains stopped; only staging cleanup is retried.
 

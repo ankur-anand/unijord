@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	pcatalog "github.com/ankur-anand/unijord/partitionlog/catalog"
 )
@@ -262,6 +263,65 @@ func TestBlobCatalogRetentionRequestRecoversLostCASResponse(t *testing.T) {
 	}
 	if calls, _ := backend.stats(); calls != 2 {
 		t.Fatalf("retention CAS calls = %d, want 2", calls)
+	}
+}
+
+func TestBlobCatalogRetentionCancellationAfterAmbiguousCASRemainsIndeterminate(t *testing.T) {
+	backend := &casFaultBackend{Backend: NewMemoryBackend()}
+	opts := commitRecoveryTestOptions()
+	opts.WriterCommitInitialBackoff = time.Hour
+	opts.WriterCommitMaxBackoff = time.Hour
+	cat, err := New(backend, opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := pcatalog.RetentionRequest{
+		Version:       pcatalog.RetentionRequestVersion,
+		PolicyVersion: 1,
+		BeforeLSN:     10,
+		CreatedUnixMS: 1,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.arm(casFaultAfterApplyOnce, false, func() error {
+		cancel()
+		return nil
+	})
+
+	_, err = cat.RequestRetention(ctx, 1, request)
+	stored, found, loadErr := cat.LoadRetentionRequest(context.Background(), 1)
+	if loadErr != nil {
+		t.Fatalf("LoadRetentionRequest() error = %v", loadErr)
+	}
+	if !found || stored != request {
+		t.Fatalf("durable retention request = %+v found=%v, want %+v", stored, found, request)
+	}
+	if !errors.Is(err, errInjectedCAS) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("RequestRetention() error = %v, want transport and context errors", err)
+	}
+	if !errors.Is(err, pcatalog.ErrCommitIndeterminate) {
+		t.Fatalf("RequestRetention() error = %v, committed outcome must be ErrCommitIndeterminate", err)
+	}
+}
+
+func TestBlobCatalogRetentionReturnsIndeterminateWhenCommitCannotBeObserved(t *testing.T) {
+	backend := &casFaultBackend{Backend: NewMemoryBackend()}
+	opts := commitRecoveryTestOptions()
+	opts.WriterCommitMaxAttempts = 1
+	cat, err := New(backend, opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := pcatalog.RetentionRequest{
+		Version:       pcatalog.RetentionRequestVersion,
+		PolicyVersion: 1,
+		BeforeLSN:     10,
+		CreatedUnixMS: 1,
+	}
+	backend.arm(casFaultAfterApplyOnce, true, nil)
+
+	_, err = cat.RequestRetention(context.Background(), 1, request)
+	if !errors.Is(err, errInjectedCAS) || !errors.Is(err, pcatalog.ErrCommitIndeterminate) {
+		t.Fatalf("RequestRetention() error = %v, want transport error and ErrCommitIndeterminate", err)
 	}
 }
 

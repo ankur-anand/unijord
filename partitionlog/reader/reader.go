@@ -348,7 +348,7 @@ func (r *Reader) consumeFromHeadOnce(ctx context.Context, head pmeta.PartitionHe
 	}
 	if !head.HasLastSegment {
 		if startLSN < head.NextLSN {
-			result.NextLSN = head.NextLSN
+			return ConsumeResult{}, fmt.Errorf("%w: partition=%d has no last segment for live lsn=%d oldest_lsn=%d next_lsn=%d", ErrCorruptData, partition, startLSN, head.OldestLSN, head.NextLSN)
 		}
 		return result, nil
 	}

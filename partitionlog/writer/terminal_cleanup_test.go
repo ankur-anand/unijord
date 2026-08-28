@@ -250,7 +250,7 @@ func newTerminalCleanupWriter(t *testing.T, session Session, factory SinkFactory
 	opts.Roll.MaxSegmentRecords = 100
 	opts.Roll.MaxSegmentRawBytes = 1 << 30
 	opts.Queue.MaxInflightSegments = 8
-	opts.Queue.MaxInflightBytes = 1 << 30
+	opts.Queue.MaxInflightBytes = 2 << 30
 	opts.SegmentOptions.TargetBlockSize = 32
 	opts.SegmentOptions.PartSize = 16
 	w, err := New(opts)

@@ -882,6 +882,12 @@ func (w *Writer) shouldCutAfterLocked() bool {
 }
 
 func (w *Writer) reserveInflightLocked(ctx context.Context, segments int, bytes uint64) error {
+	if w.opts.Queue.MaxInflightSegments > 0 && segments > w.opts.Queue.MaxInflightSegments {
+		return fmt.Errorf("%w: reservation segments=%d exceeds max_inflight_segments=%d", ErrInvalidOptions, segments, w.opts.Queue.MaxInflightSegments)
+	}
+	if w.opts.Queue.MaxInflightBytes > 0 && bytes > w.opts.Queue.MaxInflightBytes {
+		return fmt.Errorf("%w: reservation bytes=%d exceeds max_inflight_bytes=%d", ErrInvalidOptions, bytes, w.opts.Queue.MaxInflightBytes)
+	}
 	for {
 		if err := w.abortedErrLocked(); err != nil {
 			return err
@@ -935,10 +941,10 @@ func (w *Writer) endActiveTransitionLocked() {
 }
 
 func (w *Writer) canReserveLocked(segments int, bytes uint64) bool {
-	if w.opts.Queue.MaxInflightSegments > 0 && w.inflightSegments+segments > w.opts.Queue.MaxInflightSegments {
+	if w.opts.Queue.MaxInflightSegments > 0 && w.inflightSegments > w.opts.Queue.MaxInflightSegments-segments {
 		return false
 	}
-	if w.opts.Queue.MaxInflightBytes > 0 && w.inflightBytes+bytes > w.opts.Queue.MaxInflightBytes {
+	if w.opts.Queue.MaxInflightBytes > 0 && w.inflightBytes > w.opts.Queue.MaxInflightBytes-bytes {
 		return false
 	}
 	return true
@@ -1416,6 +1422,19 @@ func normalizeOptions(opts Options, snapshot Snapshot) (Options, error) {
 	}
 	if opts.Queue.MaxInflightSegments < 0 {
 		return Options{}, fmt.Errorf("%w: negative max inflight segments %d", ErrInvalidOptions, opts.Queue.MaxInflightSegments)
+	}
+	maxSegmentBytes := estimateInflightBytes(
+		opts.Roll.MaxSegmentRawBytes,
+		opts.Roll.MaxSegmentRecords,
+		opts.SegmentOptions.Codec,
+	)
+	if maxSegmentBytes > opts.Queue.MaxInflightBytes {
+		return Options{}, fmt.Errorf(
+			"%w: maximum segment estimate=%d exceeds max_inflight_bytes=%d",
+			ErrInvalidOptions,
+			maxSegmentBytes,
+			opts.Queue.MaxInflightBytes,
+		)
 	}
 	if opts.Timeouts.SegmentFinalize == 0 {
 		opts.Timeouts.SegmentFinalize = DefaultSegmentFinalizeTimeout

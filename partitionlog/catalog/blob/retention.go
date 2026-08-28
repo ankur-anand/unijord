@@ -76,14 +76,14 @@ func (c *Catalog) RequestRetention(ctx context.Context, partition uint32, reques
 			break
 		}
 		if err := sleepBackoff(ctx, backoff); err != nil {
-			return csession.RetentionRequest{}, errors.Join(lastCASErr, err)
+			return csession.RetentionRequest{}, fmt.Errorf("%w: request retention partition=%d: %w", csession.ErrCommitIndeterminate, partition, errors.Join(lastCASErr, err))
 		}
 		backoff = growBackoff(backoff, c.opts.WriterCommitMaxBackoff)
 	}
 
 	observed, _, found, err := c.loadRetentionFile(ctx, partition)
 	if err != nil {
-		return csession.RetentionRequest{}, errors.Join(lastCASErr, err)
+		return csession.RetentionRequest{}, fmt.Errorf("%w: request retention partition=%d: %w", csession.ErrCommitIndeterminate, partition, errors.Join(lastCASErr, err))
 	}
 	if found {
 		if existing, done, err := compareRetentionRequest(observed.request(), request); done || err != nil {

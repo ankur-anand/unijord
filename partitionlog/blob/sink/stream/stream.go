@@ -362,6 +362,17 @@ func (u *MultipartUpload) Commit(ctx context.Context) (multipart.ObjectAttrs, er
 
 	u.mu.Lock()
 	if err != nil {
+		// A provider may join a retry-attempt error such as ErrCleaned or
+		// ErrPreconditionFailed with ErrCommitIndeterminate when it cannot
+		// reconcile whether an earlier commit landed. The unknown final-object
+		// outcome must dominate: callers need to be able to retry Commit or
+		// Abort while preserving the ambiguity signal.
+		if errors.Is(err, multipart.ErrCommitIndeterminate) {
+			u.state = stateIndeterminate
+			u.mu.Unlock()
+			u.cancel(ErrCommitIndeterminate)
+			return multipart.ObjectAttrs{}, errors.Join(ErrCommitIndeterminate, err)
+		}
 		if definiteCommitFailure(err) {
 			u.firstErr = err
 			u.state = stateFailed

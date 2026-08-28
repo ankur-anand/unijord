@@ -39,6 +39,40 @@ func TestEngineReconcilesLostAppendResponseAndRemainsUsable(t *testing.T) {
 	}
 }
 
+func TestEngineAppendCancellationAfterAmbiguousCASRemainsIndeterminate(t *testing.T) {
+	backend := newFaultStore()
+	engine := testEngine(t, backend, 4, 2)
+	engine.opts.CommitInitialBackoff = time.Hour
+	engine.opts.CommitMaxBackoff = time.Hour
+	initializeEngine(t, engine)
+	session, err := engine.OpenWriter(context.Background(), 7, filled16(0x91))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transportErr := errors.New("lost CAS response")
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.afterNextAppliedCAS(func() error {
+		cancel()
+		return transportErr
+	})
+
+	_, err = session.AppendSegment(ctx, testSegment(session.config, session.head, 0))
+	committed, loadErr := engine.LoadPartition(context.Background(), 7)
+	if loadErr != nil {
+		t.Fatalf("LoadPartition() error = %v", loadErr)
+	}
+	if committed.NextLSN != 1 {
+		t.Fatalf("durable head NextLSN = %d, want committed NextLSN 1", committed.NextLSN)
+	}
+	if !errors.Is(err, transportErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("AppendSegment() error = %v, want transport and context errors", err)
+	}
+	if !errors.Is(err, csession.ErrCommitIndeterminate) {
+		t.Fatalf("AppendSegment() error = %v, committed outcome must be ErrCommitIndeterminate", err)
+	}
+}
+
 func TestEngineReconcilesOldCommitAfterSuccessorAndFencesBeforeUpload(t *testing.T) {
 	backend := newFaultStore()
 	engine := testEngine(t, backend, 2, 2)

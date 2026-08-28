@@ -288,13 +288,15 @@ func TestMultipartUploadCommitPreservesRecordedPartFailureWhenCallerCancels(t *t
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx, commitWaiting := observeNthDone(baseCtx, 1)
 	result := make(chan commitResult, 1)
 	go func() {
 		attrs, err := u.Commit(ctx)
 		result <- commitResult{attrs: attrs, err: err}
 	}()
 	waitForPart(t, backend.partStarted, 1)
+	waitForSignal(t, commitWaiting, "Commit to wait for part workers")
 
 	// Keep the failed worker from finishing after recordFailure. That leaves
 	// Commit deterministically waiting on u.done when its caller cancels.
@@ -437,6 +439,80 @@ func TestMultipartUploadRetriesIndeterminateCommit(t *testing.T) {
 	}
 	if attrs.SizeBytes != 4 || backend.completeCount() != 2 {
 		t.Fatalf("retried Commit() = (%+v, calls=%d), want size=4 and two calls", attrs, backend.completeCount())
+	}
+}
+
+func TestMultipartUploadRetriesJoinedIndeterminateCommit(t *testing.T) {
+	t.Parallel()
+
+	for name, definiteErr := range map[string]error{
+		"cleaned staging":       multipart.ErrCleaned,
+		"precondition conflict": multipart.ErrPreconditionFailed,
+	} {
+		definiteErr := definiteErr
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			reconcileErr := errors.New("reconcile temporarily unavailable")
+			backend := newFakeUpload()
+			backend.completeErrOnce = errors.Join(
+				multipart.ErrCommitIndeterminate,
+				definiteErr,
+				reconcileErr,
+			)
+			u := newTestUpload(t, backend, MultipartOptions{
+				PartSize:          4,
+				UploadParallelism: 1,
+				UploadQueueSize:   1,
+			})
+			if err := u.Write(context.Background(), []byte("data")); err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			_, err := u.Commit(context.Background())
+			if !errors.Is(err, ErrCommitIndeterminate) ||
+				!errors.Is(err, definiteErr) ||
+				!errors.Is(err, reconcileErr) {
+				t.Fatalf("first Commit() error = %v, want joined indeterminate provider error", err)
+			}
+
+			attrs, err := u.Commit(context.Background())
+			if err != nil {
+				t.Fatalf("retried Commit() error = %v", err)
+			}
+			if attrs.SizeBytes != 4 || backend.completeCount() != 2 {
+				t.Fatalf("retried Commit() = (%+v, calls=%d), want size=4 and two calls", attrs, backend.completeCount())
+			}
+		})
+	}
+}
+
+func TestMultipartUploadAbortPreservesJoinedIndeterminateCommit(t *testing.T) {
+	t.Parallel()
+
+	reconcileErr := errors.New("reconcile temporarily unavailable")
+	backend := newFakeUpload()
+	backend.completeErr = errors.Join(
+		multipart.ErrCommitIndeterminate,
+		multipart.ErrCleaned,
+		reconcileErr,
+	)
+	u := newTestUpload(t, backend, MultipartOptions{
+		PartSize:          4,
+		UploadParallelism: 1,
+		UploadQueueSize:   1,
+	})
+	if err := u.Write(context.Background(), []byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if _, err := u.Commit(context.Background()); !errors.Is(err, ErrCommitIndeterminate) {
+		t.Fatalf("Commit() error = %v, want ErrCommitIndeterminate", err)
+	}
+	if err := u.Abort(context.Background()); !errors.Is(err, ErrCommitIndeterminate) {
+		t.Fatalf("Abort() error = %v, want ErrCommitIndeterminate", err)
+	}
+	if backend.abortCount() != 1 {
+		t.Fatalf("backend Abort calls = %d, want 1", backend.abortCount())
 	}
 }
 

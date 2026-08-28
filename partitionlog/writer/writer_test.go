@@ -334,7 +334,7 @@ func TestWriterCutSwapsAndAllowsContinuedAppend(t *testing.T) {
 	opts.Roll.MaxSegmentRawBytes = 0
 	opts.Queue = QueuePolicy{
 		MaxInflightSegments: 4,
-		MaxInflightBytes:    1 << 20,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
 	}
 	w, err := New(opts)
 	if err != nil {
@@ -627,7 +627,7 @@ func TestWriterCutBackpressureOnInflight(t *testing.T) {
 	opts.Roll.MaxSegmentRawBytes = 0
 	opts.Queue = QueuePolicy{
 		MaxInflightSegments: 1,
-		MaxInflightBytes:    1 << 20,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
 	}
 	w, err := New(opts)
 	if err != nil {
@@ -1048,7 +1048,7 @@ func TestWriterForegroundFailureCleanupUsesBestEffortAbortContext(t *testing.T) 
 	}
 }
 
-func TestWriterCutBackpressureUsesEstimatedSegmentBytes(t *testing.T) {
+func TestWriterRejectsInflightBudgetBelowMaximumSegmentEstimate(t *testing.T) {
 	t.Parallel()
 
 	opts := testSessionOptions(&sessionStub{
@@ -1075,34 +1075,13 @@ func TestWriterCutBackpressureUsesEstimatedSegmentBytes(t *testing.T) {
 	}, newMemorySegmentFactory())
 	opts.Roll.MaxSegmentRecords = 0
 	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Roll.MaxSegmentAge = time.Millisecond
 	opts.Queue = QueuePolicy{
 		MaxInflightSegments: 1,
 		MaxInflightBytes:    uint64(segformat.RecordHeaderSize + 1),
 	}
-	w, err := New(opts)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	defer func() {
-		if err := w.Abort(context.Background()); err != nil {
-			t.Fatalf("Abort() error = %v", err)
-		}
-	}()
-
-	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
-		t.Fatalf("Append() error = %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := w.Cut(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Cut() error = %v, want %v", err, context.DeadlineExceeded)
-	}
-	if w.Err() != nil {
-		t.Fatalf("Err() = %v, want nil after byte-budget backpressure", w.Err())
-	}
-	if _, err := w.Append(context.Background(), Record{TimestampMS: 2, Value: []byte("b")}); err != nil {
-		t.Fatalf("Append(after blocked cut) error = %v, want writer still usable", err)
+	if _, err := New(opts); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("New() error = %v, want %v", err, ErrInvalidOptions)
 	}
 }
 
@@ -1195,7 +1174,7 @@ func testOptions(t *testing.T, cat interface {
 	opts.SegmentOptions = newTestSegmentOptions(1)
 	opts.Queue = QueuePolicy{
 		MaxInflightSegments: 4,
-		MaxInflightBytes:    1 << 20,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
 	}
 	return opts
 }
@@ -1226,7 +1205,7 @@ func testSessionOptions(session Session, factory SinkFactory) Options {
 	opts.Roll.MaxSegmentRecords = 1
 	opts.Queue = QueuePolicy{
 		MaxInflightSegments: 2,
-		MaxInflightBytes:    1 << 20,
+		MaxInflightBytes:    DefaultMaxInflightBytes,
 	}
 	return opts
 }

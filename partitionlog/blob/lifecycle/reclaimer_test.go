@@ -332,6 +332,35 @@ func TestScrubPartitionDeletesOnlyProvenSegmentOrphansAndQuarantinedPages(t *tes
 	assertExists(t, backend, committed, inFlight, reachablePage, currentPage)
 }
 
+func TestScrubPartitionReportsMoreWhenPageQuarantineIsFull(t *testing.T) {
+	ctx := context.Background()
+	backend := blobmemory.New()
+	layout := segmentsink.NewLayout("root")
+	clock := newFakeClock(time.Now().UTC().Add(48 * time.Hour))
+	snapshot := maintenanceSnapshot(0, 200, 2, 0)
+	snapshot.Generation = 10
+	catalog := &fakeCatalog{
+		snapshot:       snapshot,
+		segments:       make(map[uint64]pmeta.SegmentRef),
+		reachablePages: make(map[string]bool),
+	}
+	r := newTestReclaimer(t, backend, catalog, layout, clock, Options{MaxQuarantine: 1})
+
+	pageID1 := "0123456789abcdef0123456789abcdef"
+	pageID2 := "fedcba9876543210fedcba9876543210"
+	first := catalogblob.LeafPagePath("root/catalog", testStreamID, 7, 0, 49, 8, pageID1)
+	second := catalogblob.LeafPagePath("root/catalog", testStreamID, 7, 50, 99, 9, pageID2)
+	putKeys(t, backend, []string{first, second})
+
+	result, err := r.ScrubPartition(ctx, 7)
+	if err != nil {
+		t.Fatalf("ScrubPartition() error = %v", err)
+	}
+	if !result.HasMore || result.QuarantinedObjects != 1 || result.PendingQuarantine != 1 {
+		t.Fatalf("ScrubPartition() result = %+v, want HasMore with one pending quarantine entry", result)
+	}
+}
+
 func TestScrubPartitionDoesNotBypassDelayedRetentionFloor(t *testing.T) {
 	t.Parallel()
 
