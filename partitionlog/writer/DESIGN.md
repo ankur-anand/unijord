@@ -280,6 +280,12 @@ Age cuts still obey in-flight backpressure. If the writer cannot reserve
 in-flight capacity, the age loop waits until capacity is available or the
 writer is closed/aborted.
 
+If starting the successor segment fails, the active segment remains intact and
+the age loop retries with bounded exponential backoff. `ErrSegmentStartFailed`
+does not make the writer terminal. Foreground `Append`, `Cut`, `Flush`, or
+`Close` operations may retry or complete the same boundary while the age loop
+is waiting.
+
 ## Cut
 
 `Cut(ctx)` is the periodic segment-boundary operation.

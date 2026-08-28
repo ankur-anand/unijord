@@ -470,6 +470,50 @@ func TestWriterMaxSegmentAgeUsesConfiguredClock(t *testing.T) {
 	waitForWriterSegmentCount(t, w, 1)
 }
 
+func TestWriterAgeCutRetriesSegmentStartFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := &flakySegmentFactory{
+		next: newMemorySegmentFactory(),
+		fail: map[uint64]error{
+			1: errors.New("temporary sink start failure"),
+		},
+	}
+	opts := testOptions(t, catalog.NewMemoryCatalog(), factory)
+	opts.Clock = SystemClock{}
+	opts.Roll.MaxSegmentRecords = 0
+	opts.Roll.MaxSegmentRawBytes = 0
+	opts.Roll.MaxSegmentAge = 10 * time.Millisecond
+	w, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = w.Abort(context.Background()) })
+
+	if _, err := w.Append(context.Background(), Record{TimestampMS: 1, Value: []byte("a")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for factory.Calls() < 3 {
+		if err := w.Err(); err != nil {
+			t.Fatalf("writer became terminal after retryable age-cut start failure: %v", err)
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("age cut was not retried after start failure; factory calls=%d state=%+v", factory.Calls(), w.State())
+		case <-ticker.C:
+		}
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err() after successful age-cut retry = %v, want nil", err)
+	}
+	waitForWriterSegmentCount(t, w, 1)
+}
+
 func TestWriterMaxSegmentAgeStartsAtFirstRecordAfterPolicyCut(t *testing.T) {
 	cat := catalog.NewMemoryCatalog()
 	opts := testOptions(t, cat, newMemorySegmentFactory())
@@ -1450,6 +1494,12 @@ func (f *flakySegmentFactory) NewSegmentSink(ctx context.Context, info SegmentIn
 		return nil, err
 	}
 	return f.next.NewSegmentSink(ctx, info)
+}
+
+func (f *flakySegmentFactory) Calls() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func newSequenceUUIDGen() UUIDGen {

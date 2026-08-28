@@ -14,7 +14,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const cleanupTimeout = 5 * time.Second
+const (
+	cleanupTimeout            = 5 * time.Second
+	ageCutRetryInitialBackoff = 10 * time.Millisecond
+	ageCutRetryMaxBackoff     = time.Second
+)
 
 // Writer owns one partition's append flow. Calls that mutate the writer must
 // be serialized. State, Err, and Committed may be used by observer goroutines.
@@ -658,10 +662,13 @@ func (w *Writer) publishLoop() {
 
 func (w *Writer) ageLoop() {
 	defer w.workersWG.Done()
+	retryBackoff := ageCutRetryInitialBackoff
 
 	for {
 		w.mu.Lock()
+		wasIdle := false
 		for (w.active == nil || w.active.records == 0) && w.workerCtx.Err() == nil {
+			wasIdle = true
 			w.mu.Unlock()
 			select {
 			case <-w.ageWake:
@@ -673,6 +680,16 @@ func (w *Writer) ageLoop() {
 		if w.workerCtx.Err() != nil {
 			w.mu.Unlock()
 			return
+		}
+		if wasIdle {
+			retryBackoff = ageCutRetryInitialBackoff
+		}
+		// Every producer of ageWake also holds w.mu while changing the active
+		// segment. Once we hold the lock and have observed that state, any queued
+		// notification describes state we have already incorporated.
+		select {
+		case <-w.ageWake:
+		default:
 		}
 
 		wait := w.active.firstRecordAt.Add(w.opts.Roll.MaxSegmentAge).Sub(w.opts.Clock.Now())
@@ -696,10 +713,32 @@ func (w *Writer) ageLoop() {
 			if w.workerCtx.Err() != nil {
 				return
 			}
+			if errors.Is(err, ErrSegmentStartFailed) {
+				timer := w.opts.Clock.NewTimer(retryBackoff)
+				select {
+				case <-timer.C():
+					retryBackoff = nextAgeCutRetryBackoff(retryBackoff)
+				case <-w.ageWake:
+					stopTimer(timer)
+					retryBackoff = ageCutRetryInitialBackoff
+				case <-w.workerCtx.Done():
+					stopTimer(timer)
+					return
+				}
+				continue
+			}
 			w.noteAsyncErr(err)
 			return
 		}
+		retryBackoff = ageCutRetryInitialBackoff
 	}
+}
+
+func nextAgeCutRetryBackoff(current time.Duration) time.Duration {
+	if current >= ageCutRetryMaxBackoff/2 {
+		return ageCutRetryMaxBackoff
+	}
+	return current * 2
 }
 
 func (w *Writer) cutLocked(ctx context.Context) error {
