@@ -1,7 +1,4 @@
 // Package chunkfile encodes and decodes immutable UJTC durability objects.
-//
-// It owns only the binary object format. Publication, acknowledgement,
-// fencing, object naming, folding, and reclamation belong to higher layers.
 package chunkfile
 
 import (
