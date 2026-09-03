@@ -1,4 +1,4 @@
-package chunkfile
+package ujtc
 
 import (
 	"bytes"
@@ -56,6 +56,70 @@ func TestUnmarshalOwnsReturnedBytes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded, want) {
 		t.Fatal("decoded records alias the mutable input object")
+	}
+}
+
+func TestMarshalOwnsObjectBytesAndDoesNotMutateInput(t *testing.T) {
+	records := fixtureRecords()
+	want := cloneRecords(records)
+	body, _, err := Marshal(testIdentity(0, 1, 0), records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatal("Marshal mutated caller-owned records")
+	}
+
+	for i := range records {
+		for j := range records[i].TimelineKey {
+			records[i].TimelineKey[j] ^= 0xff
+		}
+		for j := range records[i].Value {
+			records[i].Value[j] ^= 0xff
+		}
+		for j := range records[i].Headers {
+			for k := range records[i].Headers[j].Key {
+				records[i].Headers[j].Key[k] ^= 0xff
+			}
+			for k := range records[i].Headers[j].Value {
+				records[i].Headers[j].Value[k] ^= 0xff
+			}
+		}
+	}
+	_, decoded, err := Unmarshal(body)
+	if err != nil {
+		t.Fatalf("encoded object changed after input mutation: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatal("encoded object aliases caller-owned record bytes")
+	}
+	if cap(body) != len(body) {
+		t.Fatalf("encoded object retains spare capacity: len=%d cap=%d", len(body), cap(body))
+	}
+}
+
+func TestMarshalDirectEncodingPreservesMultipleHeaders(t *testing.T) {
+	records := []record.Record{{
+		TimelineKey: []byte{0, 'r', 0xff}, TimelineLSN: 9, TimestampMS: -7,
+		Headers: []record.Header{
+			{Key: []byte("kind"), Value: []byte("created")},
+			{Key: []byte{}, Value: []byte{0, 1, 0xff}},
+		},
+		Value: []byte{0xff, 0, 2},
+	}}
+	body, metadata, err := Marshal(testIdentity(4, 2, 8), records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedMetadata, decoded, err := Unmarshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedMetadata != metadata {
+		t.Fatalf("decoded metadata=%+v want=%+v", decodedMetadata, metadata)
+	}
+	if !reflect.DeepEqual(decoded, records) {
+		t.Fatalf("decoded records=%#v want=%#v", decoded, records)
 	}
 }
 
@@ -135,6 +199,31 @@ func TestMarshalRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("Marshal() error = %v, want %v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestUnmarshalRejectsOversizedRecordValue(t *testing.T) {
+	seed, _, err := Marshal(testIdentity(0, 1, 0), []record.Record{{
+		TimelineKey: []byte("run"), TimelineLSN: 0, TimestampMS: 10,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyLength := int(binary.BigEndian.Uint16(seed[HeaderSize+4 : HeaderSize+6]))
+	valueLength := record.MaxRecordValueBytes + 1
+	object := make([]byte, HeaderSize+RecordHeaderSize+keyLength+valueLength)
+	copy(object[:HeaderSize+RecordHeaderSize+keyLength], seed[:HeaderSize+RecordHeaderSize+keyLength])
+	recordHeader := object[HeaderSize : HeaderSize+RecordHeaderSize]
+	binary.BigEndian.PutUint32(recordHeader[0:4], uint32(RecordHeaderSize+keyLength+valueLength))
+	binary.BigEndian.PutUint32(recordHeader[28:32], uint32(valueLength))
+	body := object[HeaderSize:]
+	binary.BigEndian.PutUint64(object[40:48], uint64(len(body)))
+	binary.BigEndian.PutUint64(object[48:56], xxhash.Sum64(body))
+	binary.BigEndian.PutUint64(object[72:80], uint64(len(object)))
+	fixHeaderHash(object)
+
+	if _, _, err := Unmarshal(object); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Unmarshal(oversized value) error=%v", err)
 	}
 }
 
