@@ -1,4 +1,4 @@
-# UJTC
+# Unijord UJTC format
 
 Binary format for one Unijord timeline chunk.
 

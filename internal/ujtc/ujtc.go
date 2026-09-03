@@ -1,5 +1,5 @@
-// Package chunkfile encodes and decodes immutable UJTC durability objects.
-package chunkfile
+// Package ujtc encodes and decodes immutable UJTC durability objects.
+package ujtc
 
 import (
 	"bytes"
@@ -23,8 +23,8 @@ const (
 )
 
 var (
-	ErrInvalid   = errors.New("chunkfile: invalid chunk")
-	ErrNoRecords = errors.New("chunkfile: no records")
+	ErrInvalid   = errors.New("ujtc: invalid chunk")
+	ErrNoRecords = errors.New("ujtc: no records")
 )
 
 var magic = [4]byte{'U', 'J', 'T', 'C'}
@@ -67,60 +67,41 @@ func Marshal(identity Identity, records []record.Record) ([]byte, Metadata, erro
 		return nil, Metadata{}, fmt.Errorf("%w: records=%d", ErrInvalid, len(records))
 	}
 
-	body := make([]byte, 0)
-	states := make(map[string]timelineState)
-	var minTimestamp, maxTimestamp int64
-	for i, item := range records {
-		if len(item.TimelineKey) == 0 || len(item.TimelineKey) > record.MaxTimelineKeyBytes {
-			return nil, Metadata{}, fmt.Errorf("%w: record=%d key bytes=%d", ErrInvalid, i, len(item.TimelineKey))
-		}
-		if item.TimelineLSN == math.MaxUint64 {
-			return nil, Metadata{}, fmt.Errorf("%w: record=%d reserved timeline LSN", ErrInvalid, i)
-		}
-		state, exists := states[string(item.TimelineKey)]
-		if exists {
-			if item.TimelineLSN != state.lsn+1 {
-				return nil, Metadata{}, fmt.Errorf("%w: key=%q lsn=%d want=%d", ErrInvalid, item.TimelineKey, item.TimelineLSN, state.lsn+1)
-			}
-			if item.TimestampMS < state.timestamp {
-				return nil, Metadata{}, fmt.Errorf("%w: key=%q timestamp=%d previous=%d", ErrInvalid, item.TimelineKey, item.TimestampMS, state.timestamp)
-			}
-		}
-		states[string(item.TimelineKey)] = timelineState{lsn: item.TimelineLSN, timestamp: item.TimestampMS}
-		if i == 0 || item.TimestampMS < minTimestamp {
-			minTimestamp = item.TimestampMS
-		}
-		if i == 0 || item.TimestampMS > maxTimestamp {
-			maxTimestamp = item.TimestampMS
-		}
-
-		headers, err := marshalHeaders(item.Headers)
-		if err != nil {
-			return nil, Metadata{}, fmt.Errorf("record=%d: %w", i, err)
-		}
-		if len(item.Value) > record.MaxRecordValueBytes {
-			return nil, Metadata{}, fmt.Errorf("%w: record=%d value bytes=%d", ErrInvalid, i, len(item.Value))
-		}
-		total := uint64(RecordHeaderSize) + uint64(len(item.TimelineKey)) + uint64(len(headers)) + uint64(len(item.Value))
-		if total > math.MaxUint32 || uint64(len(body))+total > MaxObjectBytes-HeaderSize {
-			return nil, Metadata{}, fmt.Errorf("%w: body exceeds %d bytes", ErrInvalid, MaxObjectBytes)
-		}
-		header := make([]byte, RecordHeaderSize)
+	layout, err := measureRecords(records)
+	if err != nil {
+		return nil, Metadata{}, err
+	}
+	out := make([]byte, HeaderSize+layout.bodyBytes)
+	offset := HeaderSize
+	for _, item := range records {
+		headersLength := encodedHeadersLength(item.Headers)
+		total := RecordHeaderSize + len(item.TimelineKey) + headersLength + len(item.Value)
+		header := out[offset : offset+RecordHeaderSize]
 		binary.BigEndian.PutUint32(header[0:4], uint32(total))
 		binary.BigEndian.PutUint16(header[4:6], uint16(len(item.TimelineKey)))
 		binary.BigEndian.PutUint16(header[6:8], uint16(len(item.Headers)))
 		binary.BigEndian.PutUint64(header[8:16], item.TimelineLSN)
 		binary.BigEndian.PutUint64(header[16:24], uint64(item.TimestampMS))
-		binary.BigEndian.PutUint32(header[24:28], uint32(len(headers)))
+		binary.BigEndian.PutUint32(header[24:28], uint32(headersLength))
 		binary.BigEndian.PutUint32(header[28:32], uint32(len(item.Value)))
-		body = append(body, header...)
-		body = append(body, item.TimelineKey...)
-		body = append(body, headers...)
-		body = append(body, item.Value...)
+		offset += RecordHeaderSize
+		offset += copy(out[offset:], item.TimelineKey)
+		for _, applicationHeader := range item.Headers {
+			entry := out[offset : offset+HeaderEntrySize]
+			binary.BigEndian.PutUint16(entry[0:2], uint16(len(applicationHeader.Key)))
+			binary.BigEndian.PutUint32(entry[4:8], uint32(len(applicationHeader.Value)))
+			offset += HeaderEntrySize
+			offset += copy(out[offset:], applicationHeader.Key)
+			offset += copy(out[offset:], applicationHeader.Value)
+		}
+		offset += copy(out[offset:], item.Value)
+	}
+	if offset != len(out) {
+		return nil, Metadata{}, fmt.Errorf("%w: measured bytes=%d encoded bytes=%d", ErrInvalid, len(out), offset)
 	}
 
+	body := out[HeaderSize:]
 	bodyHash := xxhash.Sum64(body)
-	out := make([]byte, HeaderSize, HeaderSize+len(body))
 	copy(out[0:4], magic[:])
 	binary.BigEndian.PutUint16(out[4:6], Version)
 	binary.BigEndian.PutUint16(out[6:8], HeaderSize)
@@ -128,27 +109,80 @@ func Marshal(identity Identity, records []record.Record) ([]byte, Metadata, erro
 	binary.BigEndian.PutUint64(out[16:24], identity.WriterEpoch)
 	binary.BigEndian.PutUint64(out[24:32], identity.Sequence)
 	binary.BigEndian.PutUint32(out[32:36], uint32(len(records)))
-	binary.BigEndian.PutUint32(out[36:40], uint32(len(states)))
-	binary.BigEndian.PutUint64(out[40:48], uint64(len(body)))
+	binary.BigEndian.PutUint32(out[36:40], layout.timelineCount)
+	binary.BigEndian.PutUint64(out[40:48], uint64(layout.bodyBytes))
 	binary.BigEndian.PutUint64(out[48:56], bodyHash)
-	binary.BigEndian.PutUint64(out[56:64], uint64(minTimestamp))
-	binary.BigEndian.PutUint64(out[64:72], uint64(maxTimestamp))
-	binary.BigEndian.PutUint64(out[72:80], uint64(HeaderSize+len(body)))
+	binary.BigEndian.PutUint64(out[56:64], uint64(layout.minTimestamp))
+	binary.BigEndian.PutUint64(out[64:72], uint64(layout.maxTimestamp))
+	binary.BigEndian.PutUint64(out[72:80], uint64(len(out)))
 	copy(out[80:112], identity.NamespaceHash[:])
 	binary.BigEndian.PutUint64(out[120:128], xxhash.Sum64(out[:120]))
-	out = append(out, body...)
 
 	metadata := Metadata{
 		Identity:      identity,
 		RecordCount:   uint32(len(records)),
-		TimelineCount: uint32(len(states)),
-		BodyBytes:     uint64(len(body)),
+		TimelineCount: layout.timelineCount,
+		BodyBytes:     uint64(layout.bodyBytes),
 		BodyHash:      bodyHash,
-		MinTimestamp:  minTimestamp,
-		MaxTimestamp:  maxTimestamp,
+		MinTimestamp:  layout.minTimestamp,
+		MaxTimestamp:  layout.maxTimestamp,
 		ObjectHash:    sha256.Sum256(out),
 	}
 	return out, metadata, nil
+}
+
+type marshalLayout struct {
+	bodyBytes     int
+	timelineCount uint32
+	minTimestamp  int64
+	maxTimestamp  int64
+}
+
+// measureRecords validates everything needed by the encoder before allocating
+// the final object. This keeps invalid input from leaving a partially encoded
+// large buffer and makes the following encoding pass allocation-free.
+func measureRecords(records []record.Record) (marshalLayout, error) {
+	states := make(map[string]timelineState)
+	var layout marshalLayout
+	for i, item := range records {
+		if len(item.TimelineKey) == 0 || len(item.TimelineKey) > record.MaxTimelineKeyBytes {
+			return marshalLayout{}, fmt.Errorf("%w: record=%d key bytes=%d", ErrInvalid, i, len(item.TimelineKey))
+		}
+		if item.TimelineLSN == math.MaxUint64 {
+			return marshalLayout{}, fmt.Errorf("%w: record=%d reserved timeline LSN", ErrInvalid, i)
+		}
+		state, exists := states[string(item.TimelineKey)]
+		if exists {
+			if item.TimelineLSN != state.lsn+1 {
+				return marshalLayout{}, fmt.Errorf("%w: key=%q lsn=%d want=%d", ErrInvalid, item.TimelineKey, item.TimelineLSN, state.lsn+1)
+			}
+			if item.TimestampMS < state.timestamp {
+				return marshalLayout{}, fmt.Errorf("%w: key=%q timestamp=%d previous=%d", ErrInvalid, item.TimelineKey, item.TimestampMS, state.timestamp)
+			}
+		}
+		states[string(item.TimelineKey)] = timelineState{lsn: item.TimelineLSN, timestamp: item.TimestampMS}
+		if i == 0 || item.TimestampMS < layout.minTimestamp {
+			layout.minTimestamp = item.TimestampMS
+		}
+		if i == 0 || item.TimestampMS > layout.maxTimestamp {
+			layout.maxTimestamp = item.TimestampMS
+		}
+
+		headersLength, err := measureHeaders(item.Headers)
+		if err != nil {
+			return marshalLayout{}, fmt.Errorf("record=%d: %w", i, err)
+		}
+		if len(item.Value) > record.MaxRecordValueBytes {
+			return marshalLayout{}, fmt.Errorf("%w: record=%d value bytes=%d", ErrInvalid, i, len(item.Value))
+		}
+		total := uint64(RecordHeaderSize) + uint64(len(item.TimelineKey)) + uint64(headersLength) + uint64(len(item.Value))
+		if total > math.MaxUint32 || uint64(layout.bodyBytes)+total > MaxObjectBytes-HeaderSize {
+			return marshalLayout{}, fmt.Errorf("%w: body exceeds %d bytes", ErrInvalid, MaxObjectBytes)
+		}
+		layout.bodyBytes += int(total)
+	}
+	layout.timelineCount = uint32(len(states))
+	return layout, nil
 }
 
 // Unmarshal validates and decodes one complete UJTC object. The returned
@@ -196,7 +230,8 @@ func Unmarshal(buf []byte) (Metadata, []record.Record, error) {
 		headersLength := binary.BigEndian.Uint32(header[24:28])
 		valueLength := binary.BigEndian.Uint32(header[28:32])
 		want := uint64(RecordHeaderSize) + uint64(keyLength) + uint64(headersLength) + uint64(valueLength)
-		if keyLength == 0 || keyLength > record.MaxTimelineKeyBytes || uint64(total) != want || want > uint64(len(body)-offset) {
+		if keyLength == 0 || keyLength > record.MaxTimelineKeyBytes ||
+			valueLength > record.MaxRecordValueBytes || uint64(total) != want || want > uint64(len(body)-offset) {
 			return Metadata{}, nil, fmt.Errorf("%w: record=%d lengths", ErrInvalid, i)
 		}
 		start := offset + RecordHeaderSize
@@ -270,26 +305,29 @@ type timelineState struct {
 	timestamp int64
 }
 
-func marshalHeaders(headers []record.Header) ([]byte, error) {
+func measureHeaders(headers []record.Header) (int, error) {
 	if len(headers) > record.MaxHeaders {
-		return nil, fmt.Errorf("%w: headers=%d", ErrInvalid, len(headers))
+		return 0, fmt.Errorf("%w: headers=%d", ErrInvalid, len(headers))
 	}
-	out := make([]byte, 0)
+	length := 0
 	for _, header := range headers {
 		if len(header.Key) > record.MaxHeaderKeyBytes || len(header.Value) > record.MaxHeaderValueBytes {
-			return nil, fmt.Errorf("%w: header key=%d value=%d", ErrInvalid, len(header.Key), len(header.Value))
+			return 0, fmt.Errorf("%w: header key=%d value=%d", ErrInvalid, len(header.Key), len(header.Value))
 		}
-		entry := make([]byte, HeaderEntrySize)
-		binary.BigEndian.PutUint16(entry[0:2], uint16(len(header.Key)))
-		binary.BigEndian.PutUint32(entry[4:8], uint32(len(header.Value)))
-		out = append(out, entry...)
-		out = append(out, header.Key...)
-		out = append(out, header.Value...)
-		if len(out) > record.MaxHeaderBytes {
-			return nil, fmt.Errorf("%w: header bytes=%d", ErrInvalid, len(out))
+		length += HeaderEntrySize + len(header.Key) + len(header.Value)
+		if length > record.MaxHeaderBytes {
+			return 0, fmt.Errorf("%w: header bytes=%d", ErrInvalid, length)
 		}
 	}
-	return out, nil
+	return length, nil
+}
+
+func encodedHeadersLength(headers []record.Header) int {
+	length := 0
+	for _, header := range headers {
+		length += HeaderEntrySize + len(header.Key) + len(header.Value)
+	}
+	return length
 }
 
 func unmarshalHeaders(buf []byte, count int) ([]record.Header, error) {

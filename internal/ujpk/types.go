@@ -1,9 +1,9 @@
 package ujpk
 
 import (
-	"context"
 	"errors"
 
+	"github.com/ankur-anand/unijord/internal/objectsource"
 	"github.com/ankur-anand/unijord/internal/record"
 )
 
@@ -35,12 +35,9 @@ const (
 	MaxHeaderValueBytes   = record.MaxHeaderValueBytes
 )
 
-// RangeSource is the object-shaped input used by the selective reader.
-// ReadRange must return exactly length bytes or an error.
-type RangeSource interface {
-	Size(ctx context.Context) (uint64, error)
-	ReadRange(ctx context.Context, offset, length uint64) ([]byte, error)
-}
+// RangeSource remains an alias at the UJPK boundary for existing internal
+// callers. The provider-neutral contract is owned by objectsource.
+type RangeSource = objectsource.RangeSource
 
 var (
 	ErrInvalidPack       = errors.New("ujpk: invalid pack")

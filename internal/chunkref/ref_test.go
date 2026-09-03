@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ankur-anand/unijord/internal/chunkfile"
 	"github.com/ankur-anand/unijord/internal/namespaceid"
 	"github.com/ankur-anand/unijord/internal/record"
+	"github.com/ankur-anand/unijord/internal/ujtc"
 )
 
 func TestFromMetadataDecodeAndJSONRoundTrip(t *testing.T) {
@@ -17,7 +17,7 @@ func TestFromMetadataDecodeAndJSONRoundTrip(t *testing.T) {
 		{TimelineKey: []byte("b"), TimelineLSN: 0, TimestampMS: 11, Value: []byte("b0")},
 		{TimelineKey: []byte("a"), TimelineLSN: 4, TimestampMS: 12, Value: []byte("a4")},
 	}
-	body, metadata, err := chunkfile.Marshal(chunkfile.Identity{NamespaceHash: namespaceid.Sum([]byte("tenant-a")), Shard: 7, WriterEpoch: 2, Sequence: 19}, records)
+	body, metadata, err := ujtc.Marshal(ujtc.Identity{NamespaceHash: namespaceid.Sum([]byte("tenant-a")), Shard: 7, WriterEpoch: 2, Sequence: 19}, records)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestFromMetadataDecodeAndJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.FormatVersion != chunkfile.Version || ref.SizeBytes != uint64(len(body)) || ref.TimelineCount != 2 {
+	if ref.FormatVersion != ujtc.Version || ref.SizeBytes != uint64(len(body)) || ref.TimelineCount != 2 {
 		t.Fatalf("ref = %+v", ref)
 	}
 	decodedMetadata, decoded, err := Decode(ref, body)
@@ -55,7 +55,7 @@ func TestFromMetadataDecodeAndJSONRoundTrip(t *testing.T) {
 }
 
 func TestValidateRejectsIncompleteReference(t *testing.T) {
-	_, metadata, err := chunkfile.Marshal(chunkfile.Identity{NamespaceHash: namespaceid.Sum([]byte("tenant-a")), WriterEpoch: 1}, []record.Record{
+	_, metadata, err := ujtc.Marshal(ujtc.Identity{NamespaceHash: namespaceid.Sum([]byte("tenant-a")), WriterEpoch: 1}, []record.Record{
 		{TimelineKey: []byte("a"), TimestampMS: 1},
 	})
 	if err != nil {
@@ -88,7 +88,7 @@ func TestValidateRejectsIncompleteReference(t *testing.T) {
 }
 
 func TestDecodeRejectsMetadataSubstitution(t *testing.T) {
-	body, metadata, err := chunkfile.Marshal(chunkfile.Identity{NamespaceHash: namespaceid.Sum([]byte("tenant-a")), Shard: 1, WriterEpoch: 2, Sequence: 3}, []record.Record{
+	body, metadata, err := ujtc.Marshal(ujtc.Identity{NamespaceHash: namespaceid.Sum([]byte("tenant-a")), Shard: 1, WriterEpoch: 2, Sequence: 3}, []record.Record{
 		{TimelineKey: []byte("a"), TimestampMS: 1},
 	})
 	if err != nil {
@@ -102,10 +102,15 @@ func TestDecodeRejectsMetadataSubstitution(t *testing.T) {
 	if _, _, err := Decode(ref, bytes.Clone(body)); !errors.Is(err, ErrMismatch) {
 		t.Fatalf("Decode(substituted ref) error = %v, want ErrMismatch", err)
 	}
+	ref.Sequence--
+	ref.SHA256[0] ^= 0xff
+	if _, _, err := Decode(ref, bytes.Clone(body)); !errors.Is(err, ErrMismatch) {
+		t.Fatalf("Decode(substituted hash) error = %v, want ErrMismatch", err)
+	}
 }
 
 func TestDecodeRejectsNamespaceSubstitution(t *testing.T) {
-	body, metadata, err := chunkfile.Marshal(chunkfile.Identity{
+	body, metadata, err := ujtc.Marshal(ujtc.Identity{
 		NamespaceHash: namespaceid.Sum([]byte("tenant-a")), Shard: 1, WriterEpoch: 2, Sequence: 3,
 	}, []record.Record{{TimelineKey: []byte("a"), TimestampMS: 1}})
 	if err != nil {
@@ -122,7 +127,7 @@ func TestDecodeRejectsNamespaceSubstitution(t *testing.T) {
 }
 
 func TestVersion1ReferenceVector(t *testing.T) {
-	body, metadata, err := chunkfile.Marshal(chunkfile.Identity{
+	body, metadata, err := ujtc.Marshal(ujtc.Identity{
 		NamespaceHash: namespaceid.Sum([]byte("tenant-a")),
 		Shard:         17,
 		WriterEpoch:   3,
