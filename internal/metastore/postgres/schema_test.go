@@ -11,8 +11,8 @@ import (
 )
 
 func TestFoundationSchemaIsEmbedded(t *testing.T) {
-	if SchemaVersion != 3 {
-		t.Fatalf("SchemaVersion = %d, want 3", SchemaVersion)
+	if SchemaVersion != 4 {
+		t.Fatalf("SchemaVersion = %d, want 4", SchemaVersion)
 	}
 	for _, fragment := range []string{
 		"CREATE SCHEMA IF NOT EXISTS unijord_metastore",
@@ -44,6 +44,11 @@ func TestFoundationSchemaIsEmbedded(t *testing.T) {
 	} {
 		if !strings.Contains(materializerOwnerSQL, fragment) {
 			t.Fatalf("materializer owner migration is missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{"unijord_metastore.producers", "PRIMARY KEY (namespace_hash, producer_id)", "VALUES (4)"} {
+		if !strings.Contains(producersSQL, fragment) {
+			t.Fatalf("producer migration is missing %q", fragment)
 		}
 	}
 }
