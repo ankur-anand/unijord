@@ -11,8 +11,8 @@ import (
 )
 
 func TestFoundationSchemaIsEmbedded(t *testing.T) {
-	if SchemaVersion != 1 {
-		t.Fatalf("SchemaVersion = %d, want 1", SchemaVersion)
+	if SchemaVersion != 3 {
+		t.Fatalf("SchemaVersion = %d, want 3", SchemaVersion)
 	}
 	for _, fragment := range []string{
 		"CREATE SCHEMA IF NOT EXISTS unijord_metastore",
@@ -24,6 +24,26 @@ func TestFoundationSchemaIsEmbedded(t *testing.T) {
 	} {
 		if !strings.Contains(foundationSQL, fragment) {
 			t.Fatalf("foundation migration is missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"unijord_metastore.timeline_heads",
+		"unijord_metastore.chunks",
+		"timeline_heads_namespace_list",
+		"VALUES (2)",
+	} {
+		if !strings.Contains(publicationSQL, fragment) {
+			t.Fatalf("publication migration is missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"ALTER TABLE unijord_metastore.shard_materializers",
+		"shard_materializers_claimed_owner_required",
+		"materializer_owner IS NOT NULL",
+		"VALUES (3)",
+	} {
+		if !strings.Contains(materializerOwnerSQL, fragment) {
+			t.Fatalf("materializer owner migration is missing %q", fragment)
 		}
 	}
 }
@@ -42,7 +62,7 @@ func TestFoundationSchemaConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open PostgreSQL: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := db.PingContext(ctx); err != nil {
 		t.Fatalf("ping PostgreSQL: %v", err)
 	}
@@ -51,7 +71,7 @@ func TestFoundationSchemaConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transaction: %v", err)
 	}
-	defer tx.Rollback() // Restore any schema that existed before this test.
+	defer func() { _ = tx.Rollback() }() // Restore any schema that existed before this test.
 
 	if _, err := tx.ExecContext(ctx, "DROP SCHEMA IF EXISTS unijord_metastore CASCADE"); err != nil {
 		t.Fatalf("drop test schema: %v", err)
@@ -120,6 +140,102 @@ func TestFoundationSchemaConstraints(t *testing.T) {
 		INSERT INTO unijord_metastore.shard_materializers(
 			namespace_hash, shard, materializer_epoch, materializer_owner, materialized_before)
 		VALUES ($1, 9, $2, $3, $2)`, namespaceHash, make([]byte, 8), []byte("owner-with-zero-epoch"))
+}
+
+func TestPublicationSchemaConstraints(t *testing.T) {
+	dsn := os.Getenv("UNIJORD_METASTORE_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("UNIJORD_POSTGRES_TEST_DSN")
+	}
+	if dsn == "" {
+		t.Skip("set UNIJORD_METASTORE_POSTGRES_TEST_DSN to run PostgreSQL schema tests")
+	}
+
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open PostgreSQL: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "DROP SCHEMA IF EXISTS unijord_metastore CASCADE"); err != nil {
+		t.Fatalf("drop test schema: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, foundationSQL); err != nil {
+		t.Fatalf("apply foundation migration: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, publicationSQL); err != nil {
+		t.Fatalf("apply publication migration: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, publicationSQL); err != nil {
+		t.Fatalf("reapply publication migration: %v", err)
+	}
+
+	namespaceHash := bytesOf(32, 0x21)
+	one := []byte{0, 0, 0, 0, 0, 0, 0, 1}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO unijord_metastore.namespaces(namespace_hash, namespace_key)
+		VALUES ($1, 'tenant/publication')`, namespaceHash); err != nil {
+		t.Fatalf("insert namespace: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO unijord_metastore.shards(namespace_hash, shard)
+		VALUES ($1, 7)`, namespaceHash); err != nil {
+		t.Fatalf("insert shard: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO unijord_metastore.timeline_heads(
+			key_hash, namespace_hash, timeline_key, shard, next_lsn,
+			last_timestamp_ms, state, revision)
+		VALUES ($1, $2, 'timeline-a', 7, $3, 10, 1, $3)`,
+		bytesOf(32, 0x31), namespaceHash, one); err != nil {
+		t.Fatalf("insert timeline head: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO unijord_metastore.chunks(
+			namespace_hash, shard, sequence, object_key, format_version,
+			writer_epoch, record_count, timeline_count, object_size,
+			min_timestamp_ms, max_timestamp_ms, object_sha256, publication_hash)
+		VALUES ($1, 7, $2, 'chunks/0.ujtc', 1, $3, 2, 1, $3,
+			10, 11, $4, $5)`, namespaceHash, make([]byte, 8), one,
+		bytesOf(32, 0x41), bytesOf(32, 0x51)); err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	assertSQLRejected(t, ctx, tx, `
+		INSERT INTO unijord_metastore.timeline_heads(
+			key_hash, namespace_hash, timeline_key, shard, next_lsn,
+			last_timestamp_ms, state, revision)
+		VALUES ($1, $2, 'zero-next', 7, $3, 10, 1, $4)`,
+		bytesOf(32, 0x32), namespaceHash, make([]byte, 8), one)
+	assertSQLRejected(t, ctx, tx, `
+		INSERT INTO unijord_metastore.timeline_heads(
+			key_hash, namespace_hash, timeline_key, shard, next_lsn,
+			last_timestamp_ms, state, revision)
+		VALUES ($1, $2, 'missing-shard', 8, $3, 10, 1, $3)`,
+		bytesOf(32, 0x33), namespaceHash, one)
+	assertSQLRejected(t, ctx, tx, `
+		INSERT INTO unijord_metastore.chunks(
+			namespace_hash, shard, sequence, object_key, format_version,
+			writer_epoch, record_count, timeline_count, object_size,
+			min_timestamp_ms, max_timestamp_ms, object_sha256, publication_hash)
+		VALUES ($1, 7, $2, 'chunks/bad.ujtc', 1, $3, 1, 2, $4,
+			11, 10, $5, $6)`, namespaceHash, one, make([]byte, 8), one,
+		bytesOf(32, 0x42), bytesOf(32, 0x52))
+
+	var versions int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT count(*) FROM unijord_metastore.schema_migrations WHERE version IN (1, 2)").Scan(&versions); err != nil {
+		t.Fatalf("read schema versions: %v", err)
+	}
+	if versions != 2 {
+		t.Fatalf("schema version rows = %d, want 2", versions)
+	}
 }
 
 func assertSQLRejected(t *testing.T, ctx context.Context, tx *sql.Tx, query string, args ...any) {
