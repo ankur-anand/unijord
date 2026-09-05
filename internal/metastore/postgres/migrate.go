@@ -27,6 +27,7 @@ var migrations = [...]migration{
 	{version: 1, sql: foundationSQL},
 	{version: 2, sql: publicationSQL},
 	{version: 3, sql: materializerOwnerSQL},
+	{version: 4, sql: producersSQL},
 }
 
 // Migrate applies every pending metastore migration under one transaction-level

@@ -42,6 +42,11 @@ type TimelineHead struct {
 	Revision        uint64
 }
 
+type shardIdentity struct {
+	namespaceHash [32]byte
+	shard         uint32
+}
+
 type HeadLookup struct {
 	Found bool
 	Head  TimelineHead
@@ -64,10 +69,6 @@ func SameWriterFence(a, b WriterFence) bool {
 	return a.Epoch == b.Epoch && SameShardKey(a.Shard, b.Shard) && a.Owner.Equal(b.Owner)
 }
 
-func CloneWriterFence(fence WriterFence) WriterFence {
-	return fence
-}
-
 // ValidateShardState checks the durable shard counters independently of any
 // publication. A backend must validate this state after loading it and before
 // using it to authorize a write.
@@ -84,6 +85,33 @@ func ValidateShardState(state ShardState) error {
 
 func SameShardKey(a, b ShardKey) bool {
 	return a.Shard == b.Shard && a.Namespace.Equal(b.Namespace)
+}
+
+func validateShardSet(shards []ShardKey, duplicateMessage string) error {
+	if len(shards) == 0 || len(shards) > MaxActivationItems {
+		return fmt.Errorf("%w: shards=%d", ErrInvalidRequest, len(shards))
+	}
+	seen := make(map[shardIdentity]Namespace, len(shards))
+	namespaces := make(map[[32]byte]Namespace, len(shards))
+	for i, shard := range shards {
+		if err := ValidateShardKey(shard); err != nil {
+			return fmt.Errorf("%w: shard=%d: %v", ErrInvalidRequest, i, err)
+		}
+		namespaceHash := shard.Namespace.Hash()
+		if prior, exists := namespaces[namespaceHash]; exists && !prior.Equal(shard.Namespace) {
+			return fmt.Errorf("%w: namespace digest collision", ErrCorrupt)
+		}
+		namespaces[namespaceHash] = shard.Namespace
+		identity := shardIdentity{namespaceHash: namespaceHash, shard: shard.Shard}
+		if prior, exists := seen[identity]; exists {
+			if prior.Equal(shard.Namespace) {
+				return fmt.Errorf("%w: %s", ErrInvalidRequest, duplicateMessage)
+			}
+			return fmt.Errorf("%w: namespace digest collision", ErrCorrupt)
+		}
+		seen[identity] = shard.Namespace
+	}
+	return nil
 }
 
 func ValidateTimelineHead(head TimelineHead) error {

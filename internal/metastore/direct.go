@@ -97,7 +97,9 @@ type DirectCommitter interface {
 }
 
 type DirectActivator interface {
-	// ClaimDirectShards returns leases aligned with request.Shards.
+	// ClaimDirectShards atomically claims the complete bounded shard set and
+	// returns leases aligned with request.Shards. Repeating a claim with the
+	// same owner is idempotent. A different owner advances each writer epoch.
 	ClaimDirectShards(context.Context, DirectShardClaimRequest) ([]DirectShardLease, error)
 }
 
@@ -206,28 +208,7 @@ func ValidateDirectShardClaim(request DirectShardClaimRequest) error {
 	if err := ValidateOwnerID(request.Owner); err != nil {
 		return err
 	}
-	if len(request.Shards) == 0 || len(request.Shards) > MaxActivationItems {
-		return fmt.Errorf("%w: shards=%d", ErrInvalidRequest, len(request.Shards))
-	}
-	type shardIdentity struct {
-		namespaceHash [32]byte
-		shard         uint32
-	}
-	seen := make(map[shardIdentity]Namespace, len(request.Shards))
-	for i, shard := range request.Shards {
-		if err := ValidateShardKey(shard); err != nil {
-			return fmt.Errorf("%w: shard=%d: %v", ErrInvalidRequest, i, err)
-		}
-		identity := shardIdentity{namespaceHash: shard.Namespace.Hash(), shard: shard.Shard}
-		if prior, exists := seen[identity]; exists {
-			if prior.Equal(shard.Namespace) {
-				return fmt.Errorf("%w: duplicate shard claim", ErrInvalidRequest)
-			}
-			return fmt.Errorf("%w: namespace digest collision", ErrCorrupt)
-		}
-		seen[identity] = shard.Namespace
-	}
-	return nil
+	return validateShardSet(request.Shards, "duplicate shard claim")
 }
 
 func ValidateDirectShardClaimResult(request DirectShardClaimRequest, leases []DirectShardLease) error {
