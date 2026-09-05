@@ -68,6 +68,9 @@ func ValidatePublishPack(request PublishPackRequest) error {
 	if err := ValidateShardKey(request.Shard); err != nil {
 		return err
 	}
+	if request.DeleteNotBeforeMS < 0 {
+		return fmt.Errorf("%w: negative delete-not-before timestamp", ErrInvalidRequest)
+	}
 	if err := packref.Validate(request.Pack); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
@@ -185,28 +188,7 @@ func ValidateMaterializerClaim(request MaterializerClaimRequest) error {
 	if err := ValidateOwnerID(request.Owner); err != nil {
 		return err
 	}
-	if len(request.Shards) == 0 || len(request.Shards) > MaxActivationItems {
-		return fmt.Errorf("%w: shards=%d", ErrInvalidRequest, len(request.Shards))
-	}
-	type shardIdentity struct {
-		namespaceHash [32]byte
-		shard         uint32
-	}
-	seen := make(map[shardIdentity]Namespace, len(request.Shards))
-	for i, shard := range request.Shards {
-		if err := ValidateShardKey(shard); err != nil {
-			return fmt.Errorf("%w: shard=%d: %v", ErrInvalidRequest, i, err)
-		}
-		identity := shardIdentity{namespaceHash: shard.Namespace.Hash(), shard: shard.Shard}
-		if prior, exists := seen[identity]; exists {
-			if prior.Equal(shard.Namespace) {
-				return fmt.Errorf("%w: duplicate materializer shard", ErrInvalidRequest)
-			}
-			return fmt.Errorf("%w: namespace digest collision", ErrCorrupt)
-		}
-		seen[identity] = shard.Namespace
-	}
-	return nil
+	return validateShardSet(request.Shards, "duplicate materializer shard")
 }
 
 func HashSourceChunkCoverage(source SourceChunkCoverage) [32]byte {

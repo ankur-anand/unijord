@@ -365,6 +365,17 @@ func TestPackPublicationRequiresExactSourceCoverage(t *testing.T) {
 	if err := metastore.ValidatePublishPack(overclaim); !errors.Is(err, metastore.ErrInvalidRequest) {
 		t.Fatalf("overclaimed range error = %v", err)
 	}
+
+	negativeDeadline := request
+	negativeDeadline.DeleteNotBeforeMS = -1
+	if err := metastore.ValidatePublishPack(negativeDeadline); !errors.Is(err, metastore.ErrInvalidRequest) {
+		t.Fatalf("negative delete deadline error = %v", err)
+	}
+	changedDeadline := request
+	changedDeadline.DeleteNotBeforeMS++
+	if metastore.HashPackPublication(changedDeadline) != metastore.HashPackPublication(request) {
+		t.Fatal("cleanup deadline changed canonical pack publication identity")
+	}
 }
 
 func TestActivationRequestsRejectDuplicateOwnershipDomains(t *testing.T) {
@@ -378,6 +389,10 @@ func TestActivationRequestsRejectDuplicateOwnershipDomains(t *testing.T) {
 	}
 	if err := metastore.ValidateDirectShardClaim(direct); !errors.Is(err, metastore.ErrInvalidRequest) {
 		t.Fatalf("duplicate direct shard error = %v", err)
+	}
+	materializer := metastore.MaterializerClaimRequest{Owner: direct.Owner, Shards: direct.Shards}
+	if err := metastore.ValidateMaterializerClaim(materializer); !errors.Is(err, metastore.ErrInvalidRequest) {
+		t.Fatalf("duplicate materializer shard error = %v", err)
 	}
 
 	kafka := metastore.KafkaActivationRequest{

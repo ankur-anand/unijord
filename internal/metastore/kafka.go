@@ -117,10 +117,6 @@ func ValidateKafkaPartitionMappings(partitionCount int32, mappings []KafkaPartit
 	}
 	first := mappings[0]
 	partitions := make(map[int32]struct{}, len(mappings))
-	type shardIdentity struct {
-		namespaceHash [32]byte
-		shard         uint32
-	}
 	shards := make(map[shardIdentity]Namespace, len(mappings))
 	for i, mapping := range mappings {
 		if err := ValidateKafkaPartitionMapping(mapping); err != nil {
@@ -256,10 +252,6 @@ func ValidateKafkaActivationResult(request KafkaActivationRequest, leases []Kafk
 	}
 	var mappingGeneration uint64
 	var namespace Namespace
-	type shardIdentity struct {
-		namespaceHash [32]byte
-		shard         uint32
-	}
 	shards := make(map[shardIdentity]Namespace, len(leases))
 	for i, lease := range leases {
 		if err := ValidateKafkaPartitionMapping(lease.Mapping); err != nil {
