@@ -1,0 +1,162 @@
+package isledb
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/ankur-anand/isledb/blobstore"
+	"github.com/ankur-anand/isledb/internal/manifest"
+	"github.com/segmentio/ksuid"
+)
+
+func runReplayFiltersStaleEntriesAfterNewFenceClaimMultiPhase(t *testing.T, store *blobstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	manifestStore := newManifestStore(store, nil)
+
+	writerOpts := DefaultWriterOptions()
+	writerOpts.Flush.Interval = 0
+	writerOpts.Memtable.TargetBytes = 512
+
+	compactorOpts := compactorOptions{
+		Trigger: compactionTriggerOptions{
+			L0SSTCount:          1,
+			BaseLevelBytes:      512 * 1024 * 1024,
+			LevelSizeMultiplier: 8,
+		},
+		Output: compactionOutputOptions{
+			BloomBitsPerKey: 10,
+			BlockBytes:      1024,
+			Compression:     "snappy",
+			TargetSSTBytes:  64 * 1024,
+		},
+	}
+
+	writer1, err := newWriter(ctx, store, manifestStore, writerOpts)
+	if err != nil {
+		t.Fatalf("newWriter(1): %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("key-%03d", i)
+		val := fmt.Sprintf("value-%03d", i)
+		if err := writer1.put(ctx, []byte(key), []byte(val)); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	if err := writer1.flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	_ = writer1.close(ctx)
+
+	compactor, err := newCompactor(ctx, store, manifestStore, compactorOpts)
+	if err != nil {
+		t.Fatalf("newCompactor: %v", err)
+	}
+	if err := runCompactorUntilIdle(ctx, compactor); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	_ = compactor.Close(ctx)
+
+	writer2, err := newWriter(ctx, store, manifestStore, writerOpts)
+	if err != nil {
+		t.Fatalf("newWriter(2): %v", err)
+	}
+	_ = writer2.close(ctx)
+
+	compactor2, err := newCompactor(ctx, store, manifestStore, compactorOpts)
+	if err != nil {
+		t.Fatalf("newCompactor(2): %v", err)
+	}
+	_ = compactor2.Close(ctx)
+
+	backend := manifest.NewBlobStoreBackend(store)
+	currentData, currentETag, err := backend.ReadCurrent(ctx)
+	if err != nil {
+		t.Fatalf("read current: %v", err)
+	}
+	current, err := manifest.DecodeCurrent(currentData)
+	if err != nil {
+		t.Fatalf("decode current: %v", err)
+	}
+	if current == nil {
+		t.Fatalf("expected current manifest")
+	}
+
+	nextSeq := current.NextSeq
+	staleWriterEntry := &manifest.ManifestLogEntry{
+		ID:        ksuid.New(),
+		Seq:       nextSeq,
+		Role:      manifest.FenceRoleWriter,
+		Epoch:     1,
+		Timestamp: time.Now().UTC(),
+		Op:        manifest.LogOpAddSSTable,
+		SSTable: &manifest.SSTMeta{
+			ID:        "stale.sst",
+			Epoch:     1,
+			Level:     0,
+			CreatedAt: time.Now().UTC(),
+		},
+	}
+	staleCompactorEntry := &manifest.ManifestLogEntry{
+		ID:        ksuid.New(),
+		Seq:       nextSeq + 1,
+		Role:      manifest.FenceRoleCompactor,
+		Epoch:     1,
+		Timestamp: time.Now().UTC(),
+		Op:        manifest.LogOpCompaction,
+		Compaction: &manifest.CompactionLogPayload{
+			RemoveSSTableIDs: []string{"stale-input"},
+			DestinationLevel: 1,
+			AddSSTables: []manifest.SSTMeta{{
+				ID:        "stale-compacted.sst",
+				Epoch:     1,
+				Level:     1,
+				CreatedAt: time.Now().UTC(),
+			}},
+		},
+	}
+
+	current.ActiveEntries = append(current.ActiveEntries, *staleWriterEntry, *staleCompactorEntry)
+	if current.LogSeqStart == current.NextSeq {
+		current.LogSeqStart = staleWriterEntry.Seq
+	}
+	current.NextSeq = nextSeq + 2
+	if current.NextEpoch <= staleWriterEntry.SSTable.Epoch {
+		current.NextEpoch = staleWriterEntry.SSTable.Epoch + 1
+	}
+	for _, sst := range staleCompactorEntry.Compaction.AddSSTables {
+		if current.NextEpoch <= sst.Epoch {
+			current.NextEpoch = sst.Epoch + 1
+		}
+	}
+	currentBytes, err := manifest.EncodeCurrent(current)
+	if err != nil {
+		t.Fatalf("encode current: %v", err)
+	}
+	if _, err := backend.WriteCurrentCAS(ctx, currentBytes, currentETag); err != nil {
+		t.Fatalf("write current: %v", err)
+	}
+
+	m, err := manifestStore.Replay(ctx)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if m.LookupSST("stale.sst") != nil {
+		t.Fatalf("stale.sst should be filtered after newer fence claim")
+	}
+	if m.LookupSST("stale-compacted.sst") != nil {
+		t.Fatalf("stale-compacted.sst should be filtered after newer fence claim")
+	}
+	if m.L0SSTCount() == 0 && len(m.Levels) == 0 {
+		t.Fatalf("expected manifest to contain data from earlier phases")
+	}
+}
+
+func TestReplay_FiltersStaleEntriesAfterNewFenceClaim_MultiPhase(t *testing.T) {
+	store := blobstore.NewMemory("fence-multiphase")
+	defer store.Close()
+	runReplayFiltersStaleEntriesAfterNewFenceClaimMultiPhase(t, store)
+}
