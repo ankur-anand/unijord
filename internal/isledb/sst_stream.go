@@ -1,0 +1,581 @@
+package isledb
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/ankur-anand/isledb/internal"
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/bloom"
+	"github.com/cockroachdb/pebble/v2/sstable"
+	"golang.org/x/sync/errgroup"
+)
+
+const (
+	compactionSSTIDPrefix = "compacted-"
+	compactionSSTIDSuffix = ".sst"
+	compactionSSTHashLen  = sha256.Size * 2
+	compactionSSTIndexLen = 4
+)
+
+func buildSSTIDWithTimestamp(epoch, seqLo, seqHi uint64, ts time.Time) string {
+	return fmt.Sprintf("%d-%d-%d-%d.sst", epoch, seqLo, seqHi, ts.UnixNano())
+}
+
+type sstStreamIdentity struct {
+	ID        string
+	Epoch     uint64
+	CreatedAt time.Time
+}
+
+func newSSTStreamIdentity(epoch, seqLo, seqHi uint64, createdAt time.Time) sstStreamIdentity {
+	createdAt = createdAt.UTC()
+	return sstStreamIdentity{
+		ID:        buildSSTIDWithTimestamp(epoch, seqLo, seqHi, createdAt),
+		Epoch:     epoch,
+		CreatedAt: createdAt,
+	}
+}
+
+func writerSSTEpoch(id string) (uint64, bool) {
+	if !strings.HasSuffix(id, compactionSSTIDSuffix) || isCompactionSSTID(id) {
+		return 0, false
+	}
+	parts := strings.Split(strings.TrimSuffix(id, compactionSSTIDSuffix), "-")
+	if len(parts) != 4 {
+		return 0, false
+	}
+	values := make([]uint64, len(parts))
+	for i := range parts {
+		value, err := strconv.ParseUint(parts[i], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		values[i] = value
+	}
+	if values[0] == 0 || values[1] > values[2] || values[3] == 0 {
+		return 0, false
+	}
+	return values[0], true
+}
+
+// sstStreamSetIdentity names every output of one deterministic multi-SST
+// build. OutputKey is derived by the compactor from its active fence, immutable
+// inputs, and byte-affecting output policy. Retries within that ownership reuse
+// the same names; a successor compactor receives another namespace.
+type sstStreamSetIdentity struct {
+	OutputKey string
+	Epoch     uint64
+	CreatedAt time.Time
+}
+
+func (identity sstStreamSetIdentity) output(index int) (sstStreamIdentity, error) {
+	if identity.OutputKey == "" || identity.Epoch == 0 || identity.CreatedAt.IsZero() || index <= 0 {
+		return sstStreamIdentity{}, errors.New("incomplete multi-SST stream identity")
+	}
+	return sstStreamIdentity{
+		ID: fmt.Sprintf("%s%s-%0*d%s", compactionSSTIDPrefix, identity.OutputKey,
+			compactionSSTIndexLen, index, compactionSSTIDSuffix),
+		Epoch:     identity.Epoch,
+		CreatedAt: identity.CreatedAt.UTC(),
+	}, nil
+}
+
+// isCompactionSSTID recognizes the exact immutable output grammar. Writer
+// flushes use a different grammar; newly written compaction outputs use this
+// one, while metadata-only moves retain their existing IDs. Orphan reclamation
+// uses the distinction, so the parser stays beside the formatter.
+func isCompactionSSTID(id string) bool {
+	if !strings.HasPrefix(id, compactionSSTIDPrefix) || !strings.HasSuffix(id, compactionSSTIDSuffix) {
+		return false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(id, compactionSSTIDPrefix), compactionSSTIDSuffix)
+	hash, index, ok := strings.Cut(body, "-")
+	if !ok || len(hash) != compactionSSTHashLen || len(index) != compactionSSTIndexLen {
+		return false
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(index)
+	return err == nil && n > 0
+}
+
+type streamSSTResult struct {
+	Meta sstMetadata
+}
+
+// writeSSTStreaming builds and uploads an SST concurrently using io.Pipe.
+// The producer goroutine writes SST data to a PipeWriter, while the consumer
+// goroutine reads from the PipeReader and uploads to the store.
+func writeSSTStreaming(
+	ctx context.Context,
+	it sstIterator,
+	opts sstWriterOptions,
+	identity sstStreamIdentity,
+	uploadFn func(ctx context.Context, sstID string, r io.Reader) error,
+) (result streamSSTResult, err error) {
+	defer func() {
+		err = errors.Join(err, it.Close())
+	}()
+	if identity.ID == "" || identity.Epoch == 0 || identity.CreatedAt.IsZero() {
+		return result, errors.New("incomplete SST stream identity")
+	}
+
+	pr, pw := io.Pipe()
+	writable := newHashingWritable(pw)
+	var hashes []uint64
+
+	wo := sstable.WriterOptions{
+		BlockSize:   opts.BlockSize,
+		Compression: compressionFromString(opts.Compression),
+	}
+	if opts.BloomBitsPerKey > 0 {
+		wo.FilterPolicy = bloom.FilterPolicy(opts.BloomBitsPerKey)
+	}
+
+	sst := sstable.NewWriter(writable, wo)
+	state := newSSTBuildState()
+
+	type producerResult struct {
+		state *sstBuildState
+		bloom bloomMetadata
+		err   error
+	}
+	producerDone := make(chan producerResult, 1)
+
+	var uploadErr atomic.Value
+	getUploadErr := func() error {
+		if v := uploadErr.Load(); v != nil {
+			return v.(error)
+		}
+		return nil
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Read from the pipe and upload to object storage.
+	g.Go(func() error {
+		err := uploadFn(gctx, identity.ID, pr)
+		if err != nil {
+			uploadErr.Store(err)
+			_ = pr.CloseWithError(err)
+			return fmt.Errorf("sst upload: %w", err)
+		}
+		_ = pr.Close()
+		return nil
+	})
+
+	g.Go(func() (err error) {
+		defer func() {
+			if closeErr := pw.Close(); err == nil {
+				err = closeErr
+			}
+		}()
+
+		for it.Next() {
+			if err := gctx.Err(); err != nil {
+				if ue := getUploadErr(); ue != nil {
+					err = fmt.Errorf("sst upload: %w", ue)
+				}
+				writable.Abort()
+				_ = sst.Close()
+				producerDone <- producerResult{err: err}
+				pw.CloseWithError(err)
+				return err
+			}
+
+			e := it.Entry()
+			k := append([]byte(nil), e.Key...)
+			if opts.BloomBitsPerKey > 0 {
+				hashes = append(hashes, bloomHashKey(k))
+			}
+
+			keyEntry := buildKeyEntry(e, k)
+			encodedValue := internal.EncodeKeyEntry(keyEntry)
+
+			if err := state.updateOrder(k, e.Seq); err != nil {
+				writable.Abort()
+				_ = sst.Close()
+				producerDone <- producerResult{err: err}
+				pw.CloseWithError(err)
+				return fmt.Errorf("sst producer: %w", err)
+			}
+
+			kind := pebble.InternalKeyKindSet
+			if e.Kind == internal.OpDelete {
+				kind = pebble.InternalKeyKindDelete
+			}
+
+			ikey := pebble.MakeInternalKey(k, pebble.SeqNum(e.Seq), kind)
+
+			if err := sst.Raw().Add(ikey, encodedValue, false); err != nil {
+				if ue := getUploadErr(); ue != nil && errors.Is(err, io.ErrClosedPipe) {
+					err = fmt.Errorf("sst upload: %w", ue)
+				}
+				writable.Abort()
+				_ = sst.Close()
+				producerDone <- producerResult{err: err}
+				pw.CloseWithError(err)
+				return fmt.Errorf("sst producer: %w", err)
+			}
+
+			state.updateBounds(k, e.Seq)
+		}
+
+		if err := it.Err(); err != nil {
+			writable.Abort()
+			_ = sst.Close()
+			producerDone <- producerResult{err: err}
+			pw.CloseWithError(err)
+			return fmt.Errorf("sst producer: %w", err)
+		}
+
+		if !state.found {
+			writable.Abort()
+			_ = sst.Close()
+			producerDone <- producerResult{err: errEmptyIterator}
+			pw.CloseWithError(errEmptyIterator)
+			return errEmptyIterator
+		}
+
+		if err := sst.Close(); err != nil {
+			if ue := getUploadErr(); ue != nil && errors.Is(err, io.ErrClosedPipe) {
+				err = fmt.Errorf("sst upload: %w", ue)
+			}
+			producerDone <- producerResult{err: err}
+			pw.CloseWithError(err)
+			return fmt.Errorf("sst producer: %w", err)
+		}
+
+		sstSize := writable.size
+		var bloomBytes []byte
+		var bloomK int
+		if opts.BloomBitsPerKey > 0 {
+			var err error
+			bloomBytes, bloomK, err = buildBloomBytes(hashes, opts.BloomBitsPerKey)
+			if err != nil {
+				producerDone <- producerResult{err: err}
+				pw.CloseWithError(err)
+				return fmt.Errorf("sst producer: %w", err)
+			}
+			if len(bloomBytes) > 0 {
+				if _, err := pw.Write(bloomBytes); err != nil {
+					if ue := getUploadErr(); ue != nil && errors.Is(err, io.ErrClosedPipe) {
+						err = fmt.Errorf("sst upload: %w", ue)
+					}
+					producerDone <- producerResult{err: err}
+					pw.CloseWithError(err)
+					return fmt.Errorf("sst producer: %w", err)
+				}
+				if err := appendBloomTrailer(pw, int64(len(bloomBytes))); err != nil {
+					if ue := getUploadErr(); ue != nil && errors.Is(err, io.ErrClosedPipe) {
+						err = fmt.Errorf("sst upload: %w", ue)
+					}
+					producerDone <- producerResult{err: err}
+					pw.CloseWithError(err)
+					return fmt.Errorf("sst producer: %w", err)
+				}
+			}
+		}
+
+		producerDone <- producerResult{
+			state: state,
+			bloom: bloomMetadata{
+				BitsPerKey: opts.BloomBitsPerKey,
+				K:          bloomK,
+				Offset:     sstSize,
+				Length:     int64(len(bloomBytes)),
+				Checksum:   bloomChecksum(bloomBytes),
+			},
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return result, err
+	}
+	pResult := <-producerDone
+	if pResult.err != nil {
+		return result, pResult.err
+	}
+
+	hashBytes := writable.sumBytes()
+	hashStr := hex.EncodeToString(hashBytes)
+
+	result.Meta = sstMetadata{
+		ID:        identity.ID,
+		Epoch:     identity.Epoch,
+		SeqLo:     pResult.state.seqLo,
+		SeqHi:     pResult.state.seqHi,
+		MinKey:    pResult.state.minKey,
+		MaxKey:    pResult.state.maxKey,
+		Size:      writable.size,
+		Checksum:  "sha256:" + hashStr,
+		Bloom:     pResult.bloom,
+		CreatedAt: identity.CreatedAt,
+	}
+
+	return result, nil
+}
+
+// writeMultipleSSTsStreaming builds and uploads multiple SSTs using streaming.
+// Each SST is streamed to the upload function as it's built, with new SSTs
+// started when the current one reaches targetSize.
+func writeMultipleSSTsStreaming(
+	ctx context.Context,
+	it sstIterator,
+	opts sstWriterOptions,
+	identity sstStreamSetIdentity,
+	targetSize int64,
+	uploadFn func(ctx context.Context, sstID string, r io.Reader) error,
+) (results []streamSSTResult, err error) {
+	defer func() {
+		err = errors.Join(err, it.Close())
+	}()
+
+	wo := sstable.WriterOptions{
+		BlockSize:   opts.BlockSize,
+		Compression: compressionFromString(opts.Compression),
+	}
+	if opts.BloomBitsPerKey > 0 {
+		wo.FilterPolicy = bloom.FilterPolicy(opts.BloomBitsPerKey)
+	}
+
+	var pr *io.PipeReader
+	var pw *io.PipeWriter
+	var writable *hashingWritable
+	var sst *sstable.Writer
+	var state *sstBuildState
+	var hashes []uint64
+	var sstID string
+	var uploadErr atomic.Value
+	var uploadDone chan struct{}
+	var uploadCancel context.CancelFunc
+	var started bool
+	var sstIndex int
+
+	getUploadErr := func() error {
+		if v := uploadErr.Load(); v != nil {
+			return v.(error)
+		}
+		return nil
+	}
+
+	startNewSST := func() error {
+		sstIndex++
+		outputIdentity, err := identity.output(sstIndex)
+		if err != nil {
+			return err
+		}
+		sstID = outputIdentity.ID
+
+		pr, pw = io.Pipe()
+		writable = newHashingWritable(pw)
+		sst = sstable.NewWriter(writable, wo)
+		state = newSSTBuildState()
+		hashes = nil
+		uploadErr = atomic.Value{}
+		uploadDone = make(chan struct{})
+		uploadCtx, cancelUpload := context.WithCancel(ctx)
+		uploadCancel = cancelUpload
+		started = true
+
+		go func(id string, reader *io.PipeReader, done chan struct{}, errVal *atomic.Value) {
+			defer close(done)
+			err := uploadFn(uploadCtx, id, reader)
+			if err != nil {
+				errVal.Store(err)
+			}
+			_ = reader.CloseWithError(err)
+		}(sstID, pr, uploadDone, &uploadErr)
+		return nil
+	}
+
+	finishCurrentSST := func() error {
+		if !started {
+			return nil
+		}
+
+		if err := sst.Close(); err != nil {
+			pw.CloseWithError(err)
+			uploadCancel()
+			<-uploadDone
+			return err
+		}
+
+		sstSize := writable.size
+		var bloomBytes []byte
+		var bloomK int
+		if opts.BloomBitsPerKey > 0 {
+			var err error
+			bloomBytes, bloomK, err = buildBloomBytes(hashes, opts.BloomBitsPerKey)
+			if err != nil {
+				pw.CloseWithError(err)
+				uploadCancel()
+				<-uploadDone
+				return err
+			}
+			if len(bloomBytes) > 0 {
+				if _, err := pw.Write(bloomBytes); err != nil {
+					pw.CloseWithError(err)
+					uploadCancel()
+					<-uploadDone
+					return err
+				}
+				if err := appendBloomTrailer(pw, int64(len(bloomBytes))); err != nil {
+					pw.CloseWithError(err)
+					uploadCancel()
+					<-uploadDone
+					return err
+				}
+			}
+		}
+
+		closeErr := pw.Close()
+
+		<-uploadDone
+		uploadCancel()
+		if ue := getUploadErr(); ue != nil {
+			return fmt.Errorf("sst upload: %w", ue)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close sst upload stream: %w", closeErr)
+		}
+
+		hashBytes := writable.sumBytes()
+		hashStr := hex.EncodeToString(hashBytes)
+
+		result := streamSSTResult{
+			Meta: sstMetadata{
+				ID:       sstID,
+				Epoch:    identity.Epoch,
+				SeqLo:    state.seqLo,
+				SeqHi:    state.seqHi,
+				MinKey:   state.minKey,
+				MaxKey:   state.maxKey,
+				Size:     sstSize,
+				Checksum: "sha256:" + hashStr,
+				Bloom: bloomMetadata{
+					BitsPerKey: opts.BloomBitsPerKey,
+					K:          bloomK,
+					Offset:     sstSize,
+					Length:     int64(len(bloomBytes)),
+					Checksum:   bloomChecksum(bloomBytes),
+				},
+				CreatedAt: identity.CreatedAt.UTC(),
+			},
+		}
+
+		results = append(results, result)
+		started = false
+		pr, pw, writable, sst, state, uploadDone, uploadCancel = nil, nil, nil, nil, nil, nil, nil
+		return nil
+	}
+
+	abortCurrentSST := func() {
+		if !started {
+			return
+		}
+
+		abortErr := errors.New("sst aborted")
+
+		if writable != nil {
+			writable.Abort()
+		}
+		if sst != nil {
+			_ = sst.Close()
+		}
+		if pw != nil {
+			pw.CloseWithError(abortErr)
+		}
+
+		if pr != nil {
+			pr.CloseWithError(abortErr)
+		}
+		if uploadCancel != nil {
+			uploadCancel()
+		}
+
+		if uploadDone != nil {
+			<-uploadDone
+		}
+		started = false
+		pr, pw, writable, sst, state, uploadDone, uploadCancel = nil, nil, nil, nil, nil, nil, nil
+	}
+
+	for it.Next() {
+		if err := ctx.Err(); err != nil {
+			abortCurrentSST()
+			return nil, err
+		}
+
+		if !started {
+			if err := startNewSST(); err != nil {
+				return nil, err
+			}
+		}
+
+		e := it.Entry()
+		k := append([]byte(nil), e.Key...)
+		if opts.BloomBitsPerKey > 0 {
+			hashes = append(hashes, bloomHashKey(k))
+		}
+
+		keyEntry := buildKeyEntry(e, k)
+		encodedValue := internal.EncodeKeyEntry(keyEntry)
+
+		if err := state.updateOrder(k, e.Seq); err != nil {
+			abortCurrentSST()
+			return nil, err
+		}
+
+		kind := pebble.InternalKeyKindSet
+		if e.Kind == internal.OpDelete {
+			kind = pebble.InternalKeyKindDelete
+		}
+
+		ikey := pebble.MakeInternalKey(k, pebble.SeqNum(e.Seq), kind)
+
+		if err := sst.Raw().Add(ikey, encodedValue, false); err != nil {
+			abortCurrentSST()
+			return nil, fmt.Errorf("sst producer: %w", err)
+		}
+
+		state.updateBounds(k, e.Seq)
+
+		if writable.size >= targetSize {
+			if err := finishCurrentSST(); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if err := it.Err(); err != nil {
+		abortCurrentSST()
+		return nil, fmt.Errorf("sst producer: %w", err)
+	}
+
+	if started && state.found {
+		if err := finishCurrentSST(); err != nil {
+			return nil, err
+		}
+	} else if started {
+		// IMP: Fix goroutine leak for exhausted iterator.
+		abortCurrentSST()
+	}
+
+	if len(results) == 0 {
+		return nil, errEmptyIterator
+	}
+
+	return results, nil
+}
