@@ -1,0 +1,459 @@
+{
+  "schema": "unijord-run-compatibility-manifest",
+  "schema_version": 1,
+  "run_format_version": 1,
+  "status": "frozen",
+  "sources": [
+    "../../../SPEC.md",
+    "../../../TIMELINE_FILTER_DESIGN.md",
+    "../../../IMPLEMENTATION_PLAN.md"
+  ],
+  "representation": {
+    "byte_strings": "lowercase hexadecimal without a prefix",
+    "sha256": "32-byte digest as 64 lowercase hexadecimal digits without a prefix",
+    "crc32c": "unsigned 32-bit Castagnoli result as 8 lowercase hexadecimal digits in stored big-endian order",
+    "integers": "unsigned decimal JSON numbers; all values in this manifest are exactly representable by IEEE-754 binary64",
+    "concatenation": "concatenate decoded byte strings, never their JSON text",
+    "text": "ASCII only where a vector explicitly says ascii",
+    "ordering": "unsigned bytewise lexicographic"
+  },
+  "contracts": {
+    "byte_order": "big-endian",
+    "hash_algorithm": "sha256",
+    "hash_algorithm_id": 1,
+    "crc_algorithm": "crc32c-castagnoli",
+    "crc_check_ascii_123456789": "e3069283",
+    "fixed_sizes": {
+      "preamble_bytes": 128,
+      "directory_header_bytes": 64,
+      "region_descriptor_bytes": 128,
+      "trailer_bytes": 160,
+      "timeline_filter_header_bytes": 64,
+      "timeline_filter_line_bytes": 64,
+      "timeline_filter_lines_per_page": 64,
+      "timeline_filter_page_data_bytes": 4096
+    },
+    "limits": {
+      "default_timeline_filter_bits_per_key": 10,
+      "max_timeline_filter_lines": 4294967295,
+      "min_region_count": 2,
+      "max_region_count": 8,
+      "max_timeline_bytes": 512,
+      "max_table_key_bytes": 65527,
+      "max_directory_bytes": 2097152,
+      "max_run_object_bytes": 5497558138880
+    },
+    "domain_separators": {
+      "publication_hash_ascii": "unijord/run/publication/v1",
+      "timeline_filter_key_ascii": "unijord/run/timeline-filter-key/v1",
+      "timeline_filter_page_ascii": "unijord/run/timeline-filter-page/v1"
+    }
+  },
+  "arithmetic_review": {
+    "fixed_width_sums": [
+      {
+        "name": "v1-preamble-width-sum",
+        "terms": [4, 2, 2, 4, 1, 1, 2, 4, 4, 8, 8, 8, 32, 16, 32],
+        "expected_sum": 128
+      },
+      {
+        "name": "v1-filter-header-width-sum",
+        "terms": [4, 2, 2, 1, 1, 2, 4, 8, 4, 4, 2, 2, 4, 16, 8],
+        "expected_sum": 64
+      },
+      {
+        "name": "v1-directory-header-width-sum",
+        "terms": [4, 2, 2, 2, 2, 4, 8, 8, 8, 8, 4, 4, 4, 4],
+        "expected_sum": 64
+      },
+      {
+        "name": "v1-region-descriptor-width-sum",
+        "terms": [2, 2, 2, 2, 8, 8, 8, 8, 8, 4, 4, 4, 4, 32, 32],
+        "expected_sum": 128
+      },
+      {
+        "name": "v1-trailer-width-sum",
+        "terms": [4, 2, 2, 4, 4, 8, 8, 8, 2, 1, 5, 32, 32, 16, 32],
+        "expected_sum": 160
+      }
+    ],
+    "bounded_cases": [
+      {
+        "name": "v1-minimum-filter-arithmetic",
+        "key_count": 1,
+        "bits_per_key": 1,
+        "requested_bits": 1,
+        "line_count": 1,
+        "page_count": 1,
+        "probes": 1,
+        "last_page_lines": 1,
+        "last_page_data_length": 64,
+        "filter_region_length": 132
+      },
+      {
+        "name": "v1-two-page-filter-arithmetic",
+        "key_count": 3277,
+        "bits_per_key": 10,
+        "requested_bits": 32770,
+        "line_count": 65,
+        "page_count": 2,
+        "probes": 6,
+        "last_page_lines": 1,
+        "last_page_data_length": 64,
+        "filter_region_length": 4232
+      },
+      {
+        "name": "v1-maximum-filter-arithmetic",
+        "line_count": 4294967295,
+        "page_count": 67108864,
+        "last_page_lines": 63,
+        "last_page_data_length": 4032,
+        "last_page_record_offset_relative": 275146338364,
+        "last_page_record_length": 4036,
+        "filter_region_length": 275146342400,
+        "expected_last_page_end_relative": 275146342400
+      },
+      {
+        "name": "v1-directory-arithmetic",
+        "minimum_entries_length": 256,
+        "maximum_entries_length": 1024,
+        "minimum_canonical_directory_length": 326,
+        "maximum_canonical_key_blob_length": 1049456,
+        "maximum_canonical_directory_length": 1050544,
+        "format_maximum_directory_length": 2097152
+      },
+      {
+        "name": "v1-structural-minimum-object-arithmetic",
+        "events_offset": 128,
+        "events_length": 1,
+        "heads_offset": 136,
+        "heads_length": 1,
+        "directory_offset": 144,
+        "directory_length": 326,
+        "trailer_length": 160,
+        "object_size": 630,
+        "semantic_note": "This is an outer structural lower bound, not the size of a valid Pebble-backed run."
+      }
+    ]
+  },
+  "logical_prerequisites": {
+    "classifier": {
+      "owner": "logical layer outside runfile",
+      "input": "exact complete table key bytes",
+      "output_fields": ["namespace", "shard", "timeline", "kind"],
+      "table_kind_ids": {
+        "events": 1,
+        "heads": 2
+      },
+      "runfile_input_boundary": "runfile receives already-separated sorted Events and Heads inputs plus the exact distinct timeline set"
+    },
+    "head_transition": "Every timeline head transition, including seal, has a corresponding durable event in the same logical publication.",
+    "equal_set_invariant": "distinct timelines in Events == distinct timelines in Heads == timeline-filter insertion set"
+  },
+  "pebble_reference_producer": {
+    "module": "github.com/cockroachdb/pebble/v2",
+    "version": "v2.1.4",
+    "module_sum": "h1:j9wPgMDbkErFdAKYFGhsoCcvzcjR+6zrJ4jhKtJ6bOk=",
+    "go_directive": "1.25.2",
+    "table_format": "TableFormatPebblev1",
+    "writer_options": {
+      "block_restart_interval": 16,
+      "block_size": 4096,
+      "block_size_threshold_percent": 90,
+      "size_class_aware_threshold_percent": 60,
+      "allocator_size_classes": [],
+      "comparer_name": "leveldb.BytewiseComparator",
+      "native_filter_policy_name": "rocksdb.BuiltinBloomFilter",
+      "native_filter_bits_per_key": 10,
+      "filter_type": "table",
+      "index_block_size": 4096,
+      "merger_name": "pebble.concatenate",
+      "checksum": "crc32c",
+      "block_property_collectors": [],
+      "num_deletions_threshold": 100,
+      "deletion_size_ratio_threshold": 0.5,
+      "is_strict_obsolete": false,
+      "writing_to_lowest_level": false,
+      "disable_value_blocks": false,
+      "later_table_format_fields": "zero or absent"
+    },
+    "sst_entry_generators": {
+      "events": {
+        "count": 128,
+        "index_range": "0 <= i < 128",
+        "user_key": "hex 45 || u32be(i)",
+        "sequence": "1000 + i",
+        "kind": "SET",
+        "value": "ascii(event-value/) || u32be(i) || repeat(u8(0x41 + (i mod 4)), 96)"
+      },
+      "heads": {
+        "count": 128,
+        "index_range": "0 <= i < 128",
+        "user_key": "hex 48 || u32be(i)",
+        "sequence": "1000 + i",
+        "kind": "SET",
+        "value": "ascii(head-value/) || u32be(i) || repeat(u8(0x61 + (i mod 4)), 48)"
+      }
+    },
+    "vectors": [
+      {
+        "name": "v1-sst-events-uncompressed",
+        "generator": "events",
+        "compression_profile": "NoCompression",
+        "expected_length": 16879,
+        "expected_sha256": "27ec75d8892bba232eba431171dbb0104d30ccc6cf1211a1c0a234f4878b482e"
+      },
+      {
+        "name": "v1-sst-heads-uncompressed",
+        "generator": "heads",
+        "compression_profile": "NoCompression",
+        "expected_length": 10590,
+        "expected_sha256": "6e50e53939416c0ee2b2726fe17e3ba01b97c431cc0ff418dfbfda4f662213b8"
+      },
+      {
+        "name": "v1-sst-events-snappy",
+        "generator": "events",
+        "compression_profile": "Snappy",
+        "expected_length": 3091,
+        "expected_sha256": "b6167918673d0cb16568fc1fa30e1ed8133615c9b04ecf4e165dcb12bffccf37"
+      },
+      {
+        "name": "v1-sst-heads-snappy",
+        "generator": "heads",
+        "compression_profile": "Snappy",
+        "expected_length": 2655,
+        "expected_sha256": "bb53e5ce30b8f70019c599e4fbfb33c30ba355c44f1297108c31df6d10a25c6a"
+      },
+      {
+        "name": "v1-sst-events-zstd",
+        "generator": "events",
+        "compression_profile": "ZSTD level 3",
+        "expected_length": 2037,
+        "expected_sha256": "b9a10eb8f281969dbd6a138740555d7e4fd7c010073f3e5a777c819e652cd59e"
+      },
+      {
+        "name": "v1-sst-heads-zstd",
+        "generator": "heads",
+        "compression_profile": "ZSTD level 3",
+        "expected_length": 1889,
+        "expected_sha256": "68bd9515717ff1d75bf314ffa37690d61ceb220cf0427761a3f20a860096ef67"
+      }
+    ]
+  },
+  "hash_vectors": [
+    {
+      "name": "v1-publication-hash-ascii",
+      "publication_id_hex": "666c7573682d30303031",
+      "hash_input_hex": "756e696a6f72642f72756e2f7075626c69636174696f6e2f7631000000000a666c7573682d30303031",
+      "expected_sha256": "804261ae060e49d7c95822844e4d3d6b209a38e1795e82b6e92b9cf3094e1430"
+    },
+    {
+      "name": "v1-publication-hash-opaque",
+      "publication_id_hex": "00ff80",
+      "hash_input_hex": "756e696a6f72642f72756e2f7075626c69636174696f6e2f7631000000000300ff80",
+      "expected_sha256": "93959f0b23699bb2715f032ff57b671ab57a43976bfbfd7c2cb0b65b04462184"
+    },
+    {
+      "name": "v1-timeline-token-ascii",
+      "timeline_hex": "6f726465722d38383931",
+      "hash_input_hex": "756e696a6f72642f72756e2f74696d656c696e652d66696c7465722d6b65792f763100000a6f726465722d38383931",
+      "expected_sha256": "aae10d2f992bf315876779aff1bd98cbca07fbd9fb5bd758d19ffcd116d967c9",
+      "expected_h1_hex": "aae10d2f",
+      "expected_h2_odd_hex": "992bf315",
+      "line_count": 65,
+      "probes": 6,
+      "expected_line": 43,
+      "expected_page": 0,
+      "expected_probe_bits": [306, 332, 237, 223, 281, 50]
+    },
+    {
+      "name": "v1-timeline-token-opaque",
+      "timeline_hex": "00ff1080",
+      "hash_input_hex": "756e696a6f72642f72756e2f74696d656c696e652d66696c7465722d6b65792f763100000400ff1080",
+      "expected_sha256": "9df72c4dacd808cf3115130ccdab5eeb62d638c0950b2b75099a29a770c842d2",
+      "expected_h1_hex": "9df72c4d",
+      "expected_h2_odd_hex": "acd808cf",
+      "line_count": 65,
+      "probes": 6,
+      "expected_line": 40,
+      "expected_page": 0,
+      "expected_probe_bits": [345, 341, 107, 0, 391, 315]
+    }
+  ],
+  "filter_vectors": [
+    {
+      "name": "v1-filter-65-lines-two-pages",
+      "timeline_generator": {
+        "count": 3277,
+        "index_range": "0 <= i <= 3276",
+        "timeline": "ascii(timeline-) || exactly four zero-padded ASCII decimal digits for i"
+      },
+      "header_fields": {
+        "magic_ascii": "UJTF",
+        "version": 1,
+        "header_bytes": 64,
+        "algorithm": 1,
+        "probes": 6,
+        "bits_per_key": 10,
+        "flags": 0,
+        "key_count": 3277,
+        "line_count": 65,
+        "page_count": 2,
+        "line_bytes": 64,
+        "lines_per_page": 64,
+        "page_data_bytes": 4096,
+        "run_id_hex": "00112233445566778899aabbccddeeff",
+        "reserved0_hex": "0000000000000000"
+      },
+      "expected_header_hex": "554a5446000100400106000a000000000000000000000ccd0000004100000002004000400000100000112233445566778899aabbccddeeff0000000000000000",
+      "expected_header_sha256": "430cb292b4ee96ddeb116c125b68b4df18795c0c9506b84857bd500207c98344",
+      "page_records": [
+        {
+          "page": 0,
+          "offset_relative_to_region": 64,
+          "data_length": 4096,
+          "record_length": 4100,
+          "expected_data_sha256": "18f5b4b2368799cd80750a5e2bd0afca6570ceb2201f53384b12f8f050f20f50",
+          "expected_crc_input_sha256": "73b4d8790cb52bd1598436251183a8610a34aa7188d669eadcb5141bb0cbb8ae",
+          "expected_crc32c": "77002441",
+          "expected_record_sha256": "f5802533cc4ae9a6f572ebda9d6aedff1faea20f75dd4f6c7d25338e225de3ad"
+        },
+        {
+          "page": 1,
+          "offset_relative_to_region": 4164,
+          "data_length": 64,
+          "record_length": 68,
+          "expected_data_sha256": "ab53cf6e65ade34e2ab98d58867729283beb52461a70f4315bd509bfb60ec908",
+          "expected_crc_input_sha256": "06b6d5c56d84150d256893d2c64ca2fd1d9f064016cbd6c725c44c464253d950",
+          "expected_crc32c": "eb40b6d1",
+          "expected_record_sha256": "b856b431b7653dbe546c34c6d28a67bbe4fe768b5337050088c29b46c6139ae7"
+        }
+      ],
+      "expected_region_length": 4232,
+      "expected_region_sha256": "3378bc0a95333c906deb9d0b028845f059b475b3d5a5a13f6cfc900a481903c6",
+      "queries": [
+        {
+          "name": "v1-filter-query-line-63",
+          "timeline_hex": "74696d656c696e652d30313137",
+          "expected_line": 63,
+          "expected_page": 0,
+          "expected_line_byte_offset": 4032,
+          "expected_probe_bits": [492, 385, 473, 29, 371, 56],
+          "expected_may_contain": true
+        },
+        {
+          "name": "v1-filter-query-line-64",
+          "timeline_hex": "74696d656c696e652d30323534",
+          "expected_line": 64,
+          "expected_page": 1,
+          "expected_line_byte_offset": 0,
+          "expected_probe_bits": [315, 57, 410, 317, 342, 211],
+          "expected_may_contain": true
+        },
+        {
+          "name": "v1-filter-query-first-inserted",
+          "timeline_hex": "74696d656c696e652d30303030",
+          "expected_line": 27,
+          "expected_page": 0,
+          "expected_probe_bits": [309, 396, 388, 295, 250, 190],
+          "expected_may_contain": true
+        },
+        {
+          "name": "v1-filter-query-last-inserted",
+          "timeline_hex": "74696d656c696e652d33323736",
+          "expected_line": 50,
+          "expected_page": 0,
+          "expected_probe_bits": [86, 77, 401, 429, 114, 234],
+          "expected_may_contain": true
+        },
+        {
+          "name": "v1-filter-query-absent-ascii",
+          "timeline_hex": "74696d656c696e652d39393939",
+          "expected_line": 56,
+          "expected_page": 0,
+          "expected_probe_bits": [9, 226, 402, 247, 346, 346],
+          "expected_may_contain": false
+        },
+        {
+          "name": "v1-filter-query-absent-opaque",
+          "timeline_hex": "00ff1080",
+          "expected_line": 40,
+          "expected_page": 0,
+          "expected_probe_bits": [345, 341, 107, 0, 391, 315],
+          "expected_may_contain": false
+        }
+      ]
+    }
+  ],
+  "outer_framing_vectors": [
+    {
+      "name": "v1-outer-framing-three-known-regions",
+      "validation_scope": "Outer framing only. The Events and Heads payload markers are intentionally not Pebble SSTs and a complete semantic verifier must reject them.",
+      "identity_inputs": {
+        "namespace_hash_hex": "3ff1ae2db4885a0ade2ecd7d6de3273370a6ac4d6e2f2f75643af361d1f288d7",
+        "namespace_hash_role": "opaque non-zero input supplied by the external namespace identity contract",
+        "run_id_hex": "00112233445566778899aabbccddeeff",
+        "publication_vector": "v1-publication-hash-ascii"
+      },
+      "preamble": {
+        "fields": {
+          "creator_role": 1,
+          "shard": 7,
+          "creator_epoch": 9,
+          "seq_lo": 10,
+          "seq_hi": 20
+        },
+        "expected_hex": "554a524e00010080000000000101000000000007000000000000000000000009000000000000000a00000000000000143ff1ae2db4885a0ade2ecd7d6de3273370a6ac4d6e2f2f75643af361d1f288d700112233445566778899aabbccddeeff804261ae060e49d7c95822844e4d3d6b209a38e1795e82b6e92b9cf3094e1430",
+        "expected_sha256": "b4ea7020b85d3753f4b2de5f0a92c6777a63f74b253e3017e0cd3107e94ae15e"
+      },
+      "regions": [
+        {
+          "kind": 1,
+          "name": "events-marker",
+          "offset": 128,
+          "data_ascii": "events-sst-vector",
+          "length": 17,
+          "expected_sha256": "d2bab13d618d732bf0dd762762199a7f7c69cca417ad0ebff125510afe1079eb",
+          "following_zero_padding_length": 7
+        },
+        {
+          "kind": 2,
+          "name": "heads-marker",
+          "offset": 152,
+          "data_ascii": "heads-sst-vector-v1",
+          "length": 19,
+          "expected_sha256": "26cc53635d5b9f64e9a0e79734c19ff85643edbcdd032ee0e616863b4d640390",
+          "following_zero_padding_length": 5
+        },
+        {
+          "kind": 3,
+          "name": "timeline-filter",
+          "offset": 176,
+          "source_vector": "v1-filter-65-lines-two-pages",
+          "length": 4232,
+          "expected_sha256": "3378bc0a95333c906deb9d0b028845f059b475b3d5a5a13f6cfc900a481903c6",
+          "following_zero_padding_length": 0
+        }
+      ],
+      "directory": {
+        "offset": 4408,
+        "length": 459,
+        "key_blob_hex": "00ff10100010ff200020ff",
+        "expected_hex": "554a52440001004000030080000000000000000000000040000000000000018000000000000001c0000000000000000b000000000000000100000001000000020001000100010000000000000000008000000000000000110000000000000001000000000000000a000000000000000c00000003000000020000000500000002d2bab13d618d732bf0dd762762199a7f7c69cca417ad0ebff125510afe1079eb00000000000000000000000000000000000000000000000000000000000000000002000100010000000000000000009800000000000000130000000000000001000000000000000c000000000000000c0000000700000002000000090000000226cc53635d5b9f64e9a0e79734c19ff85643edbcdd032ee0e616863b4d6403900000000000000000000000000000000000000000000000000000000000000000000300000001000000000000000000b000000000000010880000000000000ccd00000000000000000000000000000000000000000000000000000000000000003378bc0a95333c906deb9d0b028845f059b475b3d5a5a13f6cfc900a481903c6000000000000000000000000000000000000000000000000000000000000000000ff10100010ff200020ff",
+        "expected_sha256": "7fdea0644c9c595bb05227ebeed0c4a3ae90987a975603627ca6cb3a052a43c2"
+      },
+      "payload": {
+        "coverage": "preamble || regions and zero padding in physical order || directory",
+        "length": 4867,
+        "expected_sha256": "d057850600e42805b1bde54126a0713adfa013a2fa849ef8d4f278cbaea3f8ce"
+      },
+      "trailer": {
+        "expected_hex": "554a5254000100a000000000d8765133000000000000113800000000000001cb00000000000013a300030100000000007fdea0644c9c595bb05227ebeed0c4a3ae90987a975603627ca6cb3a052a43c2d057850600e42805b1bde54126a0713adfa013a2fa849ef8d4f278cbaea3f8ce00112233445566778899aabbccddeeff0000000000000000000000000000000000000000000000000000000000000000",
+        "expected_crc32c": "d8765133",
+        "expected_sha256": "2bfaac3c1c4a32161487af45a0624ede2e97fba716adb6d7e27f9997533ceb62"
+      },
+      "object_size": 5027,
+      "expected_object_sha256": "4b71488e0aa7244d83b825e41e3559dbe93ad2bc6b7c35dc2fefd7d702232111"
+    }
+  ]
+}
