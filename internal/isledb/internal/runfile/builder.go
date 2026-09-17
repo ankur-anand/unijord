@@ -64,7 +64,7 @@ type BuildOptions struct {
 	Table  TableOptions
 	Filter FilterOptions
 
-	// ScratchDir optionally selects bounded scratch storage for the two SSTs.
+	// ScratchDir optionally selects bounded scratch storage for both SSTs and UJTF.
 	// The empty value uses the operating system's temporary directory.
 	ScratchDir string
 }
@@ -98,43 +98,70 @@ type builtFilter struct {
 	hash   [SHA256Bytes]byte
 }
 
-func (t *builtTable) cleanup() {
+func (t *builtTable) cleanup() error {
 	if t == nil {
-		return
+		return nil
 	}
-	if t.file != nil {
-		_ = t.file.Close()
-	}
-	if t.path != "" {
-		_ = os.Remove(t.path)
-	}
+	return closeScratch(t.file, t.path)
 }
 
-func (f *builtFilter) cleanup() {
+func (f *builtFilter) cleanup() error {
 	if f == nil {
-		return
+		return nil
 	}
-	if f.file != nil {
-		_ = f.file.Close()
-	}
-	if f.path != "" {
-		_ = os.Remove(f.path)
-	}
+	return closeScratch(f.file, f.path)
 }
 
-// Build writes a complete version-1 run to dst. It constructs each SST in
-// bounded scratch storage first, so semantic mismatches are rejected before
-// any run bytes are exposed to dst and no complete encoded region is retained
-// in heap memory.
-func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInput) (Ref, error) {
-	if ctx == nil {
-		return Ref{}, invalidRunf("nil context")
+// Build is the temporary one-shot wrapper around Prepare and WriteTo. On any
+// failure, including cancellation or cleanup failure, it returns a zero Ref.
+func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInput) (ref Ref, err error) {
+	prepared, err := Prepare(ctx, opts, input)
+	if err != nil {
+		return Ref{}, err
 	}
-	if dst == nil {
-		return Ref{}, invalidRunf("nil destination")
+	defer func() {
+		err = errors.Join(err, prepared.Close())
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			ref = Ref{}
+		}
+	}()
+	if err := prepared.WriteTo(ctx, dst); err != nil {
+		return Ref{}, err
+	}
+	return prepared.Ref(), nil
+}
+
+// Prepare consumes and closes all supplied io.Closer iterators, including on
+// validation failure. The iterators must be independently owned. It freezes
+// version-1 framing and hashes over three bounded scratch regions, retaining
+// neither the input nor the temporary timeline/key validation collections.
+// A successful result owns its scratch until Close; failure returns nil.
+func Prepare(ctx context.Context, opts BuildOptions, input BuildInput) (prepared PreparedRun, err error) {
+	defer func() {
+		for _, iterator := range []any{input.Events, input.Heads, input.Timelines} {
+			if closer, ok := iterator.(io.Closer); ok {
+				err = errors.Join(err, closer.Close())
+			}
+		}
+		if err == nil && ctx != nil {
+			err = ctx.Err()
+		}
+		if err != nil && prepared != nil {
+			err = errors.Join(err, prepared.Close())
+			prepared = nil
+		}
+	}()
+	if ctx == nil {
+		return nil, invalidRunf("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if input.Events == nil || input.Heads == nil || input.Timelines == nil {
-		return Ref{}, invalidRunf("nil build iterator")
+		return nil, invalidRunf("nil build iterator")
 	}
 	preamble := Preamble{
 		CreatorRole:     opts.CreatorRole,
@@ -147,57 +174,65 @@ func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInp
 		PublicationHash: opts.PublicationHash,
 	}
 	if err := preamble.Validate(); err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 	writerOptions, err := tableWriterOptions(opts.Table)
 	if err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 
 	events, err := buildTable(ctx, input.Events, writerOptions, opts, "events")
 	if err != nil {
-		return Ref{}, fmt.Errorf("runfile: build Events SST: %w", err)
+		return nil, fmt.Errorf("runfile: build Events SST: %w", err)
 	}
-	defer events.cleanup()
-	heads, err := buildTable(ctx, input.Heads, writerOptions, opts, "heads")
+	p := &preparedRun{}
+	p.regions[0] = preparedRegion{file: events.file, path: events.path}
+	defer func() {
+		if prepared == nil {
+			err = errors.Join(err, p.Close())
+		}
+	}()
+	// Admit scratch before writing it: all three regions together stay within
+	// the format object cap, even when a later validation rejects the run.
+	heads, err := buildTableWithin(ctx, input.Heads, writerOptions, opts, "heads", MaxRunObjectBytes-events.length)
 	if err != nil {
-		return Ref{}, fmt.Errorf("runfile: build Heads SST: %w", err)
+		return nil, fmt.Errorf("runfile: build Heads SST: %w", err)
 	}
-	defer heads.cleanup()
+	p.regions[1] = preparedRegion{file: heads.file, path: heads.path}
 
 	timelineSet, timelines, err := collectTimelines(ctx, input.Timelines)
 	if err != nil {
-		return Ref{}, fmt.Errorf("runfile: collect timelines: %w", err)
+		return nil, fmt.Errorf("runfile: collect timelines: %w", err)
 	}
 	if !sameStringSet(events.timelines, heads.timelines) {
-		return Ref{}, invalidRunf("Events and Heads timeline sets differ")
+		return nil, invalidRunf("Events and Heads timeline sets differ")
 	}
 	if !sameStringSet(events.timelines, timelineSet) {
-		return Ref{}, invalidRunf("table and filter timeline sets differ")
+		return nil, invalidRunf("table and filter timeline sets differ")
 	}
 	slices.SortFunc(timelines, bytes.Compare)
 
-	filter, err := buildFilterScratch(ctx, opts.RunID, timelines, opts.Filter, opts.ScratchDir)
+	filter, err := buildFilterScratchWithin(ctx, opts.RunID, timelines, opts.Filter, opts.ScratchDir, MaxRunObjectBytes-events.length-heads.length)
 	if err != nil {
-		return Ref{}, fmt.Errorf("runfile: build timeline filter: %w", err)
+		return nil, fmt.Errorf("runfile: build timeline filter: %w", err)
 	}
-	defer filter.cleanup()
+	p.regions[2] = preparedRegion{file: filter.file, path: filter.path}
 
 	preambleBytes, err := MarshalPreamble(preamble)
 	if err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 
 	offset := uint64(PreambleBytes)
 	eventsRegion := tableRegion(RegionKindEventsSST, offset, events)
 	offset, err = alignedEnd(eventsRegion.Offset, eventsRegion.Length)
 	if err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 	headsRegion := tableRegion(RegionKindHeadsSST, offset, heads)
 	offset, err = alignedEnd(headsRegion.Offset, headsRegion.Length)
 	if err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 	filterRegion := RegionDescriptor{
 		Kind:        RegionKindTimelineFilter,
@@ -210,7 +245,7 @@ func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInp
 	}
 	directoryOffset, err := alignedEnd(filterRegion.Offset, filterRegion.Length)
 	if err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 
 	directory := Directory{
@@ -221,42 +256,29 @@ func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInp
 	}
 	directoryBytes, err := MarshalDirectory(directory)
 	if err != nil {
-		return Ref{}, err
+		return nil, err
 	}
 	directoryHash := sha256.Sum256(directoryBytes)
 	directoryEnd, ok := checkedAdd(directoryOffset, uint64(len(directoryBytes)))
 	if !ok {
-		return Ref{}, runTooLargef("directory end overflows")
+		return nil, runTooLargef("directory end overflows")
 	}
 	objectSize, ok := checkedAdd(directoryEnd, TrailerBytes)
 	if !ok || objectSize > MaxRunObjectBytes {
-		return Ref{}, runTooLargef("run object size exceeds %d", MaxRunObjectBytes)
+		return nil, runTooLargef("run object size exceeds %d", MaxRunObjectBytes)
 	}
 
-	payload := newPayloadWriter(dst)
-	if err := payload.write(ctx, preambleBytes); err != nil {
-		return Ref{}, err
+	p.preamble, p.directory = preambleBytes, directoryBytes
+	p.directoryOffset = directoryOffset
+	for i, region := range directory.Regions {
+		p.regions[i].offset, p.regions[i].length = region.Offset, region.Length
 	}
-	if err := streamRegion(ctx, payload, events.file, eventsRegion); err != nil {
-		return Ref{}, fmt.Errorf("runfile: write Events SST: %w", err)
-	}
-	if err := streamRegion(ctx, payload, heads.file, headsRegion); err != nil {
-		return Ref{}, fmt.Errorf("runfile: write Heads SST: %w", err)
-	}
-	if err := streamRegion(ctx, payload, filter.file, filterRegion); err != nil {
-		return Ref{}, fmt.Errorf("runfile: write timeline filter: %w", err)
-	}
-	if err := writePaddingTo(ctx, payload, directoryOffset); err != nil {
-		return Ref{}, err
-	}
-	if err := payload.write(ctx, directoryBytes); err != nil {
-		return Ref{}, fmt.Errorf("runfile: write directory: %w", err)
-	}
-	if payload.size != directoryEnd {
-		return Ref{}, invalidRunf("payload size %d, want %d", payload.size, directoryEnd)
+	hasher := sha256.New()
+	if err := p.writePayload(ctx, hasher); err != nil {
+		return nil, fmt.Errorf("runfile: prepare payload hash: %w", err)
 	}
 	var payloadHash [SHA256Bytes]byte
-	copy(payloadHash[:], payload.hash.Sum(nil))
+	copy(payloadHash[:], hasher.Sum(nil))
 	trailer := Trailer{
 		DirectoryOffset: directoryOffset,
 		DirectoryLength: uint64(len(directoryBytes)),
@@ -268,17 +290,15 @@ func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInp
 	}
 	trailerBytes, err := MarshalTrailer(trailer)
 	if err != nil {
-		return Ref{}, err
-	}
-	if err := writeContext(ctx, dst, trailerBytes); err != nil {
-		return Ref{}, fmt.Errorf("runfile: write trailer: %w", err)
+		return nil, err
 	}
 
-	ref := refFromParts(preamble, directory, trailer, &filter.header)
-	if err := ref.Validate(); err != nil {
-		return Ref{}, err
+	p.trailer = trailerBytes
+	p.ref = refFromParts(preamble, directory, trailer, &filter.header)
+	if err := p.ref.Validate(); err != nil {
+		return nil, err
 	}
-	return ref, nil
+	return p, nil
 }
 
 func tableWriterOptions(options TableOptions) (sstable.WriterOptions, error) {
@@ -322,7 +342,11 @@ func tableWriterOptions(options TableOptions) (sstable.WriterOptions, error) {
 	return writerOptions, nil
 }
 
-func buildTable(ctx context.Context, iterator EntryIterator, writerOptions sstable.WriterOptions, opts BuildOptions, name string) (_ *builtTable, err error) {
+func buildTable(ctx context.Context, iterator EntryIterator, writerOptions sstable.WriterOptions, opts BuildOptions, name string) (*builtTable, error) {
+	return buildTableWithin(ctx, iterator, writerOptions, opts, name, MaxRunObjectBytes)
+}
+
+func buildTableWithin(ctx context.Context, iterator EntryIterator, writerOptions sstable.WriterOptions, opts BuildOptions, name string, scratchLimit uint64) (_ *builtTable, err error) {
 	file, err := os.CreateTemp(opts.ScratchDir, "unijord-run-"+name+"-*.sst")
 	if err != nil {
 		return nil, err
@@ -330,15 +354,13 @@ func buildTable(ctx context.Context, iterator EntryIterator, writerOptions sstab
 	result := &builtTable{file: file, path: file.Name(), seqLo: ^uint64(0), timelines: make(map[string]struct{})}
 	succeeded := false
 	defer func() {
-		if closer, ok := iterator.(io.Closer); ok {
-			err = errors.Join(err, closer.Close())
-		}
 		if !succeeded || err != nil {
-			result.cleanup()
+			err = errors.Join(err, result.cleanup())
 		}
 	}()
 
 	writable := newScratchWritable(file)
+	writable.limit = min(scratchLimit, MaxRunObjectBytes)
 	writer := sstable.NewWriter(writable, writerOptions)
 	abort := func(buildErr error) (*builtTable, error) {
 		writable.Abort()
@@ -417,11 +439,6 @@ func buildTable(ctx context.Context, iterator EntryIterator, writerOptions sstab
 
 func collectTimelines(ctx context.Context, iterator TimelineIterator) (_ map[string]struct{}, timelines [][]byte, err error) {
 	set := make(map[string]struct{})
-	defer func() {
-		if closer, ok := iterator.(io.Closer); ok {
-			err = errors.Join(err, closer.Close())
-		}
-	}()
 	for iterator.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -458,7 +475,11 @@ func buildFilterScratch(
 	timelines [][]byte,
 	options FilterOptions,
 	scratchDir string,
-) (_ *builtFilter, err error) {
+) (*builtFilter, error) {
+	return buildFilterScratchWithin(ctx, runID, timelines, options, scratchDir, MaxRunObjectBytes)
+}
+
+func buildFilterScratchWithin(ctx context.Context, runID [RunIDBytes]byte, timelines [][]byte, options FilterOptions, scratchDir string, scratchLimit uint64) (_ *builtFilter, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -474,6 +495,9 @@ func buildFilterScratch(
 	if err != nil {
 		return nil, err
 	}
+	if length > scratchLimit {
+		return nil, runTooLargef("filter exceeds remaining scratch budget %d", scratchLimit)
+	}
 
 	file, err := os.CreateTemp(scratchDir, "unijord-run-filter-*.ujtf")
 	if err != nil {
@@ -483,7 +507,7 @@ func buildFilterScratch(
 	succeeded := false
 	defer func() {
 		if !succeeded || err != nil {
-			result.cleanup()
+			err = errors.Join(err, result.cleanup())
 		}
 	}()
 
@@ -656,6 +680,7 @@ type scratchWritable struct {
 	file     *os.File
 	hash     hash.Hash
 	size     uint64
+	limit    uint64
 	finished bool
 	aborted  bool
 }
@@ -663,15 +688,15 @@ type scratchWritable struct {
 var _ objstorage.Writable = (*scratchWritable)(nil)
 
 func newScratchWritable(file *os.File) *scratchWritable {
-	return &scratchWritable{file: file, hash: sha256.New()}
+	return &scratchWritable{file: file, hash: sha256.New(), limit: MaxRunObjectBytes}
 }
 
 func (w *scratchWritable) Write(data []byte) error {
 	if w.finished || w.aborted {
 		return errors.New("runfile: write to closed scratch SST")
 	}
-	if uint64(len(data)) > MaxRunObjectBytes-w.size {
-		return runTooLargef("scratch SST exceeds maximum run object size %d", MaxRunObjectBytes)
+	if w.size > w.limit || uint64(len(data)) > w.limit-w.size {
+		return runTooLargef("scratch SST exceeds remaining budget %d", w.limit)
 	}
 	n, err := w.file.Write(data)
 	if n > 0 {
@@ -698,19 +723,18 @@ func (w *scratchWritable) Abort() {
 
 type payloadWriter struct {
 	dst  io.Writer
-	hash hash.Hash
 	size uint64
 }
 
 func newPayloadWriter(dst io.Writer) *payloadWriter {
-	return &payloadWriter{dst: dst, hash: sha256.New()}
+	return &payloadWriter{dst: dst}
 }
 
 func (w *payloadWriter) write(ctx context.Context, data []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := writeContext(ctx, io.MultiWriter(w.dst, w.hash), data); err != nil {
+	if err := writeContext(ctx, w.dst, data); err != nil {
 		return err
 	}
 	w.size += uint64(len(data))
@@ -726,17 +750,18 @@ func writeContext(ctx context.Context, dst io.Writer, data []byte) error {
 		if n < 0 || n > len(data) {
 			return io.ErrShortWrite
 		}
+		short := n != len(data)
 		if n > 0 {
 			data = data[n:]
 		}
 		if err != nil {
 			return err
 		}
-		if n == 0 {
+		if short {
 			return io.ErrShortWrite
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 func writePaddingTo(ctx context.Context, dst *payloadWriter, target uint64) error {
@@ -755,23 +780,22 @@ func writePaddingTo(ctx context.Context, dst *payloadWriter, target uint64) erro
 	return nil
 }
 
-func streamRegion(ctx context.Context, dst *payloadWriter, file *os.File, region RegionDescriptor) error {
-	if err := writePaddingTo(ctx, dst, region.Offset); err != nil {
+func streamRegion(ctx context.Context, dst *payloadWriter, region preparedRegion, buffer []byte) error {
+	if err := writePaddingTo(ctx, dst, region.offset); err != nil {
 		return err
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	buffer := make([]byte, 128<<10)
-	remaining := region.Length
+	remaining := region.length
 	for remaining > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		length := min(remaining, uint64(len(buffer)))
-		n, err := io.ReadFull(file, buffer[:length])
+		n, err := region.file.ReadAt(buffer[:length], int64(region.length-remaining))
 		if err != nil {
 			return err
+		}
+		if uint64(n) != length {
+			return io.ErrUnexpectedEOF
 		}
 		if err := dst.write(ctx, buffer[:n]); err != nil {
 			return err

@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2/sstable"
@@ -543,4 +546,576 @@ func (s *failRepeatedRegionSource) Stat(context.Context, string) (ObjectIdentity
 
 func (s *failRepeatedRegionSource) OpenRange(context.Context, string, ObjectIdentity, uint64, uint64) (io.ReadCloser, error) {
 	return nil, s.err
+}
+
+type preparedTestWriter func([]byte) (int, error)
+
+func (f preparedTestWriter) Write(b []byte) (int, error) { return f(b) }
+
+func requireEmptyScratch(t testing.TB, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("scratch not empty: %v, %v", entries, err)
+	}
+}
+
+func requirePreparedClosed(t *testing.T, p PreparedRun, regions [3]preparedRegion, dir string) {
+	t.Helper()
+	for range 3 {
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.WriteTo(context.Background(), io.Discard); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("write after close: %v", err)
+	}
+	if !sameRef(p.Ref(), Ref{}) {
+		t.Fatal("reference after close")
+	}
+	for _, r := range regions {
+		if _, err := r.file.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("descriptor not closed: %v", err)
+		}
+	}
+	requireEmptyScratch(t, dir)
+}
+
+func TestPreparedCompatibilityAndOwnership(t *testing.T) {
+	for _, c := range corpusCases {
+		t.Run(c.Name, func(t *testing.T) {
+			opts, input, _ := corpusFixture(t, c)
+			opts.ScratchDir = t.TempDir()
+			p, err := Prepare(context.Background(), opts, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = p.Close() })
+			ref := p.Ref()
+			if err := ref.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			// All input storage can be reused immediately after Prepare.
+			for _, iterator := range []*sliceEntryIterator{input.Events.(*sliceEntryIterator), input.Heads.(*sliceEntryIterator)} {
+				for _, entry := range iterator.entries {
+					clear(entry.Key)
+					clear(entry.Value)
+					clear(entry.Timeline)
+				}
+			}
+			changed := p.Ref()
+			clear(changed.MinTimeline)
+			clear(changed.MaxTimeline)
+			clear(changed.Events.MinKey)
+			clear(changed.Events.MaxKey)
+			clear(changed.Heads.MinKey)
+			clear(changed.Heads.MaxKey)
+			changed.TimelineFilter.Header.KeyCount = 0
+			frozen, err := os.ReadFile(filepath.Join(compatDir, c.Name+".run"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				var dst bytes.Buffer
+				if err := p.WriteTo(context.Background(), &dst); err != nil {
+					t.Fatal(err)
+				}
+				if !sameRef(ref, p.Ref()) {
+					t.Fatal("reference changed")
+				}
+				built := dst.Bytes()
+				if c.Padding {
+					// This E00 reader fixture deliberately has noncanonical extra
+					// padding; apply its unchanged fixture transform, as in E00.
+					built, _ = paddedCorpus(t, built, ref)
+				}
+				if !bytes.Equal(built, frozen) {
+					t.Fatal("E00 complete-run byte drift")
+				}
+			}
+			requirePreparedClosed(t, p, p.(*preparedRun).regions, opts.ScratchDir)
+		})
+	}
+}
+
+// Exercise valid padding before every region (including after the preamble).
+// Canonical Prepare uses minimal padding; E00 also pins this larger layout.
+func padPreparedForTest(t *testing.T, p *preparedRun) {
+	t.Helper()
+	var dst bytes.Buffer
+	if err := p.WriteTo(context.Background(), &dst); err != nil {
+		t.Fatal(err)
+	}
+	object, ref := paddedCorpus(t, dst.Bytes(), p.Ref())
+	p.ref = ref
+	p.directoryOffset = ref.DirectoryOffset
+	p.directory = bytes.Clone(object[ref.DirectoryOffset : ref.DirectoryOffset+ref.DirectoryLength])
+	p.trailer = bytes.Clone(object[len(object)-TrailerBytes:])
+	for i, r := range []RegionDescriptor{ref.Events, ref.Heads, ref.TimelineFilter.Region} {
+		p.regions[i].offset = r.Offset
+	}
+}
+
+func TestPreparedWriteFailuresAndCancellationAtEveryBoundary(t *testing.T) {
+	opts, input := validBuildFixture(TableCompressionNone)
+	// Include multiple reads inside Events, as well as every region boundary.
+	input.Events.(*sliceEntryIterator).entries[0].Value = bytes.Repeat([]byte{0xa5}, 300<<10)
+	opts.ScratchDir = t.TempDir()
+	prepared, err := Prepare(context.Background(), opts, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := prepared.(*preparedRun)
+	t.Cleanup(func() { _ = p.Close() })
+	padPreparedForTest(t, p)
+	var want bytes.Buffer
+	var chunks []int
+	if err := p.WriteTo(context.Background(), preparedTestWriter(func(b []byte) (int, error) {
+		chunks = append(chunks, len(b))
+		return want.Write(b)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	// Preamble, >=4 padding writes, three regions, directory, trailer.
+	if len(chunks) < 10 {
+		t.Fatalf("incomplete boundary coverage: %v", chunks)
+	}
+	ref := p.Ref()
+	failure := errors.New("injected destination failure")
+	for boundary := range chunks {
+		for _, mode := range []string{"cancel", "error", "short", "zero", "negative", "overcount"} {
+			t.Run(fmt.Sprintf("chunk=%d/%s", boundary, mode), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				call := 0
+				wantErr := io.ErrShortWrite
+				if mode == "cancel" {
+					wantErr = context.Canceled
+				} else if mode == "error" {
+					wantErr = failure
+				}
+				err := p.WriteTo(ctx, preparedTestWriter(func(b []byte) (int, error) {
+					current := call
+					call++
+					if current != boundary {
+						return len(b), nil
+					}
+					switch mode {
+					case "cancel":
+						cancel()
+						return len(b), nil
+					case "error":
+						return len(b) / 2, failure
+					case "short":
+						return len(b) - 1, nil
+					case "zero":
+						return 0, nil
+					case "negative":
+						return -1, nil
+					default:
+						return len(b) + 1, nil
+					}
+				}))
+				if !errors.Is(err, wantErr) || call != boundary+1 {
+					t.Fatalf("failure=%v calls=%d, want %v/%d", err, call, wantErr, boundary+1)
+				}
+				var retry bytes.Buffer
+				if err := p.WriteTo(context.Background(), &retry); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(retry.Bytes(), want.Bytes()) || !sameRef(ref, p.Ref()) {
+					t.Fatal("retry drift")
+				}
+			})
+		}
+	}
+	if err := p.WriteTo(nil, io.Discard); !errors.Is(err, ErrInvalidRun) {
+		t.Fatal(err)
+	}
+	if err := p.WriteTo(context.Background(), nil); !errors.Is(err, ErrInvalidRun) {
+		t.Fatal(err)
+	}
+	requirePreparedClosed(t, p, p.regions, opts.ScratchDir)
+}
+
+func TestPreparedCloseLifecycle(t *testing.T) {
+	for _, state := range []string{"before-write", "after-write", "after-failure", "scratch-read-failure"} {
+		t.Run(state, func(t *testing.T) {
+			opts, input := validBuildFixture(TableCompressionSnappy)
+			opts.ScratchDir = t.TempDir()
+			p, err := Prepare(context.Background(), opts, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regions := p.(*preparedRun).regions
+			switch state {
+			case "after-write":
+				if err := p.WriteTo(context.Background(), io.Discard); err != nil {
+					t.Fatal(err)
+				}
+			case "after-failure":
+				if err := p.WriteTo(context.Background(), preparedTestWriter(func([]byte) (int, error) { return 0, io.ErrClosedPipe })); !errors.Is(err, io.ErrClosedPipe) {
+					t.Fatal(err)
+				}
+			case "scratch-read-failure":
+				if err := regions[1].file.Truncate(0); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.WriteTo(context.Background(), io.Discard); !errors.Is(err, io.EOF) {
+					t.Fatal(err)
+				}
+			}
+			requirePreparedClosed(t, p, regions, opts.ScratchDir)
+		})
+	}
+}
+
+func TestPreparedConcurrentWritesAndClose(t *testing.T) {
+	opts, input := validBuildFixture(TableCompressionSnappy)
+	opts.ScratchDir = t.TempDir()
+	p, err := Prepare(context.Background(), opts, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regions := p.(*preparedRun).regions
+	var want bytes.Buffer
+	if err := p.WriteTo(context.Background(), &want); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var dst bytes.Buffer
+			if err := p.WriteTo(context.Background(), &dst); err != nil || !bytes.Equal(dst.Bytes(), want.Bytes()) {
+				t.Errorf("concurrent write: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	entered, release := make(chan struct{}), make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		first := true
+		writeDone <- p.WriteTo(context.Background(), preparedTestWriter(func(b []byte) (int, error) {
+			if first {
+				first = false
+				close(entered)
+				<-release
+			}
+			return len(b), nil
+		}))
+	}()
+	<-entered
+	started := make(chan struct{}, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started <- struct{}{}
+			if err := p.Close(); err != nil {
+				t.Errorf("concurrent close: %v", err)
+			}
+		}()
+	}
+	for range 8 {
+		<-started
+	}
+	// No sleeps: the writer barrier holds the lifecycle lock while Close races.
+	for _, r := range regions {
+		if _, err := r.file.Stat(); err != nil {
+			t.Fatal("closed during write", err)
+		}
+	}
+	close(release)
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	requirePreparedClosed(t, p, regions, opts.ScratchDir)
+}
+
+type preparedClosingEntries struct {
+	*sliceEntryIterator
+	closes   int
+	closeErr error
+	onNext   func()
+}
+
+func (i *preparedClosingEntries) Next() bool {
+	if i.onNext != nil {
+		i.onNext()
+	}
+	return i.sliceEntryIterator.Next()
+}
+func (i *preparedClosingEntries) Close() error { i.closes++; return i.closeErr }
+
+type preparedClosingTimelines struct {
+	*sliceTimelineIterator
+	closes   int
+	closeErr error
+	onNext   func()
+}
+
+func (i *preparedClosingTimelines) Next() bool {
+	if i.onNext != nil {
+		i.onNext()
+	}
+	return i.sliceTimelineIterator.Next()
+}
+func (i *preparedClosingTimelines) Close() error { i.closes++; return i.closeErr }
+
+func TestPrepareFailureCleanup(t *testing.T) {
+	failure := errors.New("injected iterator error")
+	for _, mode := range []string{"success", "nil-context", "nil-events", "preamble", "compression", "filter", "scratch-create", "empty-events", "empty-heads", "empty-timelines", "empty-key", "oversized-key", "oversized-timeline", "order", "sequence", "mismatch", "events-error", "heads-error", "timelines-error", "events-close", "heads-close", "timelines-close", "canceled", "cancel-events", "cancel-heads", "cancel-timelines"} {
+		t.Run(mode, func(t *testing.T) {
+			opts, input := validBuildFixture(TableCompressionSnappy)
+			dir := t.TempDir()
+			opts.ScratchDir = dir
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			e := &preparedClosingEntries{sliceEntryIterator: input.Events.(*sliceEntryIterator)}
+			h := &preparedClosingEntries{sliceEntryIterator: input.Heads.(*sliceEntryIterator)}
+			tl := &preparedClosingTimelines{sliceTimelineIterator: input.Timelines.(*sliceTimelineIterator)}
+			input = BuildInput{e, h, tl}
+			switch mode {
+			case "nil-context":
+				ctx = nil
+			case "nil-events":
+				input.Events = nil
+			case "preamble":
+				opts.CreatorEpoch = 0
+			case "compression":
+				opts.Table.Compression = 255
+			case "filter":
+				opts.Filter.BitsPerKey = 33
+			case "scratch-create":
+				opts.ScratchDir = filepath.Join(dir, "missing")
+			case "empty-events":
+				e.entries = nil
+			case "empty-heads":
+				h.entries = nil
+			case "empty-timelines":
+				tl.timelines = nil
+			case "empty-key":
+				e.entries[0].Key = nil
+			case "oversized-key":
+				e.entries[0].Key = make([]byte, MaxTableKeyBytes+1)
+			case "oversized-timeline":
+				e.entries[0].Timeline = make([]byte, MaxTimelineBytes+1)
+			case "order":
+				e.entries[0], e.entries[2] = e.entries[2], e.entries[0]
+			case "sequence":
+				e.entries[0].Seq = opts.SeqHi + 1
+			case "mismatch":
+				h.entries[0].Timeline = []byte("different")
+			case "events-error":
+				e.err = failure
+			case "heads-error":
+				h.err = failure
+			case "timelines-error":
+				tl.err = failure
+			case "events-close":
+				e.closeErr = failure
+			case "heads-close":
+				h.closeErr = failure
+			case "timelines-close":
+				tl.closeErr = failure
+			case "canceled":
+				cancel()
+			case "cancel-events":
+				e.onNext = cancel
+			case "cancel-heads":
+				h.onNext = cancel
+			case "cancel-timelines":
+				tl.onNext = cancel
+			}
+			p, err := Prepare(ctx, opts, input)
+			if mode == "success" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				requirePreparedClosed(t, p, p.(*preparedRun).regions, dir)
+			} else if err == nil || p != nil {
+				t.Fatalf("failed preparation returned %v, %v", p, err)
+			}
+			if (mode != "nil-events" && e.closes != 1) || h.closes != 1 || tl.closes != 1 {
+				t.Fatalf("iterator close counts: %d/%d/%d", e.closes, h.closes, tl.closes)
+			}
+			requireEmptyScratch(t, dir)
+		})
+	}
+}
+
+func TestBuildFailureReturnsNoRef(t *testing.T) {
+	for _, mode := range []string{"short", "trailer-cancel", "nil-destination"} {
+		t.Run(mode, func(t *testing.T) {
+			opts, input := validBuildFixture(TableCompressionSnappy)
+			opts.ScratchDir = t.TempDir()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var dst io.Writer = preparedTestWriter(func(b []byte) (int, error) {
+				if mode == "short" {
+					return len(b) - 1, nil
+				}
+				if len(b) == TrailerBytes && string(b[:4]) == "UJRT" {
+					cancel()
+				}
+				return len(b), nil
+			})
+			if mode == "nil-destination" {
+				dst = nil
+			}
+			ref, err := Build(ctx, dst, opts, input)
+			if err == nil || !sameRef(ref, Ref{}) {
+				t.Fatalf("ref=%v err=%v", ref, err)
+			}
+			requireEmptyScratch(t, opts.ScratchDir)
+		})
+	}
+}
+
+// Cancel at each synchronous context observation, including UJTF construction,
+// the payload-hash pass, and the final check after closing the inputs.
+type preparedStepContext struct {
+	context.Context
+	calls, cancelAt int
+}
+
+func (c *preparedStepContext) Err() error {
+	c.calls++
+	if c.cancelAt > 0 && c.calls >= c.cancelAt {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestPrepareCancellationAtEveryCheck(t *testing.T) {
+	opts, input := validBuildFixture(TableCompressionNone)
+	opts.ScratchDir = t.TempDir()
+	ctx := &preparedStepContext{Context: context.Background()}
+	p, err := Prepare(ctx, opts, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for check := 1; check <= ctx.calls; check++ {
+		_, input := validBuildFixture(TableCompressionNone)
+		canceled := &preparedStepContext{Context: context.Background(), cancelAt: check}
+		p, err := Prepare(canceled, opts, input)
+		if !errors.Is(err, context.Canceled) || p != nil {
+			t.Fatalf("context check %d: prepared=%v err=%v", check, p, err)
+		}
+		requireEmptyScratch(t, opts.ScratchDir)
+	}
+}
+
+func TestPreparedCleanupClosesDescriptorsOnFailure(t *testing.T) {
+	// Descriptor-count verification complements direct file.Stat checks on
+	// successful preparation. It catches unlinked-but-open failed scratch files.
+	fdDir := "/dev/fd"
+	if _, err := os.ReadDir(fdDir); err != nil {
+		fdDir = "/proc/self/fd"
+	}
+	count := func() int {
+		entries, err := os.ReadDir(fdDir)
+		if err != nil {
+			t.Skipf("descriptor inventory unavailable: %v", err)
+		}
+		return len(entries)
+	}
+	opts, _ := validBuildFixture(TableCompressionSnappy)
+	opts.ScratchDir = t.TempDir()
+	run := func() {
+		for _, stage := range []string{"events", "heads", "timelines", "close"} {
+			_, input := validBuildFixture(TableCompressionSnappy)
+			switch stage {
+			case "events":
+				input.Events.(*sliceEntryIterator).err = io.ErrUnexpectedEOF
+			case "heads":
+				input.Heads.(*sliceEntryIterator).err = io.ErrUnexpectedEOF
+			case "timelines":
+				input.Timelines.(*sliceTimelineIterator).err = io.ErrUnexpectedEOF
+			case "close":
+				input.Events = &preparedClosingEntries{sliceEntryIterator: input.Events.(*sliceEntryIterator), closeErr: io.ErrUnexpectedEOF}
+			}
+			if p, err := Prepare(context.Background(), opts, input); err == nil || p != nil {
+				t.Fatalf("expected failed preparation: %v, %v", p, err)
+			}
+		}
+	}
+	run() // Warm runtime/Pebble descriptors before taking the baseline.
+	before := count()
+	for range 16 {
+		run()
+	}
+	if after := count(); after != before {
+		t.Fatalf("descriptor leak: before=%d after=%d", before, after)
+	}
+	requireEmptyScratch(t, opts.ScratchDir)
+}
+
+func TestPreparedCleanupErrorStillClosesOtherRegions(t *testing.T) {
+	opts, input := validBuildFixture(TableCompressionSnappy)
+	opts.ScratchDir = t.TempDir()
+	p, err := Prepare(context.Background(), opts, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regions := p.(*preparedRun).regions
+	// Simulate an already-broken descriptor: Close must report it, still remove
+	// its file, and close/remove every other region exactly once.
+	if err := regions[0].file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first := p.Close()
+	if !errors.Is(first, os.ErrClosed) || p.Close() != first {
+		t.Fatalf("cleanup error not stable: %v", first)
+	}
+	for _, r := range regions {
+		if _, err := r.file.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Fatal(err)
+		}
+	}
+	requireEmptyScratch(t, opts.ScratchDir)
+}
+
+func TestPrepareScratchBoundsBeforeAdmission(t *testing.T) {
+	opts, input := validBuildFixture(TableCompressionNone)
+	opts.ScratchDir = t.TempDir()
+	options, err := tableWriterOptions(opts.Table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildTableWithin(context.Background(), input.Events, options, opts, "bounded", 1); !errors.Is(err, ErrRunTooLarge) {
+		t.Fatal("SST limit", err)
+	}
+	requireEmptyScratch(t, opts.ScratchDir)
+	if _, err := buildFilterScratchWithin(context.Background(), opts.RunID, [][]byte{[]byte("a")}, opts.Filter, opts.ScratchDir, 1); !errors.Is(err, ErrRunTooLarge) {
+		t.Fatal("filter limit", err)
+	}
+	requireEmptyScratch(t, opts.ScratchDir)
+	file, err := os.CreateTemp(opts.ScratchDir, "bounded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newScratchWritable(file)
+	w.limit = 3
+	if err := w.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write([]byte("d")); !errors.Is(err, ErrRunTooLarge) {
+		t.Fatal(err)
+	}
+	info, err := file.Stat()
+	if err != nil || info.Size() != 3 {
+		t.Fatalf("write exceeded budget: %v, %v", info, err)
+	}
+	if err := closeScratch(file, file.Name()); err != nil {
+		t.Fatal(err)
+	}
+	requireEmptyScratch(t, opts.ScratchDir)
 }
