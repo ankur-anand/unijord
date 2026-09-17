@@ -16,11 +16,33 @@ import (
 )
 
 func TestCompleteVerificationSpillRecordsRejectTruncation(t *testing.T) {
-	if _, err := readTimelineRecord(bufio.NewReader(bytes.NewReader([]byte{0, 3, 'a'}))); err == nil {
+	if _, err := newTimelineRecordReader(bufio.NewReader(bytes.NewReader([]byte{0, 3, 'a'}))).next(); err == nil {
 		t.Fatal("truncated timeline spill record accepted")
 	}
-	if _, err := readContribution(bufio.NewReader(bytes.NewReader(make([]byte, 7)))); err == nil {
+	if _, err := newContributionRecordReader(bufio.NewReader(bytes.NewReader(make([]byte, 7)))).next(); err == nil {
 		t.Fatal("truncated filter contribution accepted")
+	}
+}
+
+func TestCompleteVerificationTypedHeapsOrderRecords(t *testing.T) {
+	timelineQueue := timelineHeap{}
+	for index, value := range [][]byte{[]byte("charlie"), []byte("alpha"), []byte("bravo")} {
+		pushTimelineHeap(&timelineQueue, timelineHeapItem{value: value, index: index})
+	}
+	for _, want := range []string{"alpha", "bravo", "charlie"} {
+		if got := string(popTimelineHeap(&timelineQueue).value); got != want {
+			t.Fatalf("timeline heap popped %q, want %q", got, want)
+		}
+	}
+
+	contributionQueue := contributionHeap{}
+	for index, value := range []filterContribution{{line: 3, bit: 1}, {line: 1, bit: 7}, {line: 1, bit: 2}} {
+		pushContributionHeap(&contributionQueue, contributionHeapItem{value: value, index: index})
+	}
+	for _, want := range []filterContribution{{line: 1, bit: 2}, {line: 1, bit: 7}, {line: 3, bit: 1}} {
+		if got := popContributionHeap(&contributionQueue).value; got != want {
+			t.Fatalf("contribution heap popped %+v, want %+v", got, want)
+		}
 	}
 }
 
@@ -212,6 +234,15 @@ func TestVerifyCompleteStreamingExternalSortsExactTimelineSets(t *testing.T) {
 	if report.DistinctTimelines != 100 || report.TimelineSpillRuns == 0 || report.TimelineMergePasses == 0 || report.FilterContributionSpills == 0 {
 		t.Fatalf("external-sort report=%+v, want exact sets with spills and merge passes", report)
 	}
+	if report.TimelineBatchLogicalHighWater == 0 || report.TimelineBatchLogicalHighWater > 64 {
+		t.Fatalf("timeline logical high-water=%d, want in (0,64]", report.TimelineBatchLogicalHighWater)
+	}
+	if report.TimelineBatchReservedBytes == 0 || report.TimelineBatchSlabs == 0 {
+		t.Fatalf("timeline batch metrics=%+v, want retained slabs", report)
+	}
+	if report.TimelineBatchResets != report.TimelineSpillRuns {
+		t.Fatalf("timeline batch resets=%d, spill runs=%d", report.TimelineBatchResets, report.TimelineSpillRuns)
+	}
 }
 
 func TestVerifyCompleteStreamingRejectsSetMismatchBeforeFilterWork(t *testing.T) {
@@ -297,13 +328,50 @@ func TestTimelineSorterHonorsCancellationBeforeSpill(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	sorter := newTimelineSorter(workspace, 1024, 2, RegionKindEventsSST, &report)
+	sorter, err := newTimelineSorter(workspace, 1024, 2, RegionKindEventsSST, 1, &report)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := sorter.add([]byte("timeline")); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
 	if _, err := sorter.finalize(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("finalize error=%v, want context cancellation", err)
+	}
+	if report.TimelineBatchLogicalHighWater == 0 || report.TimelineBatchReservedBytes == 0 || report.TimelineBatchSlabs != 1 || report.TimelineBatchResets != 0 {
+		t.Fatalf("canceled sorter metrics=%+v", report)
+	}
+}
+
+func TestTimelineSorterRetainsBatchAfterScratchFailure(t *testing.T) {
+	report := CompleteVerificationReport{}
+	workspace, err := newVerificationWorkspace(CompleteVerifyOptions{ScratchDir: t.TempDir(), ScratchBudget: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.ctx = context.Background()
+	workspace.report = &report
+	defer func() {
+		if err := workspace.close(&report); err != nil {
+			t.Error(err)
+		}
+	}()
+	sorter, err := newTimelineSorter(workspace, 1024, 2, RegionKindEventsSST, 1, &report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sorter.add([]byte("timeline")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sorter.finalize(); !errors.Is(err, ErrVerificationResource) || errors.Is(err, ErrCorruptRun) {
+		t.Fatalf("finalize error=%v, want resource failure", err)
+	}
+	if got := sorter.batch.timelines(); len(got) != 1 || !bytes.Equal(got[0], []byte("timeline")) {
+		t.Fatalf("failed spill batch=%q, want retained timeline", got)
+	}
+	if len(sorter.runs) != 0 || report.TimelineBatchResets != 0 || report.TimelineSpillRuns != 0 {
+		t.Fatalf("failed spill published state: runs=%d report=%+v", len(sorter.runs), report)
 	}
 }
 

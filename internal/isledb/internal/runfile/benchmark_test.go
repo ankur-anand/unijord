@@ -251,6 +251,10 @@ func benchmarkRunVerifyCompleteSpill(b *testing.B, timelineCount int) {
 	b.ReportMetric(float64(report.ProviderBytesConsumed), "range_bytes/op")
 	b.ReportMetric(float64(report.ScratchHighWater), "scratch_highwater_B/op")
 	b.ReportMetric(float64(report.TimelineSpillRuns), "timeline_spills/op")
+	b.ReportMetric(float64(report.TimelineBatchLogicalHighWater), "timeline_batch_logical_B/op")
+	b.ReportMetric(float64(report.TimelineBatchReservedBytes), "timeline_batch_reserved_B/op")
+	b.ReportMetric(float64(report.TimelineBatchSlabs), "timeline_batch_slabs/op")
+	b.ReportMetric(float64(report.TimelineBatchResets), "timeline_batch_resets/op")
 	b.ReportMetric(float64(report.FilterContributionSpills), "filter_spills/op")
 }
 

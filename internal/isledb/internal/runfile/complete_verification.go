@@ -3,7 +3,6 @@ package runfile
 import (
 	"bufio"
 	"bytes"
-	"container/heap"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -61,28 +60,32 @@ const (
 // Counts exclude provider-internal retries that are not exposed by the
 // StreamingRangeSource implementation.
 type CompleteVerificationReport struct {
-	RunID                     [RunIDBytes]byte
-	ObjectSize                uint64
-	RegionCount               uint16
-	ProviderMetadataRequests  uint64
-	ProviderGETAttempts       uint64
-	ProviderGETs              uint64
-	ProviderBytesRequested    uint64
-	ProviderBytesConsumed     uint64
-	RetryCount                uint64
-	ResumedBytes              uint64
-	ScratchBytesWritten       uint64
-	ScratchBytesRead          uint64
-	ScratchBytesDeleted       uint64
-	ScratchHighWater          uint64
-	TimelineSpillRuns         uint64
-	TimelineMergePasses       uint64
-	DistinctTimelines         uint64
-	FilterContributionRecords uint64
-	FilterContributionSpills  uint64
-	FilterContributionMerges  uint64
-	PhaseDurations            map[string]time.Duration
-	FailurePhase              string
+	RunID                         [RunIDBytes]byte
+	ObjectSize                    uint64
+	RegionCount                   uint16
+	ProviderMetadataRequests      uint64
+	ProviderGETAttempts           uint64
+	ProviderGETs                  uint64
+	ProviderBytesRequested        uint64
+	ProviderBytesConsumed         uint64
+	RetryCount                    uint64
+	ResumedBytes                  uint64
+	ScratchBytesWritten           uint64
+	ScratchBytesRead              uint64
+	ScratchBytesDeleted           uint64
+	ScratchHighWater              uint64
+	TimelineSpillRuns             uint64
+	TimelineMergePasses           uint64
+	TimelineBatchLogicalHighWater uint64
+	TimelineBatchReservedBytes    uint64
+	TimelineBatchSlabs            uint64
+	TimelineBatchResets           uint64
+	DistinctTimelines             uint64
+	FilterContributionRecords     uint64
+	FilterContributionSpills      uint64
+	FilterContributionMerges      uint64
+	PhaseDurations                map[string]time.Duration
+	FailurePhase                  string
 }
 
 // VerifyCompleteStreaming performs the design's bounded remote complete
@@ -539,8 +542,19 @@ func (v *streamingVerifier) run(extractor TimelineExtractor) (result error) {
 		switch {
 		case region.Kind == RegionKindEventsSST || region.Kind == RegionKindHeadsSST:
 			v.phase = "local-sst"
-			sorter := newTimelineSorter(v.workspace, v.options.MemoryBudget, v.options.SortMergeFanIn, region.Kind, v.report)
 			localStarted := time.Now()
+			sorter, err := newTimelineSorter(
+				v.workspace,
+				v.options.MemoryBudget,
+				v.options.SortMergeFanIn,
+				region.Kind,
+				region.EntryCount,
+				v.report,
+			)
+			if err != nil {
+				v.report.PhaseDurations["local-sst"] += time.Since(localStarted)
+				return errors.Join(err, v.workspace.remove(regionPath))
+			}
 			set, err := v.verifyLocalTable(regionPath, region, region.Kind, extractor, sorter)
 			v.report.PhaseDurations["local-sst"] += time.Since(localStarted)
 			if err != nil {
@@ -694,6 +708,7 @@ func (p *segmentProcessor) consume(data []byte) error {
 }
 
 func (v *streamingVerifier) verifyLocalTable(path string, region RegionDescriptor, kind RegionKind, extractor TimelineExtractor, sorter *timelineSorter) (stream *timelineStream, resultErr error) {
+	defer sorter.snapshotBatchMetrics()
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open SST scratch: %w", ErrVerificationResource, err)
@@ -764,7 +779,7 @@ func (v *streamingVerifier) verifyLocalTable(path string, region RegionDescripto
 		if count == 0 {
 			minKey = bytes.Clone(key)
 		}
-		maxKey = bytes.Clone(key)
+		maxKey = append(maxKey[:0], key...)
 		seqLo = min(seqLo, sequence)
 		seqHi = max(seqHi, sequence)
 		count++
@@ -1046,8 +1061,9 @@ func (s *workspaceFileSink) Write(data []byte) (int, error) {
 }
 
 type scratchBufferedFile struct {
-	file   *os.File
-	writer *bufio.Writer
+	file    *os.File
+	writer  *bufio.Writer
+	encoded [8]byte
 }
 
 func (f *scratchBufferedFile) write(data []byte) error {
@@ -1108,54 +1124,70 @@ type timelineStream struct {
 }
 
 type timelineSorter struct {
-	workspace *verificationWorkspace
-	budget    uint64
-	fanIn     int
-	kind      RegionKind
-	report    *CompleteVerificationReport
-	batch     [][]byte
-	batchSize uint64
-	runs      []string
+	workspace           *verificationWorkspace
+	fanIn               int
+	kind                RegionKind
+	report              *CompleteVerificationReport
+	batch               *timelineSlabBatch
+	reportedBatchResets uint64
+	runs                []string
 }
 
-func newTimelineSorter(workspace *verificationWorkspace, budget uint64, fanIn int, kind RegionKind, report *CompleteVerificationReport) *timelineSorter {
-	return &timelineSorter{workspace: workspace, budget: budget, fanIn: fanIn, kind: kind, report: report}
+func newTimelineSorter(
+	workspace *verificationWorkspace,
+	budget uint64,
+	fanIn int,
+	kind RegionKind,
+	descriptorEntryCount uint64,
+	report *CompleteVerificationReport,
+) (*timelineSorter, error) {
+	batch, err := newTimelineSlabBatch(budget, descriptorEntryCount)
+	if err != nil {
+		return nil, fmt.Errorf("region kind %d timeline batch: %w", kind, err)
+	}
+	return &timelineSorter{
+		workspace: workspace,
+		fanIn:     fanIn,
+		kind:      kind,
+		report:    report,
+		batch:     batch,
+	}, nil
 }
 
 func (s *timelineSorter) add(timeline []byte) error {
-	if len(timeline) == 0 {
-		return corruptRunf("region kind %d has an empty timeline", s.kind)
+	added, err := s.batch.tryAdd(timeline)
+	if err != nil {
+		s.snapshotBatchMetrics()
+		return fmt.Errorf("region kind %d timeline batch: %w", s.kind, err)
 	}
-	if uint64(len(timeline)) > MaxTimelineBytes {
-		return runTooLargef("region kind %d timeline length %d exceeds %d", s.kind, len(timeline), MaxTimelineBytes)
+	if added {
+		return nil
 	}
-	// Charge the encoded bytes plus a conservative slice-header/allocation
-	// allowance. The budget is a cap, not a precise heap profiler.
-	recordBytes, ok := checkedAdd(uint64(len(timeline)), 2+32)
-	if !ok {
-		return runTooLargef("timeline record memory calculation overflows")
+	if err := s.spill(); err != nil {
+		return err
 	}
-	if recordBytes > s.budget {
-		return fmt.Errorf("%w: timeline record requires %d bytes, budget is %d", ErrVerificationResource, recordBytes, s.budget)
+	added, err = s.batch.tryAdd(timeline)
+	if err != nil {
+		s.snapshotBatchMetrics()
+		return fmt.Errorf("region kind %d timeline batch retry: %w", s.kind, err)
 	}
-	if len(s.batch) > 0 && recordBytes > s.budget-s.batchSize {
-		if err := s.spill(); err != nil {
-			return err
-		}
+	if !added {
+		s.snapshotBatchMetrics()
+		return fmt.Errorf("%w: region kind %d timeline did not fit an empty slab batch", ErrVerificationResource, s.kind)
 	}
-	s.batch = append(s.batch, bytes.Clone(timeline))
-	s.batchSize += recordBytes
 	return nil
 }
 
 func (s *timelineSorter) spill() error {
-	if len(s.batch) == 0 {
+	s.snapshotBatchMetrics()
+	batch := s.batch.timelines()
+	if len(batch) == 0 {
 		return nil
 	}
 	if err := s.workspace.contextErr(); err != nil {
 		return err
 	}
-	sort.Slice(s.batch, func(i, j int) bool { return bytes.Compare(s.batch[i], s.batch[j]) < 0 })
+	sort.Slice(batch, func(i, j int) bool { return bytes.Compare(batch[i], batch[j]) < 0 })
 	if err := s.workspace.contextErr(); err != nil {
 		return err
 	}
@@ -1164,7 +1196,7 @@ func (s *timelineSorter) spill() error {
 		return err
 	}
 	last := []byte(nil)
-	for index, timeline := range s.batch {
+	for index, timeline := range batch {
 		if index%4096 == 0 {
 			if err := s.workspace.contextErr(); err != nil {
 				file.abort()
@@ -1188,9 +1220,23 @@ func (s *timelineSorter) spill() error {
 	}
 	s.runs = append(s.runs, path)
 	s.report.TimelineSpillRuns++
-	s.batch = nil
-	s.batchSize = 0
+	s.batch.reset()
+	s.snapshotBatchMetrics()
 	return nil
+}
+
+func (s *timelineSorter) snapshotBatchMetrics() {
+	if s == nil || s.batch == nil || s.report == nil {
+		return
+	}
+	metrics := s.batch.metrics()
+	s.report.TimelineBatchLogicalHighWater = max(s.report.TimelineBatchLogicalHighWater, metrics.LogicalHighWater)
+	s.report.TimelineBatchReservedBytes = max(s.report.TimelineBatchReservedBytes, metrics.ReservedBytes)
+	s.report.TimelineBatchSlabs = max(s.report.TimelineBatchSlabs, metrics.Slabs)
+	if metrics.Resets > s.reportedBatchResets {
+		s.report.TimelineBatchResets += metrics.Resets - s.reportedBatchResets
+		s.reportedBatchResets = metrics.Resets
+	}
 }
 
 func (s *timelineSorter) finalize() (*timelineStream, error) {
@@ -1238,9 +1284,8 @@ func writeTimelineRecord(file *scratchBufferedFile, timeline []byte) error {
 	if len(timeline) == 0 || uint64(len(timeline)) > MaxTimelineBytes {
 		return fmt.Errorf("%w: invalid timeline spill record length %d", ErrVerificationResource, len(timeline))
 	}
-	var length [2]byte
-	binary.BigEndian.PutUint16(length[:], uint16(len(timeline)))
-	if err := file.write(length[:]); err != nil {
+	binary.BigEndian.PutUint16(file.encoded[:2], uint16(len(timeline)))
+	if err := file.write(file.encoded[:2]); err != nil {
 		return err
 	}
 	return file.write(timeline)
@@ -1256,10 +1301,10 @@ func describeTimelineStream(workspace *verificationWorkspace, path string) (stre
 			resultErr = errors.Join(resultErr, closeErr)
 		}
 	}()
-	reader := workspace.newReader(file)
+	reader := newTimelineRecordReader(workspace.newReader(file))
 	stream = &timelineStream{path: path}
 	for {
-		timeline, err := readTimelineRecord(reader)
+		timeline, err := reader.next()
 		if err == io.EOF {
 			break
 		}
@@ -1267,33 +1312,49 @@ func describeTimelineStream(workspace *verificationWorkspace, path string) (stre
 			return nil, scratchReadError("read timeline stream", err)
 		}
 		if stream.count == 0 {
-			stream.min = bytes.Clone(timeline)
+			stream.min = append(stream.min, timeline...)
 		}
-		stream.max = bytes.Clone(timeline)
+		stream.max = append(stream.max[:0], timeline...)
 		stream.count++
 		stream.bytes += uint64(len(timeline) + 2)
 	}
 	return stream, nil
 }
 
-func readTimelineRecord(reader *bufio.Reader) ([]byte, error) {
-	var length [2]byte
-	nRead, err := io.ReadFull(reader, length[:])
+// timelineRecordReader owns its returned buffer. The buffer remains valid
+// until the next call to next, which lets merge readers retain exactly one
+// record per input run without allocating once per record.
+type timelineRecordReader struct {
+	reader   *bufio.Reader
+	length   [2]byte
+	timeline []byte
+}
+
+func newTimelineRecordReader(reader *bufio.Reader) *timelineRecordReader {
+	return &timelineRecordReader{reader: reader}
+}
+
+func (r *timelineRecordReader) next() ([]byte, error) {
+	nRead, err := io.ReadFull(r.reader, r.length[:])
 	if err != nil {
 		if err == io.EOF && nRead == 0 {
 			return nil, io.EOF
 		}
 		return nil, err
 	}
-	n := int(binary.BigEndian.Uint16(length[:]))
+	n := int(binary.BigEndian.Uint16(r.length[:]))
 	if n == 0 || uint64(n) > MaxTimelineBytes {
 		return nil, fmt.Errorf("invalid timeline record length %d", n)
 	}
-	timeline := make([]byte, n)
-	if _, err := io.ReadFull(reader, timeline); err != nil {
+	if cap(r.timeline) < n {
+		r.timeline = make([]byte, n)
+	} else {
+		r.timeline = r.timeline[:n]
+	}
+	if _, err := io.ReadFull(r.reader, r.timeline); err != nil {
 		return nil, err
 	}
-	return timeline, nil
+	return r.timeline, nil
 }
 
 type timelineHeapItem struct {
@@ -1302,16 +1363,47 @@ type timelineHeapItem struct {
 }
 type timelineHeap []timelineHeapItem
 
-func (h timelineHeap) Len() int           { return len(h) }
-func (h timelineHeap) Less(i, j int) bool { return bytes.Compare(h[i].value, h[j].value) < 0 }
-func (h timelineHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *timelineHeap) Push(value any)    { *h = append(*h, value.(timelineHeapItem)) }
-func (h *timelineHeap) Pop() any {
+func pushTimelineHeap(h *timelineHeap, value timelineHeapItem) {
+	*h = append(*h, value)
+	for child := len(*h) - 1; child > 0; {
+		parent := (child - 1) / 2
+		if bytes.Compare((*h)[parent].value, (*h)[child].value) <= 0 {
+			break
+		}
+		(*h)[parent], (*h)[child] = (*h)[child], (*h)[parent]
+		child = parent
+	}
+}
+
+func popTimelineHeap(h *timelineHeap) timelineHeapItem {
 	old := *h
-	n := len(old)
-	value := old[n-1]
-	*h = old[:n-1]
-	return value
+	last := len(old) - 1
+	result := old[0]
+	if last == 0 {
+		old[0] = timelineHeapItem{}
+		*h = old[:0]
+		return result
+	}
+	old[0] = old[last]
+	old[last] = timelineHeapItem{}
+	*h = old[:last]
+	for parent := 0; ; {
+		left := parent*2 + 1
+		if left >= len(*h) {
+			break
+		}
+		child := left
+		right := left + 1
+		if right < len(*h) && bytes.Compare((*h)[right].value, (*h)[left].value) < 0 {
+			child = right
+		}
+		if bytes.Compare((*h)[parent].value, (*h)[child].value) <= 0 {
+			break
+		}
+		(*h)[parent], (*h)[child] = (*h)[child], (*h)[parent]
+		parent = child
+	}
+	return result
 }
 
 func mergeTimelineRuns(workspace *verificationWorkspace, paths []string) (string, error) {
@@ -1322,7 +1414,7 @@ func mergeTimelineRuns(workspace *verificationWorkspace, paths []string) (string
 	if err != nil {
 		return "", err
 	}
-	readers := make([]*bufio.Reader, len(paths))
+	readers := make([]*timelineRecordReader, len(paths))
 	files := make([]*os.File, len(paths))
 	queue := timelineHeap{}
 	for index, path := range paths {
@@ -1336,8 +1428,8 @@ func mergeTimelineRuns(workspace *verificationWorkspace, paths []string) (string
 			)
 		}
 		files[index] = input
-		readers[index] = workspace.newReader(input)
-		timeline, err := readTimelineRecord(readers[index])
+		readers[index] = newTimelineRecordReader(workspace.newReader(input))
+		timeline, err := readers[index].next()
 		if err == io.EOF {
 			continue
 		}
@@ -1349,22 +1441,23 @@ func mergeTimelineRuns(workspace *verificationWorkspace, paths []string) (string
 				closeScratchReadFiles(files, "close timeline merge input"),
 			)
 		}
-		heap.Push(&queue, timelineHeapItem{value: timeline, index: index})
+		pushTimelineHeap(&queue, timelineHeapItem{value: timeline, index: index})
 	}
 	var last []byte
-	for queue.Len() > 0 {
-		item := heap.Pop(&queue).(timelineHeapItem)
+	for len(queue) > 0 {
+		item := popTimelineHeap(&queue)
 		if !bytes.Equal(last, item.value) {
 			if err := writeTimelineRecord(file, item.value); err != nil {
 				file.abort()
 				workspace.remove(outputPath)
 				return "", errors.Join(err, closeScratchReadFiles(files, "close timeline merge input"))
 			}
-			last = item.value
+			last = append(last[:0], item.value...)
 		}
-		next, err := readTimelineRecord(readers[item.index])
+		next, err := readers[item.index].next()
 		if err == nil {
-			heap.Push(&queue, timelineHeapItem{value: next, index: item.index})
+			item.value = next
+			pushTimelineHeap(&queue, item)
 		} else if err != io.EOF {
 			file.abort()
 			workspace.remove(outputPath)
@@ -1405,14 +1498,14 @@ func compareTimelineStreams(ctx context.Context, workspace *verificationWorkspac
 			resultErr = errors.Join(resultErr, closeErr)
 		}
 	}()
-	eventsReader := workspace.newReader(eventFile)
-	headsReader := workspace.newReader(headFile)
+	eventsReader := newTimelineRecordReader(workspace.newReader(eventFile))
+	headsReader := newTimelineRecordReader(workspace.newReader(headFile))
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		event, eventErr := readTimelineRecord(eventsReader)
-		head, headErr := readTimelineRecord(headsReader)
+		event, eventErr := eventsReader.next()
+		head, headErr := headsReader.next()
 		if eventErr != nil && eventErr != io.EOF {
 			return scratchReadError("compare Events timeline stream", eventErr)
 		}
@@ -1459,9 +1552,9 @@ func (v *streamingVerifier) buildCanonicalFilter(events *timelineStream) (string
 	if err != nil {
 		return "", fmt.Errorf("%w: open Events timeline stream: %w", ErrVerificationResource, err)
 	}
-	reader := v.workspace.newReader(file)
+	reader := newTimelineRecordReader(v.workspace.newReader(file))
 	for {
-		timeline, readErr := readTimelineRecord(reader)
+		timeline, readErr := reader.next()
 		if readErr == io.EOF {
 			break
 		}
@@ -1557,22 +1650,30 @@ func contributionLess(left, right filterContribution) bool {
 }
 
 func writeContribution(file *scratchBufferedFile, value filterContribution) error {
-	var encoded [8]byte
-	binary.BigEndian.PutUint32(encoded[0:4], value.line)
-	binary.BigEndian.PutUint16(encoded[4:6], value.bit)
-	return file.write(encoded[:])
+	clear(file.encoded[:])
+	binary.BigEndian.PutUint32(file.encoded[0:4], value.line)
+	binary.BigEndian.PutUint16(file.encoded[4:6], value.bit)
+	return file.write(file.encoded[:])
 }
 
-func readContribution(reader *bufio.Reader) (filterContribution, error) {
-	var encoded [8]byte
-	nRead, err := io.ReadFull(reader, encoded[:])
+type contributionRecordReader struct {
+	reader  *bufio.Reader
+	encoded [8]byte
+}
+
+func newContributionRecordReader(reader *bufio.Reader) *contributionRecordReader {
+	return &contributionRecordReader{reader: reader}
+}
+
+func (r *contributionRecordReader) next() (filterContribution, error) {
+	nRead, err := io.ReadFull(r.reader, r.encoded[:])
 	if err != nil {
 		if err == io.EOF && nRead == 0 {
 			return filterContribution{}, io.EOF
 		}
 		return filterContribution{}, err
 	}
-	return filterContribution{line: binary.BigEndian.Uint32(encoded[0:4]), bit: binary.BigEndian.Uint16(encoded[4:6])}, nil
+	return filterContribution{line: binary.BigEndian.Uint32(r.encoded[0:4]), bit: binary.BigEndian.Uint16(r.encoded[4:6])}, nil
 }
 
 type contributionHeapItem struct {
@@ -1581,16 +1682,45 @@ type contributionHeapItem struct {
 }
 type contributionHeap []contributionHeapItem
 
-func (h contributionHeap) Len() int           { return len(h) }
-func (h contributionHeap) Less(i, j int) bool { return contributionLess(h[i].value, h[j].value) }
-func (h contributionHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *contributionHeap) Push(value any)    { *h = append(*h, value.(contributionHeapItem)) }
-func (h *contributionHeap) Pop() any {
+func pushContributionHeap(h *contributionHeap, value contributionHeapItem) {
+	*h = append(*h, value)
+	for child := len(*h) - 1; child > 0; {
+		parent := (child - 1) / 2
+		if !contributionLess((*h)[child].value, (*h)[parent].value) {
+			break
+		}
+		(*h)[parent], (*h)[child] = (*h)[child], (*h)[parent]
+		child = parent
+	}
+}
+
+func popContributionHeap(h *contributionHeap) contributionHeapItem {
 	old := *h
-	n := len(old)
-	value := old[n-1]
-	*h = old[:n-1]
-	return value
+	last := len(old) - 1
+	result := old[0]
+	if last == 0 {
+		*h = old[:0]
+		return result
+	}
+	old[0] = old[last]
+	*h = old[:last]
+	for parent := 0; ; {
+		left := parent*2 + 1
+		if left >= len(*h) {
+			break
+		}
+		child := left
+		right := left + 1
+		if right < len(*h) && contributionLess((*h)[right].value, (*h)[left].value) {
+			child = right
+		}
+		if !contributionLess((*h)[child].value, (*h)[parent].value) {
+			break
+		}
+		(*h)[parent], (*h)[child] = (*h)[child], (*h)[parent]
+		parent = child
+	}
+	return result
 }
 
 func (s *contributionSorter) finalize(header FilterHeader, headerBytes []byte) (string, error) {
@@ -1666,7 +1796,7 @@ type contributionIterator interface {
 }
 
 func newContributionRunIterator(workspace *verificationWorkspace, paths []string) (*liveContributionRunIterator, error) {
-	result := &liveContributionRunIterator{workspace: workspace, paths: paths, files: make([]*os.File, len(paths)), readers: make([]*bufio.Reader, len(paths))}
+	result := &liveContributionRunIterator{workspace: workspace, paths: paths, files: make([]*os.File, len(paths)), readers: make([]*contributionRecordReader, len(paths))}
 	for index, path := range paths {
 		file, err := os.Open(path)
 		if err != nil {
@@ -1676,15 +1806,15 @@ func newContributionRunIterator(workspace *verificationWorkspace, paths []string
 			)
 		}
 		result.files[index] = file
-		result.readers[index] = workspace.newReader(file)
-		value, err := readContribution(result.readers[index])
+		result.readers[index] = newContributionRecordReader(workspace.newReader(file))
+		value, err := result.readers[index].next()
 		if err == io.EOF {
 			continue
 		}
 		if err != nil {
 			return nil, errors.Join(scratchReadError("read filter run", err), result.close())
 		}
-		heap.Push(&result.queue, contributionHeapItem{value: value, index: index})
+		pushContributionHeap(&result.queue, contributionHeapItem{value: value, index: index})
 	}
 	return result, nil
 }
@@ -1693,26 +1823,28 @@ type liveContributionRunIterator struct {
 	workspace *verificationWorkspace
 	paths     []string
 	files     []*os.File
-	readers   []*bufio.Reader
+	readers   []*contributionRecordReader
 	queue     contributionHeap
 	last      filterContribution
 	haveLast  bool
 }
 
 func (it *liveContributionRunIterator) next() (filterContribution, error) {
-	for it.queue.Len() > 0 {
-		item := heap.Pop(&it.queue).(contributionHeapItem)
-		next, err := readContribution(it.readers[item.index])
+	for len(it.queue) > 0 {
+		item := popContributionHeap(&it.queue)
+		current := item.value
+		next, err := it.readers[item.index].next()
 		if err == nil {
-			heap.Push(&it.queue, contributionHeapItem{value: next, index: item.index})
+			item.value = next
+			pushContributionHeap(&it.queue, item)
 		} else if err != io.EOF {
 			return filterContribution{}, scratchReadError("read filter merge input", err)
 		}
-		if it.haveLast && item.value == it.last {
+		if it.haveLast && current == it.last {
 			continue
 		}
-		it.last, it.haveLast = item.value, true
-		return item.value, nil
+		it.last, it.haveLast = current, true
+		return current, nil
 	}
 	return filterContribution{}, io.EOF
 }
