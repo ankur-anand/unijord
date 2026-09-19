@@ -34,22 +34,12 @@ func (i *sliceEntryIterator) Next() bool {
 func (i *sliceEntryIterator) Entry() Entry { return i.entries[i.index-1] }
 func (i *sliceEntryIterator) Err() error   { return i.err }
 
-type sliceTimelineIterator struct {
+type sliceTimelineCatalog struct {
 	timelines [][]byte
-	index     int
-	err       error
 }
 
-func (i *sliceTimelineIterator) Next() bool {
-	if i.index >= len(i.timelines) {
-		return false
-	}
-	i.index++
-	return true
-}
-
-func (i *sliceTimelineIterator) Timeline() []byte { return i.timelines[i.index-1] }
-func (i *sliceTimelineIterator) Err() error       { return i.err }
+func (i *sliceTimelineCatalog) Len() int                      { return len(i.timelines) }
+func (i *sliceTimelineCatalog) Timeline(id TimelineID) []byte { return i.timelines[id] }
 
 type memoryRangeSource struct {
 	data     []byte
@@ -155,7 +145,11 @@ func TestBuildRecoverOpenAndVerify(t *testing.T) {
 				if err := reader.Close(); err != nil {
 					t.Fatal(err)
 				}
-				if count != 3 {
+				want := 3
+				if kind == RegionKindHeadsSST {
+					want = 2
+				}
+				if count != want {
 					t.Fatalf("region kind %d entry count=%d", kind, count)
 				}
 			}
@@ -201,7 +195,7 @@ func TestBuildAcceptsLargeSingleTimelineRun(t *testing.T) {
 			Key: []byte("timeline-large|head-1"), Value: largeValue,
 			Timeline: []byte("timeline-large"), Seq: 10,
 		}}},
-		Timelines: &sliceTimelineIterator{timelines: [][]byte{[]byte("timeline-large")}},
+		Timelines: &sliceTimelineCatalog{timelines: [][]byte{[]byte("timeline-large")}},
 	}
 	var destination bytes.Buffer
 	ref, err := Build(context.Background(), &destination, options, input)
@@ -454,20 +448,20 @@ func validBuildFixture(compression TableCompression) (BuildOptions, BuildInput) 
 	options.SeqHi = 30
 	options.Shard = 4
 	options.Table.Compression = compression
+	options.MaxTimelines = 2
 	events := []Entry{
 		{Key: []byte("timeline-a|event-1"), Value: []byte("event-a1"), Timeline: []byte("timeline-a"), Seq: 10},
 		{Key: []byte("timeline-a|event-2"), Value: []byte("event-a2"), Timeline: []byte("timeline-a"), Seq: 20},
-		{Key: []byte("timeline-b|event-1"), Value: []byte("event-b1"), Timeline: []byte("timeline-b"), Seq: 30},
+		{Key: []byte("timeline-b|event-1"), Value: []byte("event-b1"), Timeline: []byte("timeline-b"), TimelineID: 1, Seq: 30},
 	}
 	heads := []Entry{
-		{Key: []byte("timeline-a|head-1"), Value: []byte("head-a1"), Timeline: []byte("timeline-a"), Seq: 10},
 		{Key: []byte("timeline-a|head-2"), Value: []byte("head-a2"), Timeline: []byte("timeline-a"), Seq: 20},
-		{Key: []byte("timeline-b|head-1"), Value: []byte("head-b1"), Timeline: []byte("timeline-b"), Seq: 30},
+		{Key: []byte("timeline-b|head-1"), Value: []byte("head-b1"), Timeline: []byte("timeline-b"), TimelineID: 1, Seq: 30},
 	}
 	return options, BuildInput{
 		Events:    &sliceEntryIterator{entries: events},
 		Heads:     &sliceEntryIterator{entries: heads},
-		Timelines: &sliceTimelineIterator{timelines: [][]byte{[]byte("timeline-b"), []byte("timeline-a"), []byte("timeline-a")}},
+		Timelines: &sliceTimelineCatalog{timelines: [][]byte{[]byte("timeline-a"), []byte("timeline-b")}},
 	}
 }
 
@@ -851,24 +845,24 @@ func (i *preparedClosingEntries) Next() bool {
 }
 func (i *preparedClosingEntries) Close() error { i.closes++; return i.closeErr }
 
-type preparedClosingTimelines struct {
-	*sliceTimelineIterator
+type preparedCatalogProbe struct {
+	*sliceTimelineCatalog
 	closes   int
 	closeErr error
 	onNext   func()
 }
 
-func (i *preparedClosingTimelines) Next() bool {
+func (i *preparedCatalogProbe) Len() int {
 	if i.onNext != nil {
 		i.onNext()
 	}
-	return i.sliceTimelineIterator.Next()
+	return i.sliceTimelineCatalog.Len()
 }
-func (i *preparedClosingTimelines) Close() error { i.closes++; return i.closeErr }
+func (i *preparedCatalogProbe) Close() error { i.closes++; return i.closeErr }
 
 func TestPrepareFailureCleanup(t *testing.T) {
 	failure := errors.New("injected iterator error")
-	for _, mode := range []string{"success", "nil-context", "nil-events", "preamble", "compression", "filter", "scratch-create", "empty-events", "empty-heads", "empty-timelines", "empty-key", "oversized-key", "oversized-timeline", "order", "sequence", "mismatch", "events-error", "heads-error", "timelines-error", "events-close", "heads-close", "timelines-close", "canceled", "cancel-events", "cancel-heads", "cancel-timelines"} {
+	for _, mode := range []string{"success", "nil-context", "nil-events", "preamble", "compression", "filter", "scratch-create", "empty-events", "empty-heads", "empty-timelines", "empty-key", "oversized-key", "oversized-timeline", "order", "sequence", "mismatch", "events-error", "heads-error", "catalog-hole", "events-close", "heads-close", "canceled", "cancel-events", "cancel-heads", "cancel-timelines"} {
 		t.Run(mode, func(t *testing.T) {
 			opts, input := validBuildFixture(TableCompressionSnappy)
 			dir := t.TempDir()
@@ -877,7 +871,7 @@ func TestPrepareFailureCleanup(t *testing.T) {
 			defer cancel()
 			e := &preparedClosingEntries{sliceEntryIterator: input.Events.(*sliceEntryIterator)}
 			h := &preparedClosingEntries{sliceEntryIterator: input.Heads.(*sliceEntryIterator)}
-			tl := &preparedClosingTimelines{sliceTimelineIterator: input.Timelines.(*sliceTimelineIterator)}
+			tl := &preparedCatalogProbe{sliceTimelineCatalog: input.Timelines.(*sliceTimelineCatalog)}
 			input = BuildInput{e, h, tl}
 			switch mode {
 			case "nil-context":
@@ -914,14 +908,12 @@ func TestPrepareFailureCleanup(t *testing.T) {
 				e.err = failure
 			case "heads-error":
 				h.err = failure
-			case "timelines-error":
-				tl.err = failure
+			case "catalog-hole":
+				tl.timelines[0] = nil
 			case "events-close":
 				e.closeErr = failure
 			case "heads-close":
 				h.closeErr = failure
-			case "timelines-close":
-				tl.closeErr = failure
 			case "canceled":
 				cancel()
 			case "cancel-events":
@@ -940,7 +932,7 @@ func TestPrepareFailureCleanup(t *testing.T) {
 			} else if err == nil || p != nil {
 				t.Fatalf("failed preparation returned %v, %v", p, err)
 			}
-			if (mode != "nil-events" && e.closes != 1) || h.closes != 1 || tl.closes != 1 {
+			if (mode != "nil-events" && e.closes != 1) || h.closes != 1 || tl.closes != 0 {
 				t.Fatalf("iterator close counts: %d/%d/%d", e.closes, h.closes, tl.closes)
 			}
 			requireEmptyScratch(t, dir)
@@ -1038,7 +1030,7 @@ func TestPreparedCleanupClosesDescriptorsOnFailure(t *testing.T) {
 			case "heads":
 				input.Heads.(*sliceEntryIterator).err = io.ErrUnexpectedEOF
 			case "timelines":
-				input.Timelines.(*sliceTimelineIterator).err = io.ErrUnexpectedEOF
+				input.Timelines.(*sliceTimelineCatalog).timelines[0] = nil
 			case "close":
 				input.Events = &preparedClosingEntries{sliceEntryIterator: input.Events.(*sliceEntryIterator), closeErr: io.ErrUnexpectedEOF}
 			}
@@ -1090,11 +1082,15 @@ func TestPrepareScratchBoundsBeforeAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildTableWithin(context.Background(), input.Events, options, opts, "bounded", 1); !errors.Is(err, ErrRunTooLarge) {
+	catalog, err := validateCatalog(context.Background(), input.Timelines, opts.MaxTimelines, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildTableWithin(context.Background(), input.Events, options, opts, "bounded", 1, catalog, observedEvents); !errors.Is(err, ErrRunTooLarge) {
 		t.Fatal("SST limit", err)
 	}
 	requireEmptyScratch(t, opts.ScratchDir)
-	if _, err := buildFilterScratchWithin(context.Background(), opts.RunID, [][]byte{[]byte("a")}, opts.Filter, opts.ScratchDir, 1); !errors.Is(err, ErrRunTooLarge) {
+	if _, err := buildFilterScratchWithin(context.Background(), opts.RunID, catalog, opts.Filter, opts.ScratchDir, 1); !errors.Is(err, ErrRunTooLarge) {
 		t.Fatal("filter limit", err)
 	}
 	requireEmptyScratch(t, opts.ScratchDir)
@@ -1118,4 +1114,14 @@ func TestPrepareScratchBoundsBeforeAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireEmptyScratch(t, opts.ScratchDir)
+}
+
+// Low-level fixture helpers also use the catalog validation path. They do not
+// change any encoded SST/filter input bytes.
+func buildFilterScratch(ctx context.Context, runID [RunIDBytes]byte, timelines [][]byte, options FilterOptions, scratchDir string) (*builtFilter, error) {
+	catalog, err := validateCatalog(ctx, &sliceTimelineCatalog{timelines: timelines}, uint32(len(timelines)), nil)
+	if err != nil {
+		return nil, err
+	}
+	return buildFilterScratchWithin(ctx, runID, catalog, options, scratchDir, MaxRunObjectBytes)
 }

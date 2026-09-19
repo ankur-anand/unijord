@@ -20,7 +20,7 @@ func BenchmarkE01(b *testing.B) {
 				opts, events, heads, timelines := e00Fixture(mib)
 				opts.ScratchDir = b.TempDir()
 				input := func() BuildInput {
-					return BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineIterator{timelines: timelines}}
+					return BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineCatalog{timelines: timelines}}
 				}
 				prepare := func() PreparedRun {
 					p, err := Prepare(context.Background(), opts, input())
@@ -87,7 +87,7 @@ func BenchmarkE01(b *testing.B) {
 				p, err := Prepare(context.Background(), opts, BuildInput{
 					&e00ObservedEntries{sliceEntryIterator: &sliceEntryIterator{entries: events}, observe: observe},
 					&e00ObservedEntries{sliceEntryIterator: &sliceEntryIterator{entries: heads}, observe: observe},
-					&e00ObservedTimelines{sliceTimelineIterator: &sliceTimelineIterator{timelines: timelines}, observe: observe},
+					&e00ObservedTimelines{sliceTimelineCatalog: &sliceTimelineCatalog{timelines: timelines}, observe: observe},
 				})
 				if err != nil {
 					b.Fatal(err)
@@ -168,7 +168,7 @@ func BenchmarkPreparedHeapBound(b *testing.B) {
 				var p PreparedRun
 				prepareHigh = max(prepareHigh, measure(func() {
 					var err error
-					p, err = Prepare(context.Background(), opts, BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineIterator{timelines: timelines}})
+					p, err = Prepare(context.Background(), opts, BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineCatalog{timelines: timelines}})
 					if err != nil {
 						b.Fatal(err)
 					}

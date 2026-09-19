@@ -10,7 +10,6 @@ import (
 	"hash"
 	"io"
 	"os"
-	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/cockroachdb/pebble/v2/bloom"
@@ -67,27 +66,32 @@ type BuildOptions struct {
 	// ScratchDir optionally selects bounded scratch storage for both SSTs and UJTF.
 	// The empty value uses the operating system's temporary directory.
 	ScratchDir string
+	// MaxTimelines is a required admission limit for the borrowed catalog.
+	// Validation uses five bytes per timeline (one mask and one uint32 index),
+	// plus bounded key/metadata storage. There is no implicit sizing default.
+	MaxTimelines uint32
 }
 
 // BuildInput contains independently sorted Events and Heads entries plus the
-// authoritative filter insertion set.
+// stable exact catalog used by both tables and the filter. Every catalog ID
+// must occur in Events and exactly once in Heads. The caller owns the catalog;
+// Prepare does not close it. Its lifetime ends only after Prepare returns.
 type BuildInput struct {
 	Events    EntryIterator
 	Heads     EntryIterator
-	Timelines TimelineIterator
+	Timelines TimelineCatalog
 }
 
 type builtTable struct {
-	file      *os.File
-	path      string
-	length    uint64
-	entries   uint64
-	seqLo     uint64
-	seqHi     uint64
-	minKey    []byte
-	maxKey    []byte
-	hash      [SHA256Bytes]byte
-	timelines map[string]struct{}
+	file    *os.File
+	path    string
+	length  uint64
+	entries uint64
+	seqLo   uint64
+	seqHi   uint64
+	minKey  []byte
+	maxKey  []byte
+	hash    [SHA256Bytes]byte
 }
 
 type builtFilter struct {
@@ -140,8 +144,21 @@ func Build(ctx context.Context, dst io.Writer, opts BuildOptions, input BuildInp
 // neither the input nor the temporary timeline/key validation collections.
 // A successful result owns its scratch until Close; failure returns nil.
 func Prepare(ctx context.Context, opts BuildOptions, input BuildInput) (prepared PreparedRun, err error) {
+	return prepare(ctx, opts, input, nil)
+}
+
+// buildInstrumentation is per-call test instrumentation, never global state.
+// It observes the exact slices passed to SST materialization and filter hashing.
+type buildInstrumentation struct {
+	entry       func(Entry, []byte, []byte, []byte)
+	filter      func(TimelineID, []byte)
+	keyBuffer   func(oldCapacity, newCapacity int)
+	metadataKey func()
+}
+
+func prepare(ctx context.Context, opts BuildOptions, input BuildInput, audit *buildInstrumentation) (prepared PreparedRun, err error) {
 	defer func() {
-		for _, iterator := range []any{input.Events, input.Heads, input.Timelines} {
+		for _, iterator := range []any{input.Events, input.Heads} {
 			if closer, ok := iterator.(io.Closer); ok {
 				err = errors.Join(err, closer.Close())
 			}
@@ -180,8 +197,12 @@ func Prepare(ctx context.Context, opts BuildOptions, input BuildInput) (prepared
 	if err != nil {
 		return nil, err
 	}
+	catalog, err := validateCatalog(ctx, input.Timelines, opts.MaxTimelines, audit)
+	if err != nil {
+		return nil, err
+	}
 
-	events, err := buildTable(ctx, input.Events, writerOptions, opts, "events")
+	events, err := buildTableWithin(ctx, input.Events, writerOptions, opts, "events", MaxRunObjectBytes, catalog, observedEvents)
 	if err != nil {
 		return nil, fmt.Errorf("runfile: build Events SST: %w", err)
 	}
@@ -194,29 +215,20 @@ func Prepare(ctx context.Context, opts BuildOptions, input BuildInput) (prepared
 	}()
 	// Admit scratch before writing it: all three regions together stay within
 	// the format object cap, even when a later validation rejects the run.
-	heads, err := buildTableWithin(ctx, input.Heads, writerOptions, opts, "heads", MaxRunObjectBytes-events.length)
+	heads, err := buildTableWithin(ctx, input.Heads, writerOptions, opts, "heads", MaxRunObjectBytes-events.length, catalog, observedHeads)
 	if err != nil {
 		return nil, fmt.Errorf("runfile: build Heads SST: %w", err)
 	}
 	p.regions[1] = preparedRegion{file: heads.file, path: heads.path}
 
-	timelineSet, timelines, err := collectTimelines(ctx, input.Timelines)
-	if err != nil {
-		return nil, fmt.Errorf("runfile: collect timelines: %w", err)
-	}
-	if !sameStringSet(events.timelines, heads.timelines) {
-		return nil, invalidRunf("Events and Heads timeline sets differ")
-	}
-	if !sameStringSet(events.timelines, timelineSet) {
-		return nil, invalidRunf("table and filter timeline sets differ")
-	}
-	slices.SortFunc(timelines, bytes.Compare)
-
-	filter, err := buildFilterScratchWithin(ctx, opts.RunID, timelines, opts.Filter, opts.ScratchDir, MaxRunObjectBytes-events.length-heads.length)
+	filter, err := buildFilterScratchWithin(ctx, opts.RunID, catalog, opts.Filter, opts.ScratchDir, MaxRunObjectBytes-events.length-heads.length)
 	if err != nil {
 		return nil, fmt.Errorf("runfile: build timeline filter: %w", err)
 	}
 	p.regions[2] = preparedRegion{file: filter.file, path: filter.path}
+	if err := catalog.complete(); err != nil {
+		return nil, err
+	}
 
 	preambleBytes, err := MarshalPreamble(preamble)
 	if err != nil {
@@ -250,8 +262,8 @@ func Prepare(ctx context.Context, opts BuildOptions, input BuildInput) (prepared
 
 	directory := Directory{
 		DirectoryOffset: directoryOffset,
-		MinTimeline:     bytes.Clone(timelines[0]),
-		MaxTimeline:     bytes.Clone(timelines[len(timelines)-1]),
+		MinTimeline:     bytes.Clone(catalog.timeline(catalog.order[0])),
+		MaxTimeline:     bytes.Clone(catalog.timeline(catalog.order[len(catalog.order)-1])),
 		Regions:         []RegionDescriptor{eventsRegion, headsRegion, filterRegion},
 	}
 	directoryBytes, err := MarshalDirectory(directory)
@@ -342,16 +354,12 @@ func tableWriterOptions(options TableOptions) (sstable.WriterOptions, error) {
 	return writerOptions, nil
 }
 
-func buildTable(ctx context.Context, iterator EntryIterator, writerOptions sstable.WriterOptions, opts BuildOptions, name string) (*builtTable, error) {
-	return buildTableWithin(ctx, iterator, writerOptions, opts, name, MaxRunObjectBytes)
-}
-
-func buildTableWithin(ctx context.Context, iterator EntryIterator, writerOptions sstable.WriterOptions, opts BuildOptions, name string, scratchLimit uint64) (_ *builtTable, err error) {
+func buildTableWithin(ctx context.Context, iterator EntryIterator, writerOptions sstable.WriterOptions, opts BuildOptions, name string, scratchLimit uint64, catalog *catalogValidation, source uint8) (_ *builtTable, err error) {
 	file, err := os.CreateTemp(opts.ScratchDir, "unijord-run-"+name+"-*.sst")
 	if err != nil {
 		return nil, err
 	}
-	result := &builtTable{file: file, path: file.Name(), seqLo: ^uint64(0), timelines: make(map[string]struct{})}
+	result := &builtTable{file: file, path: file.Name(), seqLo: ^uint64(0)}
 	succeeded := false
 	defer func() {
 		if !succeeded || err != nil {
@@ -374,6 +382,9 @@ func buildTableWithin(ctx context.Context, iterator EntryIterator, writerOptions
 			return abort(err)
 		}
 		entry := iterator.Entry()
+		if result.entries == ^uint64(0) {
+			return abort(runTooLargef("%s entry count overflows", name))
+		}
 		if len(entry.Key) == 0 {
 			return abort(invalidRunf("%s entry has empty key", name))
 		}
@@ -400,27 +411,49 @@ func buildTableWithin(ctx context.Context, iterator EntryIterator, writerOptions
 				return abort(invalidRunf("%s duplicate-key sequences are not strictly descending", name))
 			}
 		}
-		key := bytes.Clone(entry.Key)
-		internalKey := pebble.MakeInternalKey(key, pebble.SeqNum(entry.Seq), pebble.InternalKeyKindSet)
+		if err := catalog.observe(entry.TimelineID, entry.Timeline, source); err != nil {
+			return abort(err)
+		}
+		// Pebble-v1 Add synchronously encodes these borrowed slices into its
+		// bounded data block. They need not survive the next iterator call.
+		internalKey := pebble.MakeInternalKey(entry.Key, pebble.SeqNum(entry.Seq), pebble.InternalKeyKindSet)
+		if catalog.audit != nil && catalog.audit.entry != nil {
+			catalog.audit.entry(entry, internalKey.UserKey, entry.Value, catalog.timeline(entry.TimelineID))
+		}
 		if err := writer.Raw().Add(internalKey, entry.Value, false); err != nil {
 			return abort(err)
 		}
 		if result.entries == 0 {
-			result.minKey = bytes.Clone(key)
+			result.minKey = bytes.Clone(entry.Key)
+			if catalog.audit != nil && catalog.audit.metadataKey != nil {
+				catalog.audit.metadataKey()
+			}
 		}
-		result.maxKey = bytes.Clone(key)
 		result.seqLo = min(result.seqLo, entry.Seq)
 		result.seqHi = max(result.seqHi, entry.Seq)
 		result.entries++
-		previousKey = key
+		if len(entry.Key) > cap(previousKey) {
+			// Geometric growth stays within the format key limit. Exactly one
+			// reusable validation buffer is live per table, never one per entry.
+			capacity := min(int(MaxTableKeyBytes), max(len(entry.Key), 2*cap(previousKey)))
+			if catalog.audit != nil && catalog.audit.keyBuffer != nil {
+				catalog.audit.keyBuffer(cap(previousKey), capacity)
+			}
+			previousKey = make([]byte, capacity)
+		}
+		previousKey = previousKey[:len(entry.Key)]
+		copy(previousKey, entry.Key)
 		previousSeq = entry.Seq
-		result.timelines[string(entry.Timeline)] = struct{}{}
 	}
 	if err := iterator.Err(); err != nil {
 		return abort(err)
 	}
 	if result.entries == 0 {
 		return abort(invalidRunf("%s table is empty", name))
+	}
+	result.maxKey = bytes.Clone(previousKey)
+	if catalog.audit != nil && catalog.audit.metadataKey != nil {
+		catalog.audit.metadataKey()
 	}
 	if err := writer.Close(); err != nil {
 		return nil, err
@@ -437,49 +470,11 @@ func buildTableWithin(ctx context.Context, iterator EntryIterator, writerOptions
 	return result, nil
 }
 
-func collectTimelines(ctx context.Context, iterator TimelineIterator) (_ map[string]struct{}, timelines [][]byte, err error) {
-	set := make(map[string]struct{})
-	for iterator.Next() {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		timeline := iterator.Timeline()
-		if len(timeline) == 0 {
-			return nil, nil, invalidRunf("filter timeline is empty")
-		}
-		if uint64(len(timeline)) > MaxTimelineBytes {
-			return nil, nil, runTooLargef("filter timeline length %d exceeds %d", len(timeline), MaxTimelineBytes)
-		}
-		key := string(timeline)
-		if _, exists := set[key]; !exists {
-			set[key] = struct{}{}
-			timelines = append(timelines, bytes.Clone(timeline))
-		}
-	}
-	if err := iterator.Err(); err != nil {
-		return nil, nil, err
-	}
-	if len(set) == 0 {
-		return nil, nil, invalidRunf("timeline set is empty")
-	}
-	return set, timelines, nil
-}
-
-// buildFilterScratch constructs the UJTF region in a sparse scratch file. It
+// buildFilterScratchWithin constructs the UJTF region in a sparse scratch file. It
 // keeps only one 64-byte line or one 4 KiB page in memory while setting bits
 // and finalizing page checksums, so the run builder does not retain the whole
 // filter region in heap memory.
-func buildFilterScratch(
-	ctx context.Context,
-	runID [RunIDBytes]byte,
-	timelines [][]byte,
-	options FilterOptions,
-	scratchDir string,
-) (*builtFilter, error) {
-	return buildFilterScratchWithin(ctx, runID, timelines, options, scratchDir, MaxRunObjectBytes)
-}
-
-func buildFilterScratchWithin(ctx context.Context, runID [RunIDBytes]byte, timelines [][]byte, options FilterOptions, scratchDir string, scratchLimit uint64) (_ *builtFilter, err error) {
+func buildFilterScratchWithin(ctx context.Context, runID [RunIDBytes]byte, catalog *catalogValidation, options FilterOptions, scratchDir string, scratchLimit uint64) (_ *builtFilter, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -487,7 +482,7 @@ func buildFilterScratchWithin(ctx context.Context, runID [RunIDBytes]byte, timel
 	if bitsPerKey == 0 {
 		bitsPerKey = DefaultTimelineFilterBitsPerKey
 	}
-	header, err := NewFilterHeader(runID, uint64(len(timelines)), bitsPerKey)
+	header, err := NewFilterHeader(runID, uint64(len(catalog.masks)), bitsPerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -523,12 +518,13 @@ func buildFilterScratchWithin(ctx context.Context, runID [RunIDBytes]byte, timel
 	}
 
 	var line [TimelineFilterLineBytes]byte
-	for i, timeline := range timelines {
+	for _, id := range catalog.order {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if i > 0 && bytes.Equal(timelines[i-1], timeline) {
-			return nil, invalidRunf("timeline filter scratch input contains duplicate timeline %x", timeline)
+		timeline := catalog.timeline(id)
+		if catalog.audit != nil && catalog.audit.filter != nil {
+			catalog.audit.filter(id, timeline)
 		}
 		location, err := locateTimeline(header, timeline)
 		if err != nil {
@@ -553,6 +549,9 @@ func buildFilterScratchWithin(ctx context.Context, runID [RunIDBytes]byte, timel
 			return nil, err
 		}
 		clear(line[:])
+		if err := catalog.observe(id, timeline, observedFilter); err != nil {
+			return nil, err
+		}
 	}
 
 	pageData := make([]byte, TimelineFilterPageDataBytes)
@@ -634,18 +633,6 @@ func writeFileAt(file *os.File, data []byte, offset uint64) error {
 		}
 	}
 	return nil
-}
-
-func sameStringSet(left, right map[string]struct{}) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for value := range left {
-		if _, ok := right[value]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func tableRegion(kind RegionKind, offset uint64, table *builtTable) RegionDescriptor {

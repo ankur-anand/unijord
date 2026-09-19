@@ -58,7 +58,7 @@ func TestVerifyCompleteStreamingUsesOneSuffixAndLocalPebble(t *testing.T) {
 			Key: []byte("timeline-large|head-1"), Value: largeValue,
 			Timeline: []byte("timeline-large"), Seq: options.SeqLo,
 		}}},
-		Timelines: &sliceTimelineIterator{timelines: [][]byte{[]byte("timeline-large")}},
+		Timelines: &sliceTimelineCatalog{timelines: [][]byte{[]byte("timeline-large")}},
 	}
 	var object bytes.Buffer
 	ref, err := Build(context.Background(), &object, options, input)
@@ -217,7 +217,7 @@ func TestVerifyCompleteStreamingExternalSortsExactTimelineSets(t *testing.T) {
 	ref, err := Build(context.Background(), &object, options, BuildInput{
 		Events:    &sliceEntryIterator{entries: events},
 		Heads:     &sliceEntryIterator{entries: heads},
-		Timelines: &sliceTimelineIterator{timelines: timelines},
+		Timelines: &sliceTimelineCatalog{timelines: timelines},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestVerifyCompleteStreamingRejectsSetMismatchBeforeFilterWork(t *testing.T)
 		Heads: &sliceEntryIterator{entries: []Entry{{
 			Key: []byte("timeline-z|head-1"), Value: value, Timeline: []byte("timeline-a"), Seq: options.SeqLo,
 		}}},
-		Timelines: &sliceTimelineIterator{timelines: [][]byte{[]byte("timeline-a")}},
+		Timelines: &sliceTimelineCatalog{timelines: [][]byte{[]byte("timeline-a")}},
 	}
 	var object bytes.Buffer
 	ref, err := Build(context.Background(), &object, options, input)

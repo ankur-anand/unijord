@@ -39,17 +39,17 @@ func (i *e00ObservedEntries) Next() bool {
 }
 
 type e00ObservedTimelines struct {
-	*sliceTimelineIterator
+	*sliceTimelineCatalog
 	observe  func()
 	observed bool
 }
 
-func (i *e00ObservedTimelines) Next() bool {
+func (i *e00ObservedTimelines) Len() int {
 	if !i.observed {
 		i.observe()
 		i.observed = true
 	}
-	return i.sliceTimelineIterator.Next()
+	return i.sliceTimelineCatalog.Len()
 }
 
 type e00ObservedWriter struct {
@@ -71,7 +71,7 @@ func BenchmarkE00Build(b *testing.B) {
 			opts, events, heads, timelines := e00Fixture(mib)
 			opts.ScratchDir = b.TempDir()
 			input := func() BuildInput {
-				return BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineIterator{timelines: timelines}}
+				return BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineCatalog{timelines: timelines}}
 			}
 			ref, err := Build(context.Background(), io.Discard, opts, input())
 			if err != nil {
@@ -113,7 +113,7 @@ func BenchmarkE00Build(b *testing.B) {
 			_, err = Build(context.Background(), dst, opts, BuildInput{
 				&e00ObservedEntries{sliceEntryIterator: &sliceEntryIterator{entries: events}, observe: observe},
 				&e00ObservedEntries{sliceEntryIterator: &sliceEntryIterator{entries: heads}, observe: observe},
-				&e00ObservedTimelines{sliceTimelineIterator: &sliceTimelineIterator{timelines: timelines}, observe: observe},
+				&e00ObservedTimelines{sliceTimelineCatalog: &sliceTimelineCatalog{timelines: timelines}, observe: observe},
 			})
 			observe()
 			if err != nil {
@@ -143,7 +143,7 @@ func BenchmarkE00Verify(b *testing.B) {
 				opts, events, heads, timelines := e00Fixture(mib)
 				opts.ScratchDir = b.TempDir()
 				var object bytes.Buffer
-				ref, err := Build(context.Background(), &object, opts, BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineIterator{timelines: timelines}})
+				ref, err := Build(context.Background(), &object, opts, BuildInput{&sliceEntryIterator{entries: events}, &sliceEntryIterator{entries: heads}, &sliceTimelineCatalog{timelines: timelines}})
 				if err != nil {
 					b.Fatal(err)
 				}

@@ -138,7 +138,7 @@ func BenchmarkRunBuild(b *testing.B) {
 			if _, err := Build(context.Background(), &sizing, options, BuildInput{
 				Events:    &sliceEntryIterator{entries: events},
 				Heads:     &sliceEntryIterator{entries: heads},
-				Timelines: &sliceTimelineIterator{timelines: timelines},
+				Timelines: &sliceTimelineCatalog{timelines: timelines},
 			}); err != nil {
 				b.Fatal(err)
 			}
@@ -150,7 +150,7 @@ func BenchmarkRunBuild(b *testing.B) {
 				if _, err := Build(context.Background(), io.Discard, options, BuildInput{
 					Events:    &sliceEntryIterator{entries: events},
 					Heads:     &sliceEntryIterator{entries: heads},
-					Timelines: &sliceTimelineIterator{timelines: timelines},
+					Timelines: &sliceTimelineCatalog{timelines: timelines},
 				}); err != nil {
 					b.Fatal(err)
 				}
@@ -159,6 +159,32 @@ func BenchmarkRunBuild(b *testing.B) {
 			b.ReportMetric(float64(runBytes), "run_bytes/op")
 		})
 	}
+}
+
+// BenchmarkRunBuild1MTimelineSets retains its historical name for comparison.
+// Since E02, the production writer validates all three observations using a
+// borrowed catalog, integer ordering index, and one source-mask array.
+// Fixture construction is intentionally outside the timed allocation window.
+func BenchmarkRunBuild1MTimelineSets(b *testing.B) {
+	const timelineCount = 1_000_000
+	options, events, heads, timelines := benchmarkRunFixture(timelineCount, 32)
+	b.ReportAllocs()
+	b.SetBytes(int64(timelineCount * 2 * 32))
+	var destination benchmarkCountingWriter
+	b.ResetTimer()
+	for range b.N {
+		destination.bytes = 0
+		if _, err := Build(context.Background(), &destination, options, BuildInput{
+			Events:    &sliceEntryIterator{entries: events},
+			Heads:     &sliceEntryIterator{entries: heads},
+			Timelines: &sliceTimelineCatalog{timelines: timelines},
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(destination.bytes), "run_bytes/op")
+	b.ReportMetric(timelineCount, "timelines/op")
 }
 
 func BenchmarkRunRecover(b *testing.B) {
@@ -269,6 +295,7 @@ func benchmarkRunFixture(timelineCount, valueBytes int) (BuildOptions, []Entry, 
 	options.SeqHi = uint64(timelineCount)
 	options.Shard = 4
 	options.Table.Compression = TableCompressionSnappy
+	options.MaxTimelines = uint32(timelineCount)
 
 	value := bytes.Repeat([]byte{'v'}, valueBytes)
 	events := make([]Entry, timelineCount)
@@ -279,16 +306,18 @@ func benchmarkRunFixture(timelineCount, valueBytes int) (BuildOptions, []Entry, 
 		sequence := uint64(index + 1)
 		timelines[index] = timeline
 		events[index] = Entry{
-			Key:      []byte(fmt.Sprintf("%s|event-0", timeline)),
-			Value:    value,
-			Timeline: timeline,
-			Seq:      sequence,
+			TimelineID: TimelineID(index),
+			Key:        []byte(fmt.Sprintf("%s|event-0", timeline)),
+			Value:      value,
+			Timeline:   timeline,
+			Seq:        sequence,
 		}
 		heads[index] = Entry{
-			Key:      []byte(fmt.Sprintf("%s|head-0", timeline)),
-			Value:    value,
-			Timeline: timeline,
-			Seq:      sequence,
+			TimelineID: TimelineID(index),
+			Key:        []byte(fmt.Sprintf("%s|head-0", timeline)),
+			Value:      value,
+			Timeline:   timeline,
+			Seq:        sequence,
 		}
 	}
 	return options, events, heads, timelines
@@ -301,7 +330,7 @@ func benchmarkBuiltRun(b *testing.B, timelineCount, valueBytes int) (Ref, []byte
 	ref, err := Build(context.Background(), &object, options, BuildInput{
 		Events:    &sliceEntryIterator{entries: events},
 		Heads:     &sliceEntryIterator{entries: heads},
-		Timelines: &sliceTimelineIterator{timelines: timelines},
+		Timelines: &sliceTimelineCatalog{timelines: timelines},
 	})
 	if err != nil {
 		b.Fatal(err)

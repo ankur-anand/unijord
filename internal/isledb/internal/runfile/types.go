@@ -27,31 +27,42 @@ type Trailer struct {
 	RunID           [RunIDBytes]byte
 }
 
+// TimelineID identifies one distinct exact timeline in a stable catalog.
+// IDs are dense: [0, Len()). Their order need not be timeline byte order.
+type TimelineID uint32
+
+// TimelineCatalog borrows caller-owned exact timeline bytes. Len, the ID
+// mapping, and all returned bytes must remain immutable until Prepare returns,
+// including while it closes entry iterators. Each ID has one distinct nonempty
+// value. Runfile validates exact identities and entry membership without taking
+// ownership or interning. The caller must enforce the immutable lifetime;
+// unsynchronized mutation is a data race, not a supported validation input.
+// Implementations need only handle IDs in [0, Len()).
+type TimelineCatalog interface {
+	Len() int
+	Timeline(TimelineID) []byte
+}
+
 // Entry is one point entry supplied to an embedded SST builder. Timeline is
 // the exact canonical timeline identity classified by the logical layer. The
 // builder never attempts to infer a timeline from Key.
 type Entry struct {
-	Key      []byte
-	Value    []byte
-	Timeline []byte
-	Seq      uint64
+	TimelineID TimelineID
+	Key        []byte
+	Value      []byte
+	Timeline   []byte
+	Seq        uint64
 }
 
 // EntryIterator supplies entries in Pebble internal-key order: user keys in
 // ascending byte order and sequences for equal user keys in descending order.
-// Key, Value, and Timeline remain owned by the iterator and need only remain
-// valid until the next call to Next.
+// Key and Value remain owned by the iterator and need only remain valid until
+// the next call to Next. Timeline must equal the stable catalog value for
+// TimelineID; it may reference the catalog directly. Iterators must not mutate
+// catalog storage, including in Close. Prepare never retains Entry slices.
 type EntryIterator interface {
 	Next() bool
 	Entry() Entry
-	Err() error
-}
-
-// TimelineIterator supplies the exact timeline insertion set for the run-level
-// filter. Duplicates are harmless and are removed by the builder.
-type TimelineIterator interface {
-	Next() bool
-	Timeline() []byte
 	Err() error
 }
 
