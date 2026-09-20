@@ -3,21 +3,26 @@ package blobstore
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	azblobblob "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -34,17 +39,20 @@ var (
 	ErrNotFound           = errors.New("object not found")
 	ErrPreconditionFailed = errors.New("precondition failed")
 	ErrBucketNameRequired = errors.New("bucket name required for cloud providers")
+	// ErrIndeterminate means publication may have succeeded. Reconcile the key;
+	// never infer absence or delete it in response to this error.
+	ErrIndeterminate = errors.New("object publication indeterminate")
 )
 
 const (
-	SSTBucketBits   = 12
-	SSTBucketHexLen = 3
-	SSTBucketCount  = 1 << SSTBucketBits
+	runBucketBits   = 12
+	runBucketHexLen = 3
+	runBucketCount  = 1 << runBucketBits
 )
 
-const sstBucketMask uint32 = SSTBucketCount - 1
+const runBucketMask uint32 = runBucketCount - 1
 
-var sstBucketTable = crc32.MakeTable(crc32.Castagnoli)
+var runBucketTable = crc32.MakeTable(crc32.Castagnoli)
 
 type BatchDeleteError struct {
 	Failed map[string]error
@@ -69,6 +77,10 @@ type Store struct {
 	prefix           string
 	scratchNamespace string
 	owns             bool
+	file             *fileStore
+	memory           bool
+	closed           atomic.Bool
+	localAbortSafe   bool
 }
 
 func Open(ctx context.Context, bucketURL, prefix string) (*Store, error) {
@@ -85,9 +97,23 @@ func Open(ctx context.Context, bucketURL, prefix string) (*Store, error) {
 		}
 	}
 
-	bkt, err := blob.OpenBucket(ctx, bucketURL)
+	openURL := bucketURL
+	if parsed.Scheme == "file" {
+		q := parsed.Query()
+		q.Set("no_tmp_dir", "true")
+		parsed.RawQuery = q.Encode()
+		openURL = parsed.String()
+	}
+	bkt, err := blob.OpenBucket(ctx, openURL)
 	if err != nil {
 		return nil, fmt.Errorf("open bucket %q: %w", bucketURL, err)
+	}
+	var files *fileStore
+	if parsed.Scheme == "file" {
+		files, err = fileStoreFromURL(parsed)
+		if err != nil {
+			return nil, errors.Join(err, bkt.Close())
+		}
 	}
 	return &Store{
 		bucket:           bkt,
@@ -95,11 +121,15 @@ func Open(ctx context.Context, bucketURL, prefix string) (*Store, error) {
 		prefix:           strings.TrimSuffix(prefix, "/"),
 		scratchNamespace: localScratchNamespace(bucketURL, prefix),
 		owns:             true,
+		file:             files,
+		memory:           parsed.Scheme == "mem",
+		localAbortSafe:   parsed.Scheme == "file" || parsed.Scheme == "mem",
 	}, nil
 }
 
 // New wraps an existing bucket. For cloud providers, bucketName is required
-// for CAS writes; use Open() when possible.
+// for CAS writes; use Open() when possible. File create-only writes require
+// Open: fileblob does not expose a wrapped bucket's directory through As.
 func New(bkt *blob.Bucket, bucketName, prefix string) *Store {
 	identity := bucketName
 	if identity == "" {
@@ -125,6 +155,7 @@ func localScratchNamespace(storageIdentity, prefix string) string {
 
 func (s *Store) Close() error {
 	if s.owns && s.bucket != nil {
+		s.closed.Store(true)
 		return s.bucket.Close()
 	}
 	return nil
@@ -153,25 +184,10 @@ func (s *Store) path(parts ...string) string {
 	return path.Join(append([]string{s.prefix}, parts...)...)
 }
 
-func (s *Store) SSTPath(id string) string {
-	return s.path("sstable", SSTBucket(id), id)
-}
-
-func (s *Store) ChangeBatchPath(id string) string {
-	return s.path("changes", ChangeBatchBucket(id), id)
-}
-
-// SSTBucket returns the deterministic object-store bucket for an SST ID.
-// The bucket is part of the object layout; changing it changes every SST key.
-func SSTBucket(id string) string {
-	sum := crc32.Checksum([]byte(id), sstBucketTable)
-	return fmt.Sprintf("%0*x", SSTBucketHexLen, sum&sstBucketMask)
-}
-
-// ChangeBatchBucket returns the deterministic object-store bucket for a change
-// batch ID. It intentionally uses the same CRC32C layout as SSTBucket.
-func ChangeBatchBucket(id string) string {
-	return SSTBucket(id)
+// RunBucket returns the deterministic object-store bucket for a run ID.
+func RunBucket(id string) string {
+	sum := crc32.Checksum([]byte(id), runBucketTable)
+	return fmt.Sprintf("%0*x", runBucketHexLen, sum&runBucketMask)
 }
 
 func (s *Store) ManifestPath() string {
@@ -357,45 +373,205 @@ func (s *Store) HasImmutableDatabaseObjects(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) Write(ctx context.Context, key string, data []byte) (Attributes, error) {
-	if _, err := s.WriteReader(ctx, key, bytes.NewReader(data), nil); err != nil {
-		return Attributes{}, err
-	}
-	attr, err := s.bucket.Attributes(ctx, key)
-	if err != nil {
-		return Attributes{}, err
-	}
-	gen := generationFromAttrs(attr)
-	return Attributes{
-		Size:       attr.Size,
-		ETag:       s.stableETag(attr),
-		Generation: gen,
-	}, nil
+	return s.WriteReader(ctx, key, bytes.NewReader(data), nil)
 }
 
+// WriteReader streams with bounded copy memory. The caller owns r and must make
+// a blocked Read interruptible if prompt cancellation during that Read is needed.
+// An error containing ErrIndeterminate requires reconciliation of the key.
 func (s *Store) WriteReader(ctx context.Context, key string, r io.Reader, opts *blob.WriterOptions) (Attributes, error) {
+	return s.writeReader(ctx, key, r, opts, s.Attributes)
+}
+
+// afterWrite may use the immutable identity returned by a bounded provider
+// upload. All writers still pass through the repaired copy/cancel/Close path.
+func (s *Store) writeReader(ctx context.Context, key string, r io.Reader, opts *blob.WriterOptions, afterWrite func(context.Context, string) (Attributes, error)) (Attributes, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return Attributes{}, err
+	}
+	if s.closed.Load() {
+		return Attributes{}, errors.New("blobstore is closed")
+	}
 	if opts == nil {
 		opts = &blob.WriterOptions{
 			ContentType: "application/octet-stream",
 		}
 	}
-
-	w, err := s.bucket.NewWriter(ctx, key, opts)
-	if err != nil {
-		return Attributes{}, s.mapError(err)
+	if s.file != nil && opts.IfNotExist {
+		return s.writeFile(ctx, cancel, key, r, opts)
+	}
+	var fileInfo os.FileInfo
+	isFile := s.bucket.As(&fileInfo)
+	if isFile && opts.IfNotExist {
+		// fileblob's As API does not expose its root directory. Do not silently
+		// use its unsafe writer for wrapped file buckets.
+		return Attributes{}, errors.New("file writes require a Store constructed with Open")
 	}
 
-	written, err := io.Copy(w, r)
+	// CDK's ContentMD5 mismatch path discards the driver's Close error. Verify
+	// here so abort always passes through the same error-preserving lifecycle.
+	writerOpts := *opts
+	writerOpts.ContentMD5 = nil
+	var temp *os.File
+	if isFile || len(opts.ContentMD5) != 0 {
+		writerOpts.BeforeWrite = func(as func(any) bool) error {
+			if isFile {
+				as(&temp)
+			}
+			// Keep native request checksums and caller BeforeWrite behavior.
+			// Only CDK's outer (error-discarding) verification is replaced.
+			initialized := false
+			withChecksum := func(v any) bool {
+				if !as(v) {
+					return false
+				}
+				if len(opts.ContentMD5) != 0 && !initialized {
+					switch p := v.(type) {
+					case **s3.PutObjectInput:
+						encoded := base64.StdEncoding.EncodeToString(opts.ContentMD5)
+						(*p).ContentMD5 = &encoded
+						initialized = true
+					case **storage.Writer:
+						(*p).MD5 = opts.ContentMD5
+						initialized = true
+					case **azblob.UploadStreamOptions:
+						(*p).HTTPHeaders.BlobContentMD5 = opts.ContentMD5
+						initialized = true
+					}
+				}
+				return true
+			}
+			if opts.BeforeWrite != nil {
+				if err := opts.BeforeWrite(withChecksum); err != nil {
+					return err
+				}
+			}
+			if len(opts.ContentMD5) != 0 && !initialized {
+				var s3Input *s3.PutObjectInput
+				var gcsWriter *storage.Writer
+				var azureOpts *azblob.UploadStreamOptions
+				if !withChecksum(&s3Input) && !withChecksum(&gcsWriter) {
+					withChecksum(&azureOpts)
+				}
+			}
+			return nil
+		}
+	}
+	var responseCleanup *s3UploadResponseCleanup
+	if s.providerKind() == providerS3 {
+		responseCleanup = &s3UploadResponseCleanup{}
+		writerOpts.BeforeWrite = responseCleanup.beforeWrite(writerOpts.BeforeWrite)
+	}
+	w, err := s.bucket.NewWriter(ctx, key, &writerOpts)
 	if err != nil {
-		_ = w.Close()
-		return Attributes{}, err
+		if temp != nil {
+			err = errors.Join(err, temp.Close(), removeFileTemp(temp.Name()))
+		}
+		return Attributes{}, s.preserveMappedError(err)
 	}
 
+	wc := io.WriteCloser(w)
+	if isFile {
+		wc = &fileAbortCleanup{WriteCloser: w, temp: &temp}
+	}
+	copyErr := copyAndClose(ctx, cancel, wc, r, opts.ContentMD5, s.localAbortSafe || isFile)
+	if responseCleanup != nil {
+		if cleanupErr := responseCleanup.err(); cleanupErr != nil {
+			copyErr = errors.Join(copyErr, cleanupErr)
+		}
+	}
+	if err := copyErr; err != nil {
+		// Preserve the original error as mapError historically returns only a
+		// sentinel for several provider errors.
+		return Attributes{}, s.preserveMappedError(err)
+	}
+	attrs, err := afterWrite(ctx, key)
+	if err != nil {
+		return Attributes{}, errors.Join(ErrIndeterminate, err)
+	}
+	return attrs, nil
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+type contextWriter struct {
+	ctx context.Context
+	w   io.Writer
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.w.Write(p)
+}
+
+func copyAndClose(ctx context.Context, cancel context.CancelFunc, w io.WriteCloser, r io.Reader, expectedMD5 []byte, localAbortSafe bool) error {
+	var dst io.Writer = w
+	h := md5.New()
+	if len(expectedMD5) != 0 {
+		dst = io.MultiWriter(w, h)
+	}
+	_, err := io.Copy(contextWriter{ctx, dst}, contextReader{ctx, r})
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil && len(expectedMD5) != 0 && !bytes.Equal(h.Sum(nil), expectedMD5) {
+		err = fmt.Errorf("%w: ContentMD5 mismatch", ErrPreconditionFailed)
+	}
+	if err != nil {
+		cancel() // Abort BEFORE Close: Close otherwise commits buffered bytes.
+		closeErr := w.Close()
+		// Only the inspected local drivers certify absence on cancellation.
+		// A remote cancellation can race a server-side commit; reconcile it.
+		if !localAbortSafe || closeErr == nil || !onlyCancellation(closeErr) {
+			return errors.Join(err, closeErr, ErrIndeterminate)
+		}
+		return errors.Join(err, closeErr)
+	}
 	if err := w.Close(); err != nil {
-		return Attributes{}, s.mapError(err)
+		if gcerrors.Code(err) == gcerrors.FailedPrecondition || errors.Is(err, ErrPreconditionFailed) {
+			return err
+		}
+		return errors.Join(ErrIndeterminate, err)
 	}
-	return Attributes{
-		Size: written,
-	}, nil
+	return nil
+}
+
+// Do not mistake errors.Join(context.Canceled, cleanupFailure) for a clean abort.
+func onlyCancellation(err error) bool {
+	if many, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range many.Unwrap() {
+			if !onlyCancellation(e) {
+				return false
+			}
+		}
+		return true
+	}
+	if one, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyCancellation(one.Unwrap())
+	}
+	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+func (s *Store) preserveMappedError(err error) error {
+	mapped := s.mapError(err)
+	if errors.Is(err, mapped) {
+		return err
+	}
+	return errors.Join(err, mapped)
 }
 
 func (s *Store) WriteIfMatch(ctx context.Context, key string, data []byte, ifMatch string) (Attributes, error) {
